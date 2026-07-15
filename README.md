@@ -19,6 +19,7 @@ xAI / Grok **账号自动注册工具包**。
 | 临时邮箱 | **Cloudflare Temp Email** · **DuckMail** · **YYDS Mail**（见下表） |
 | SSO 落盘 | `邮箱----密码----sso` → `accounts_*.txt`，可选写入号池 |
 | CPA / OIDC | 协议优先 mint → `cpa_auths/xai-*.json` → **grok-4.5** |
+| 可选反代 | `deploy/cpa_gateway` + Nginx 模板：多 key 配额暴露 CLIProxy（见下） |
 | 多入口 | Web 控制台 · GUI · CLI · backfill 脚本 |
 
 ---
@@ -139,6 +140,20 @@ python grok_register_ttk.py --cli
 
 ---
 
+## 可选：反代与 CPA 网关
+
+注册成功并 mint 出 `xai-*.json` 后，可用 **CLIProxyAPI** 提供 OpenAI 兼容接口。  
+本仓库 `deploy/` 提供可选参考：
+
+- **cpa-gateway**：多客户端 key + 请求配额，转发到本机 CLIProxy  
+- **Nginx 片段**：公网 `/cpa/` → gateway；可选注册 Web 面板反代  
+
+完整步骤与 curl / SDK 示例：[`docs/reverse-proxy.md`](./docs/reverse-proxy.md) · 文件索引：[`deploy/README.md`](./deploy/README.md)。
+
+> 注册机核心**不依赖** `deploy/`。凭证勿混用（SSO ≠ CPA key）。
+
+---
+
 ## 产物
 
 | 路径 | 内容 |
@@ -173,10 +188,12 @@ grok-regkit/
   browser/  protocol/      # hybrid 依赖
   cpa_xai/  cpa_export.py  # OIDC mint
   web/                     # FastAPI 控制台
+  deploy/                  # 可选：cpa-gateway + Nginx 模板
   scripts/                 # backfill 等
   docs/
     项目介绍.md
     mail-providers.md      # 邮箱适配说明
+    reverse-proxy.md       # 反代 / CPA 网关用法
     sso-cpa/               # SSO / CPA 适配
   config.example.json
 ```
@@ -190,6 +207,7 @@ grok-regkit/
 | [docs/项目介绍.md](./docs/项目介绍.md) | 中文总览（亮点、模式、速度说明） |
 | [docs/mail-providers.md](./docs/mail-providers.md) | 邮箱适配与扩展参考 |
 | [docs/sso-cpa/](./docs/sso-cpa/) | SSO ≠ OIDC · 模式矩阵 · 配置 |
+| [docs/reverse-proxy.md](./docs/reverse-proxy.md) | 可选反代 · cpa-gateway · curl 示例 |
 | [LOCAL_RUN.md](./LOCAL_RUN.md) | 本机运行细节 |
 | [OPEN_SOURCE.md](./OPEN_SOURCE.md) | 开源快照维护 |
 | [SECURITY.md](./SECURITY.md) | 密钥与安全 |

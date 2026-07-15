@@ -29,3 +29,5 @@ Hybrid 协议注册常先拿到 wrapper，应转为 session 再落盘 / 入池 /
 - 用 CPA Key 打号池 → 错误
 - 注册成功 ≠ 4.5 可用（还要 mint + CPA 加载）
 - free OIDC 导出成功 ≠ 一定能 chat（上游权限不保证）
+
+公网暴露 CLIProxy / 多 key 配额网关：见 [docs/reverse-proxy.md](../reverse-proxy.md) 与 [deploy/](../../deploy/)。
