@@ -11,6 +11,8 @@ Changelog:
 - 2026-07-17: 接入公共临时邮箱 provider（tempmail_io / linshiyouxiang / boomlify / tempmail_org） + mailtm / tempmail_lol / tempmail_plus，
   与 cloudflare/duckmail/yyds 共用 email_provider 单选开关；建箱与收验证码走 temp_email_public_providers。
 """
+# update: 2026-07-17 detailed email logs + clear log fix
+
 
 import threading
 import datetime
@@ -2836,34 +2838,58 @@ def get_email_provider():
     return config.get("email_provider", "duckmail")
 
 
-def get_email_and_token(api_key=None):
+def get_email_and_token(api_key=None, log_callback=None):
+    """Create one mailbox for current email_provider with detailed logs."""
     provider = get_email_provider()
+    provider_key = str(provider or "").strip().lower()
+
+    def _lg(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    _lg(f"[*] 准备获取邮箱 | 当前 email_provider={provider_key}")
+
     if public_email is not None and public_email.is_public_provider(provider):
         proxies = get_proxies() or None
         try:
-            return public_email.create_public_email(
+            email, token = public_email.create_public_email(
                 provider,
                 proxies=proxies,
+                log_callback=log_callback,
             )
+            return email, token
         except Exception as exc:
             # Match http_get/http_post: dead local proxy falls back to direct.
             if proxies and is_proxy_connection_error(exc):
+                _lg(f"[!] 公共邮箱经代理失败，改直连重试: {exc}")
                 return public_email.create_public_email(
                     provider,
                     proxies=None,
+                    log_callback=log_callback,
                 )
             raise
-    if provider == "yyds":
-        return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
-    if provider == "cloudflare":
+
+    if provider_key == "yyds":
+        _lg("[*] 邮箱来源: YYDS 付费邮箱 API")
+        _lg("[*] 获取方式: 调用 YYDS 接口创建临时地址")
+        email, token = yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
+        _lg(f"[+] YYDS 邮箱获取成功: {email}")
+        return email, token
+
+    if provider_key == "cloudflare":
         api_base = get_cloudflare_api_base()
         if not api_base:
             raise Exception("Cloudflare API Base 未配置")
+        _lg(f"[*] 邮箱来源: Cloudflare Worker 自建临时邮箱")
+        _lg(f"[*] 调用接口: {api_base}")
         try:
             # cloudflare_temp_email 专用模式
-            return cloudflare_create_temp_address(api_base)
+            _lg("[*] Cloudflare 步骤: 专用 create_temp_address")
+            email, token = cloudflare_create_temp_address(api_base)
+            _lg(f"[+] Cloudflare 邮箱获取成功: {email}")
+            return email, token
         except Exception as primary_exc:
-            # 兜底回退到 Mail.tm 风格
+            _lg(f"[!] Cloudflare 专用建箱失败，回退 Mail.tm 风格: {primary_exc}")
             key = api_key or get_cloudflare_api_key()
             domains = cloudflare_get_domains(api_base, api_key=key)
             if not domains:
@@ -2876,23 +2902,32 @@ def get_email_and_token(api_key=None):
             username = generate_username(10)
             address = f"{username}@{domain}"
             password = secrets.token_urlsafe(12)
+            _lg(f"[*] Cloudflare 回退建箱: {address} @ {api_base}")
             cloudflare_create_account(
                 api_base, address, password, api_key=key, expires_in=0
             )
             token = cloudflare_get_token(api_base, address, password, api_key=key)
             if not token:
                 raise Exception("获取 Cloudflare 邮箱 token 失败")
+            _lg(f"[+] Cloudflare 回退邮箱获取成功: {address}")
             return address, token
+
+    # duckmail default
     key = api_key or get_duckmail_api_key()
+    _lg("[*] 邮箱来源: DuckMail")
+    _lg("[*] 获取方式: pick_domain + create_account + get_token")
     domain = pick_domain(api_key=key)
     username = generate_username(10)
     address = f"{username}@{domain}"
     password = secrets.token_urlsafe(12)
+    _lg(f"[*] DuckMail 建箱: {address}")
     create_account(address, password, api_key=key, expires_in=0)
     token = get_token(address, password)
     if not token:
-        raise Exception("鑾峰彇 DuckMail token 澶辫触")
+        raise Exception("获取 DuckMail token 失败")
+    _lg(f"[+] DuckMail 邮箱获取成功: {address}")
     return address, token
+
 
 
 def get_oai_code(
@@ -3856,11 +3891,11 @@ return !!(givenInput && familyInput && passwordInput);
 
 def fill_email_and_submit(timeout=45, log_callback=None, cancel_callback=None):
     raise_if_cancelled(cancel_callback)
-    email, dev_token = get_email_and_token()
+    email, dev_token = get_email_and_token(log_callback=log_callback)
     if not email or not dev_token:
         raise Exception("获取邮箱失败")
     if log_callback:
-        log_callback(f"[*] 已创建邮箱: {email}")
+        log_callback(f"[+] 注册将使用邮箱: {email} | provider={get_email_provider()}")
     deadline = time.time() + timeout
     last_diag_time = 0
     last_reclick_time = 0

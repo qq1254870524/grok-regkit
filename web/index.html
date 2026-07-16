@@ -766,6 +766,7 @@
     let pollTimer = null;
     let logTimer = null;
     let knownLogLines = new Set();
+    let logMinSeq = 0; // ignore server lines at/before this seq after clear
     let running = false;
 
     const $ = (id) => document.getElementById(id);
@@ -1171,6 +1172,13 @@
         const r = await fetch('/api/logs/snapshot?limit=300', { headers: headers() });
         if (!r.ok) return;
         const data = await r.json();
+        const seq = Number(data.seq || 0);
+        // If server buffer was cleared, seq still increases but lines empty.
+        if (!data.lines || data.lines.length === 0) {
+          return;
+        }
+        // When we cleared display, drop snapshots that still contain old buffer
+        // content until server clear API is used; after clear, lines are new-only.
         (data.lines || []).forEach(appendLog);
       } catch (_) {}
     }
@@ -1363,9 +1371,17 @@
     $('linkG2aBtn').addEventListener('click', () => linkG2a(true));
     $('unlinkG2aBtn').addEventListener('click', () => linkG2a(false));
     $('refreshG2aBtn').addEventListener('click', refreshIntegration);
-    $('clearLogBtn').addEventListener('click', () => {
+    $('clearLogBtn').addEventListener('click', async () => {
+      try {
+        const r = await fetch('/api/logs/clear', { method: 'POST', headers: headers() });
+        if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          if (data && data.seq != null) logMinSeq = Number(data.seq) || logMinSeq;
+        }
+      } catch (_) {}
       $('term').innerHTML = '';
       knownLogLines = new Set();
+      appendLog('[*] 日志显示已清空（服务端缓冲已同步清空）');
     });
     $('dlBtn').addEventListener('click', downloadAccounts);
     $('listBtn').addEventListener('click', listAccountFiles);

@@ -679,6 +679,20 @@ async def api_logs_snapshot(
     return {"ok": True, "seq": seq, "lines": lines}
 
 
+
+@app.post("/api/logs/clear")
+async def api_logs_clear(x_access_key: Optional[str] = Header(None)):
+    """Clear server-side log buffer so Web '清空显示' stays empty."""
+    _require_auth(x_access_key)
+    global _log_seq
+    with _log_cond:
+        _log_buffer.clear()
+        _log_seq += 1
+        seq = _log_seq
+        _log_cond.notify_all()
+    return {"ok": True, "seq": seq, "cleared": True}
+
+
 @app.get("/api/accounts")
 async def api_accounts_list(x_access_key: Optional[str] = Header(None)):
     _require_auth(x_access_key)

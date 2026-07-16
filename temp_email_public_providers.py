@@ -12,6 +12,8 @@ Changelog:
 - 2026-07-17 v3: Survey + integrate more public temp mails that pass live smoke:
   mail.tm (mailtm), tempmail.lol v2, tempmail.plus (mailto.plus free inbox).
   Documented other candidates and live status in docs/public-temp-email-catalog.md.
+- 2026-07-17 v4: Detailed acquisition logs (provider/site/API/proxy/steps/result email);
+  richer create_public_email / get_public_code / per-provider step logs for Web UI.
 """
 
 from __future__ import annotations
@@ -88,6 +90,37 @@ _UA = (
 def _log(cb: LogCb, msg: str) -> None:
     if cb:
         cb(msg)
+
+
+def _proxy_desc(proxies: Optional[dict] = None) -> str:
+    """Human-readable proxy summary for logs (no password)."""
+    if not proxies:
+        return "直连(无代理)"
+    raw = str(proxies.get("https") or proxies.get("http") or proxies.get("all") or "").strip()
+    if not raw:
+        return "直连(无代理)"
+    try:
+        if "://" in raw:
+            scheme, rest = raw.split("://", 1)
+            if "@" in rest:
+                rest = rest.split("@", 1)[1]
+            return f"{scheme}://{rest}"
+        if "@" in raw:
+            return raw.split("@", 1)[1]
+        return raw
+    except Exception:
+        return "(代理已配置)"
+
+
+def _provider_meta(key: str) -> Dict[str, str]:
+    info = PUBLIC_PROVIDERS.get(key) or {}
+    return {
+        "key": key,
+        "label": str(info.get("label") or key),
+        "site": str(info.get("site") or ""),
+        "api": str(info.get("api") or ""),
+        "method": str(info.get("method") or "HTTP API"),
+    }
 
 
 def _raise_if_cancelled(cancel_callback: CancelCb) -> None:
@@ -223,11 +256,14 @@ def tempmail_io_create(proxies: Optional[dict] = None, log_callback: LogCb = Non
             "Content-Type": "application/json",
         }
     )
+    url = f"{TEMPMAIL_IO_BASE}/email/new"
+    _log(log_callback, f"[*] temp-mail.io 步骤1: POST {url} 出口={_proxy_desc(proxies)}")
     resp = s.post(
-        f"{TEMPMAIL_IO_BASE}/email/new",
+        url,
         json={"min_name_length": 10, "max_name_length": 12},
         timeout=30,
     )
+    _log(log_callback, f"[*] temp-mail.io 步骤1响应: HTTP {resp.status_code}")
     if resp.status_code >= 400:
         raise Exception(f"temp-mail.io 创建邮箱失败 HTTP {resp.status_code}: {resp.text[:200]}")
     data = resp.json()
@@ -235,7 +271,7 @@ def tempmail_io_create(proxies: Optional[dict] = None, log_callback: LogCb = Non
     tok = str(data.get("token") or "").strip()
     if not email or not tok:
         raise Exception(f"temp-mail.io 返回异常: {data}")
-    _log(log_callback, f"[*] 已创建 temp-mail.io 邮箱: {email}")
+    _log(log_callback, f"[+] temp-mail.io 建箱成功: {email} (来源站 https://temp-mail.io/zh)")
     return email, _token_pack("tempmail_io", email=email, token=tok)
 
 
@@ -313,7 +349,10 @@ def linshi_create(proxies: Optional[dict] = None, log_callback: LogCb = None) ->
             "Referer": f"{LINSHI_BASE}/",
         }
     )
-    resp = s.get(f"{LINSHI_BASE}/", timeout=30)
+    home = f"{LINSHI_BASE}/"
+    _log(log_callback, f"[*] 临时邮箱.net 步骤1: GET 首页 {home} 出口={_proxy_desc(proxies)}")
+    resp = s.get(home, timeout=30)
+    _log(log_callback, f"[*] 临时邮箱.net 步骤1响应: HTTP {resp.status_code}")
     if resp.status_code >= 400:
         raise Exception(f"临时邮箱.net 打开首页失败 HTTP {resp.status_code}")
     html = resp.text or ""
@@ -496,7 +535,10 @@ def boomlify_create(proxies: Optional[dict] = None, log_callback: LogCb = None) 
             "Content-Type": "application/json",
         }
     )
-    init_resp = s.post(f"{BOOMLIFY_BASE}/guest/init", json={}, timeout=30)
+    init_url = f"{BOOMLIFY_BASE}/guest/init"
+    _log(log_callback, f"[*] Boomlify 步骤1: POST guest/init {init_url} 出口={_proxy_desc(proxies)}")
+    init_resp = s.post(init_url, json={}, timeout=30)
+    _log(log_callback, f"[*] Boomlify 步骤1响应: HTTP {init_resp.status_code}")
     if init_resp.status_code >= 400:
         raise Exception(f"Boomlify guest/init 失败 HTTP {init_resp.status_code}: {init_resp.text[:200]}")
     init_data = _boomlify_decode(init_resp)
@@ -826,7 +868,10 @@ def tempmail_org_get_code(
 
 def mailtm_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
     s = _session(proxies)
-    r = s.get(f"{MAILTM_BASE}/domains", timeout=25)
+    domains_url = f"{MAILTM_BASE}/domains"
+    _log(log_callback, f"[*] mail.tm 步骤1: GET 可用域名 {domains_url} 出口={_proxy_desc(proxies)}")
+    r = s.get(domains_url, timeout=25)
+    _log(log_callback, f"[*] mail.tm 步骤1响应: HTTP {r.status_code}")
     if r.status_code >= 400:
         raise Exception(f"mail.tm domains HTTP {r.status_code}: {r.text[:200]}")
     data = r.json() if r.content else {}
@@ -836,27 +881,34 @@ def mailtm_create(proxies: Optional[dict] = None, log_callback: LogCb = None) ->
     domain = str(members[0].get("domain") or "").strip()
     if not domain:
         raise Exception("mail.tm 域名字段为空")
+    _log(log_callback, f"[*] mail.tm 步骤1结果: 选用域名 {domain} (共{len(members)}个)")
     local = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(10))
     address = f"{local}@{domain}"
     password = secrets.token_urlsafe(12)
+    acc_url = f"{MAILTM_BASE}/accounts"
+    _log(log_callback, f"[*] mail.tm 步骤2: POST 创建账号 {acc_url} address={address}")
     r2 = s.post(
-        f"{MAILTM_BASE}/accounts",
+        acc_url,
         json={"address": address, "password": password},
         timeout=25,
     )
+    _log(log_callback, f"[*] mail.tm 步骤2响应: HTTP {r2.status_code}")
     if r2.status_code not in (200, 201):
         raise Exception(f"mail.tm create account HTTP {r2.status_code}: {r2.text[:200]}")
+    tok_url = f"{MAILTM_BASE}/token"
+    _log(log_callback, f"[*] mail.tm 步骤3: POST 换 JWT {tok_url}")
     r3 = s.post(
-        f"{MAILTM_BASE}/token",
+        tok_url,
         json={"address": address, "password": password},
         timeout=25,
     )
+    _log(log_callback, f"[*] mail.tm 步骤3响应: HTTP {r3.status_code}")
     if r3.status_code >= 400:
         raise Exception(f"mail.tm token HTTP {r3.status_code}: {r3.text[:200]}")
     token_jwt = str((r3.json() or {}).get("token") or "").strip()
     if not token_jwt:
         raise Exception("mail.tm token 为空")
-    _log(log_callback, f"[+] mail.tm 建箱成功: {address}")
+    _log(log_callback, f"[+] mail.tm 建箱成功: {address} (来源站 https://mail.tm/ API {MAILTM_BASE})")
     return address, _token_pack("mailtm", jwt=token_jwt, password=password, address=address)
 
 
@@ -934,10 +986,17 @@ def mailtm_get_code(
 
 def tempmail_lol_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
     s = _session(proxies)
-    r = s.post(f"{TEMPMAIL_LOL_BASE}/v2/inbox/create", json={}, timeout=25)
+    url_v2 = f"{TEMPMAIL_LOL_BASE}/v2/inbox/create"
+    _log(log_callback, f"[*] tempmail.lol 步骤1: POST {url_v2} 出口={_proxy_desc(proxies)}")
+    r = s.post(url_v2, json={}, timeout=25)
+    _log(log_callback, f"[*] tempmail.lol 步骤1响应: HTTP {r.status_code}")
+    used = "v2/inbox/create"
     if r.status_code not in (200, 201):
-        # fallback v1 generate
-        r = s.get(f"{TEMPMAIL_LOL_BASE}/generate", timeout=25)
+        url_v1 = f"{TEMPMAIL_LOL_BASE}/generate"
+        _log(log_callback, f"[*] tempmail.lol 步骤1失败，回退 GET {url_v1}")
+        r = s.get(url_v1, timeout=25)
+        used = "v1/generate"
+        _log(log_callback, f"[*] tempmail.lol 回退响应: HTTP {r.status_code}")
         if r.status_code >= 400:
             raise Exception(f"tempmail.lol create HTTP {r.status_code}: {r.text[:200]}")
     data = r.json() if r.content else {}
@@ -945,7 +1004,7 @@ def tempmail_lol_create(proxies: Optional[dict] = None, log_callback: LogCb = No
     tok = str(data.get("token") or "").strip()
     if not address or not tok:
         raise Exception(f"tempmail.lol 响应缺字段: {str(data)[:200]}")
-    _log(log_callback, f"[+] tempmail.lol 建箱成功: {address}")
+    _log(log_callback, f"[+] tempmail.lol 建箱成功: {address} (接口={used} 来源站 https://tempmail.lol/)")
     return address, _token_pack("tempmail_lol", token=tok, address=address)
 
 
@@ -1021,6 +1080,7 @@ def tempmail_lol_get_code(
 
 
 def tempmail_plus_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
+    _log(log_callback, f"[*] tempmail.plus 步骤1: 本地生成 local-part + 免费域名 出口={_proxy_desc(proxies)}")
     local = "g" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(12))
     # common free domains observed: mailto.plus, fexpost.com, fexbox.org, mailbox.in.ua, rover.info, chitthi.in
     domains = [
@@ -1044,7 +1104,7 @@ def tempmail_plus_create(proxies: Optional[dict] = None, log_callback: LogCb = N
         r = s.get(f"{TEMPMAIL_PLUS_BASE}/mails", params={"email": address, "limit": 1}, timeout=25)
         if r.status_code >= 400:
             raise Exception(f"tempmail.plus 建箱探测 HTTP {r.status_code}: {r.text[:200]}")
-    _log(log_callback, f"[+] tempmail.plus 建箱成功: {address}")
+    _log(log_callback, f"[+] tempmail.plus 建箱成功: {address} (探测 GET {TEMPMAIL_PLUS_BASE}/mails 来源站 https://tempmail.plus/)")
     return address, _token_pack("tempmail_plus", address=address)
 
 
@@ -1134,66 +1194,105 @@ def tempmail_plus_get_code(
 PUBLIC_PROVIDERS = {
     "tempmail_io": {
         "label": "TempMail.io",
+        "site": "https://temp-mail.io/zh",
+        "api": "https://api.internal.temp-mail.io/api/v3/email/new",
+        "method": "POST JSON 建箱 + 按 token 拉信",
         "create": tempmail_io_create,
         "get_code": tempmail_io_get_code,
     },
     "temp-mail.io": {
         "label": "TempMail.io",
+        "site": "https://temp-mail.io/zh",
+        "api": "https://api.internal.temp-mail.io/api/v3/email/new",
+        "method": "POST JSON 建箱 + 按 token 拉信",
         "create": tempmail_io_create,
         "get_code": tempmail_io_get_code,
     },
     "linshiyouxiang": {
         "label": "临时邮箱.net",
+        "site": "https://www.linshiyouxiang.net/",
+        "api": "https://www.linshiyouxiang.net/ (HTML activeMail + mailbox API)",
+        "method": "打开首页解析 activeMail，再轮询邮箱 API",
         "create": linshi_create,
         "get_code": linshi_get_code,
     },
     "linshi": {
         "label": "临时邮箱.net",
+        "site": "https://www.linshiyouxiang.net/",
+        "api": "https://www.linshiyouxiang.net/ (HTML activeMail + mailbox API)",
+        "method": "打开首页解析 activeMail，再轮询邮箱 API",
         "create": linshi_create,
         "get_code": linshi_get_code,
     },
     "boomlify": {
         "label": "Boomlify",
+        "site": "https://boomlify.com/zh/temp-mail-instant",
+        "api": "https://v1.boomlify.com/guest/init + mailbox",
+        "method": "guest JWT 初始化后创建邮箱",
         "create": boomlify_create,
         "get_code": boomlify_get_code,
     },
     "tempmail_org": {
         "label": "TempMail.org",
+        "site": "https://temp-mail.org/zh/",
+        "api": "web2/api2.temp-mail.org (best-effort)",
+        "method": "公共 API 建箱（可能被 CF 拦截）",
         "create": tempmail_org_create,
         "get_code": tempmail_org_get_code,
     },
     "temp-mail.org": {
         "label": "TempMail.org",
+        "site": "https://temp-mail.org/zh/",
+        "api": "web2/api2.temp-mail.org (best-effort)",
+        "method": "公共 API 建箱（可能被 CF 拦截）",
         "create": tempmail_org_create,
         "get_code": tempmail_org_get_code,
     },
     "mailtm": {
         "label": "Mail.tm",
+        "site": "https://mail.tm/",
+        "api": "https://api.mail.tm/domains + /accounts + /token",
+        "method": "取域名 → 创建账号 → 换 JWT 收信",
         "create": mailtm_create,
         "get_code": mailtm_get_code,
     },
     "mail.tm": {
         "label": "Mail.tm",
+        "site": "https://mail.tm/",
+        "api": "https://api.mail.tm/domains + /accounts + /token",
+        "method": "取域名 → 创建账号 → 换 JWT 收信",
         "create": mailtm_create,
         "get_code": mailtm_get_code,
     },
     "tempmail_lol": {
         "label": "TempMail.lol",
+        "site": "https://tempmail.lol/",
+        "api": "https://api.tempmail.lol/v2/inbox/create",
+        "method": "v2 建箱，失败回退 v1 /generate",
         "create": tempmail_lol_create,
         "get_code": tempmail_lol_get_code,
     },
     "tempmail.lol": {
         "label": "TempMail.lol",
+        "site": "https://tempmail.lol/",
+        "api": "https://api.tempmail.lol/v2/inbox/create",
+        "method": "v2 建箱，失败回退 v1 /generate",
         "create": tempmail_lol_create,
         "get_code": tempmail_lol_get_code,
     },
     "tempmail_plus": {
         "label": "TempMail.plus",
+        "site": "https://tempmail.plus/",
+        "api": "https://tempmail.plus/api/mails",
+        "method": "本地随机 local@免费域名，探测 mails 接口确认可用",
         "create": tempmail_plus_create,
         "get_code": tempmail_plus_get_code,
     },
     "tempmail.plus": {
         "label": "TempMail.plus",
+        "site": "https://tempmail.plus/",
+        "api": "https://tempmail.plus/api/mails",
+        "method": "本地随机 local@免费域名，探测 mails 接口确认可用",
         "create": tempmail_plus_create,
         "get_code": tempmail_plus_get_code,
     },
@@ -1212,7 +1311,32 @@ def create_public_email(
     key = str(provider or "").strip().lower()
     if key not in PUBLIC_PROVIDERS:
         raise Exception(f"未知公共邮箱 provider: {provider}")
-    return PUBLIC_PROVIDERS[key]["create"](proxies=proxies, log_callback=log_callback)
+    meta = _provider_meta(key)
+    _log(log_callback, f"[*] ========== 开始获取临时邮箱 ==========")
+    _log(log_callback, f"[*] 邮箱 provider: {meta['key']} ({meta['label']})")
+    if meta["site"]:
+        _log(log_callback, f"[*] 来源网站: {meta['site']}")
+    if meta["api"]:
+        _log(log_callback, f"[*] 调用接口: {meta['api']}")
+    if meta["method"]:
+        _log(log_callback, f"[*] 获取方式: {meta['method']}")
+    _log(log_callback, f"[*] 网络出口: {_proxy_desc(proxies)}")
+    try:
+        email, token = PUBLIC_PROVIDERS[key]["create"](
+            proxies=proxies, log_callback=log_callback
+        )
+    except Exception as exc:
+        _log(log_callback, f"[!] 获取邮箱失败 provider={meta['key']} site={meta['site']}: {exc}")
+        raise
+    domain = email.split("@", 1)[1] if email and "@" in email else ""
+    _log(log_callback, f"[+] 邮箱获取成功")
+    _log(log_callback, f"[+]   地址: {email}")
+    if domain:
+        _log(log_callback, f"[+]   域名: {domain}")
+    _log(log_callback, f"[+]   来源: {meta['label']} | {meta['site'] or meta['api'] or meta['key']}")
+    _log(log_callback, f"[+]   出口: {_proxy_desc(proxies)}")
+    _log(log_callback, f"[*] ========== 临时邮箱就绪 ==========")
+    return email, token
 
 
 def get_public_code(
@@ -1229,16 +1353,30 @@ def get_public_code(
     key = str(provider or "").strip().lower()
     if key not in PUBLIC_PROVIDERS:
         raise Exception(f"未知公共邮箱 provider: {provider}")
-    return PUBLIC_PROVIDERS[key]["get_code"](
-        token,
-        email,
-        timeout=timeout,
-        poll_interval=poll_interval,
-        log_callback=log_callback,
-        cancel_callback=cancel_callback,
-        extract_fn=extract_fn,
-        proxies=proxies,
-    )
+    meta = _provider_meta(key)
+    _log(log_callback, f"[*] 开始收验证码 | provider={meta['key']} ({meta['label']})")
+    _log(log_callback, f"[*] 收信邮箱: {email}")
+    if meta["site"]:
+        _log(log_callback, f"[*] 收信来源站: {meta['site']}")
+    if meta["api"]:
+        _log(log_callback, f"[*] 收信接口: {meta['api']}")
+    _log(log_callback, f"[*] 收信网络: {_proxy_desc(proxies)} | timeout={timeout}s interval={poll_interval}s")
+    try:
+        code = PUBLIC_PROVIDERS[key]["get_code"](
+            token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            extract_fn=extract_fn,
+            proxies=proxies,
+        )
+    except Exception as exc:
+        _log(log_callback, f"[!] 收验证码失败 provider={meta['key']} email={email}: {exc}")
+        raise
+    _log(log_callback, f"[+] 验证码获取成功 provider={meta['key']} email={email} code={code}")
+    return code
 
 
 def smoke_test_provider(provider: str, proxies: Optional[dict] = None) -> dict:
