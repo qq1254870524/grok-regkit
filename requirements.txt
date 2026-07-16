@@ -19,3 +19,4 @@ tldextract==5.3.0
 urllib3==2.6.3
 uvicorn[standard]==0.34.2
 websocket-client==1.9.0
+PySocks>=1.7.1

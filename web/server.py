@@ -112,14 +112,73 @@ def _mask_value(key: str, value: Any) -> Any:
     return s[:2] + "*" * (len(s) - 4) + s[-2:]
 
 
+def _proxy_list_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Return editable multi-line proxy pool text for the web UI."""
+    c = cfg if isinstance(cfg, dict) else dict(engine.config)
+    inline = str(c.get("proxy_list") or "").strip()
+    if inline:
+        return inline.replace("\r\n", "\n").strip() + "\n"
+    name = str(c.get("proxy_list_file") or "socks5_proxies.txt").strip() or "socks5_proxies.txt"
+    path = Path(name) if os.path.isabs(name) else (ROOT / name)
+    try:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            return text.replace("\r\n", "\n").strip() + ("\n" if text.strip() else "")
+    except Exception:
+        pass
+    return ""
+
+
+def _sync_proxy_list_file(text: str, cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Write proxy pool text to list file and keep config.proxy_list in sync."""
+    c = cfg if isinstance(cfg, dict) else engine.config
+    cleaned_lines = []
+    for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        cleaned_lines.append(s)
+    body = ("\n".join(cleaned_lines) + "\n") if cleaned_lines else ""
+    name = str(c.get("proxy_list_file") or "socks5_proxies.txt").strip() or "socks5_proxies.txt"
+    path = Path(name) if os.path.isabs(name) else (ROOT / name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    except Exception as exc:
+        _append_log(f"[!] 写入代理池文件失败: {exc}")
+    c["proxy_list"] = body.rstrip("\n")
+    if not os.path.isabs(name):
+        c["proxy_list_file"] = name
+    try:
+        if hasattr(engine, "_PROXY_POOL_CACHE"):
+            engine._PROXY_POOL_CACHE = {"mtime": None, "path": None, "items": []}
+        if hasattr(engine, "load_proxy_list"):
+            engine.load_proxy_list(c, force_reload=True)
+    except Exception:
+        pass
+    return body
+
+
 def _public_config() -> Dict[str, Any]:
     engine.load_config()
     cfg = dict(engine.config)
+    if cfg.get("cpa_management_key"):
+        cfg["cpa_management_key"] = "***"
+    # Always expose full editable proxy pool text in the web panel
+    cfg["proxy_list"] = _proxy_list_raw_text(cfg).rstrip("\n")
     masked = {k: _mask_value(k, v) for k, v in cfg.items()}
-    # Keep unmasked non-secrets fully; secret fields show mask + has_* flags
     for key in SECRET_FIELDS:
         raw = cfg.get(key, "")
         masked[f"has_{key}"] = bool(str(raw or "").strip())
+    # proxy_list must remain fully editable (contains passwords); never mask it
+    masked["proxy_list"] = cfg.get("proxy_list") or ""
+    masked["proxy_list_count"] = len(
+        [
+            ln
+            for ln in str(masked["proxy_list"]).splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+    )
     return masked
 
 
@@ -195,6 +254,14 @@ class ConfigBody(BaseModel):
     enable_nsfw: Optional[bool] = None
     nsfw_async: Optional[bool] = None
     post_success_async: Optional[bool] = None
+    cpa_export_enabled: Optional[bool] = None
+    cpa_auto_add: Optional[bool] = None
+    cpa_auth_dir: Optional[str] = None
+    cpa_remote_url: Optional[str] = None
+    cpa_management_key: Optional[str] = None
+    cpa_remote_upload: Optional[bool] = None
+    cpa_prefer_authcode: Optional[bool] = None
+
     register_count: Optional[int] = None
     register_mode: Optional[str] = None
     user_agent: Optional[str] = None
@@ -206,6 +273,11 @@ class ConfigBody(BaseModel):
     grok2api_remote_app_key: Optional[str] = None
     defaultDomains: Optional[str] = None
     email_provider: Optional[str] = None
+    proxy_list_file: Optional[str] = None
+    proxy_list: Optional[str] = None
+    proxy_scheme: Optional[str] = None
+    proxy_rotate: Optional[bool] = None
+    proxy_no_direct_fallback: Optional[bool] = None
     yyds_api_key: Optional[str] = None
     yyds_jwt: Optional[str] = None
 
@@ -454,6 +526,15 @@ async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(
         engine.config["proxy_reject_datacenter_org"] = True
         # Do not force entry hard-reject — white API entry is shared DC by design.
         engine.config["proxy_entry_hard_reject"] = False
+    # Web panel SOCKS5 pool: save textarea -> config + socks5_proxies.txt
+    if "proxy_list" in updates or str(engine.config.get("proxy_mode") or "").strip().lower() in (
+        "socks5_list",
+        "socks5_pool",
+        "proxy_list",
+        "list",
+        "socks5",
+    ):
+        _sync_proxy_list_file(str(engine.config.get("proxy_list") or ""), engine.config)
     engine.save_config()
     return {"ok": True, "config": _public_config()}
 
@@ -486,7 +567,14 @@ async def api_proxy_test(x_access_key: Optional[str] = Header(None)):
             )
             if not proxy:
                 raise RuntimeError("当前模式无可用代理（直连或未配置）")
-            _log(f"[+] 当前代理: {proxy}")
+            try:
+                pool_n = len(engine.load_proxy_list(engine.config)) if hasattr(engine, "load_proxy_list") else 0
+            except Exception:
+                pool_n = 0
+            if mode in ("socks5_list", "socks5_pool", "proxy_list", "list", "socks5"):
+                _log(f"[+] SOCKS5通用池 选用: {proxy} | 池大小={pool_n}")
+            else:
+                _log(f"[+] 当前代理: {proxy}")
         quality = None
         try:
             quality = engine.probe_proxy_with_ippure(

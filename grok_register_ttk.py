@@ -3,6 +3,13 @@
 """
 Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
+
+Changelog:
+- 2026-07-17c: SOCKS5 代理池改为通用 proxy_mode=socks5_list（注册/HTTP/YYDS/浏览器共用），
+  socks5_proxies.txt；失败轮询；Chromium 本地 SOCKS5 认证桥；需 PySocks。
+- 2026-07-17b: 原 email_proxy_* 专用池已并入通用代理池。
+- 2026-07-17: 接入公共临时邮箱 provider（tempmail_io / linshiyouxiang / boomlify / tempmail_org），
+  与 cloudflare/duckmail/yyds 共用 email_provider 单选开关；建箱与收验证码走 temp_email_public_providers。
 """
 
 import threading
@@ -50,6 +57,11 @@ from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
+try:
+    import temp_email_public_providers as public_email
+except Exception:
+    public_email = None  # type: ignore
+
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 MEMORY_CLEANUP_INTERVAL = 5
@@ -72,7 +84,7 @@ DEFAULT_CONFIG = {
     "cloudflare_path_token": "/api/token",
     "cloudflare_path_messages": "/api/mails",
     "proxy": "",
-    # proxy_mode: direct | custom | whitelist | cliproxy_white | airport
+    # proxy_mode: direct | custom | whitelist | cliproxy_white | airport | socks5_list
     "proxy_mode": "airport",
     # 机场(Mihomo)本地 HTTP 入口：订阅在 mihomo 的 REGISTER-RESIDENTIAL 组
     "proxy_airport_url": "http://127.0.0.1:7893",
@@ -112,6 +124,13 @@ DEFAULT_CONFIG = {
     # 模板变量: {user} {pass} {host} {port} {country} {delimiter} {session} {duration}
     "proxy_user_template": "{user}{delimiter}region{delimiter}{country}",
     "proxy_session": "",
+    # ===== General SOCKS5/proxy list pool (proxy_mode=socks5_list) =====
+    # host:port:user:pass | socks5://user:pass@host:port | user:pass@host:port
+    "proxy_list_file": "socks5_proxies.txt",
+    "proxy_list": "",
+    "proxy_scheme": "socks5h",
+    "proxy_rotate": True,
+    "proxy_no_direct_fallback": True,
     "enable_nsfw": True,
     # True=NSFW 后台执行（功能仍做）；False=拿 sso 后立刻同步开 NSFW
     "nsfw_async": True,
@@ -128,9 +147,18 @@ DEFAULT_CONFIG = {
     # ===== CPA / free Grok 4.5 (OIDC via Grok Build, NOT SSO) =====
     # SSO → web model pool; OIDC → CLIProxyAPI → cli-chat-proxy → grok-4.5
     "cpa_export_enabled": True,
+    # alias from grokRegister-cpa; False disables export even if cpa_export_enabled True
+    "cpa_auto_add": True,
     "cpa_auth_dir": "./cpa_auths",
     "cpa_copy_to_hotload": True,
     "cpa_hotload_dir": "",  # set to CPA auth-dir on server, e.g. /opt/cliproxyapi/auths
+    # Remote CLIProxyAPI Management API (plaintext key; bcrypt hash in CPA yaml will NOT work)
+    "cpa_remote_url": "http://127.0.0.1:8317",
+    "cpa_management_key": "",
+    "cpa_remote_upload": False,
+    "cpa_remote_timeout_sec": 30,
+    # Prefer Authorization Code + PKCE (referrer=grok-build); fallback device/protocol
+    "cpa_prefer_authcode": True,
     "cpa_base_url": "https://cli-chat-proxy.grok.com/v1",
     "cpa_proxy": "",  # empty = fall back to runtime proxy / airport
     # Protocol mint needs no browser; fallback browser MUST be headed (Xvfb) on servers.
@@ -826,7 +854,7 @@ def resolve_airport_proxy(cfg=None, log_callback=None) -> str:
 
 
 def resolve_runtime_proxy(cfg=None, log_callback=None, fetch_live=True) -> str:
-    """Resolve effective proxy URL from mode + API / whitelist group / custom."""
+    """Resolve effective proxy URL from mode + API / whitelist / socks5 list / custom."""
     c = cfg if isinstance(cfg, dict) else config
     mode = str(c.get("proxy_mode", "") or "").strip().lower()
     custom = str(c.get("proxy", "") or "").strip()
@@ -842,6 +870,14 @@ def resolve_runtime_proxy(cfg=None, log_callback=None, fetch_live=True) -> str:
         return fetch_cliproxy_white_proxy(c, log_callback=log_callback)
     if mode in ("whitelist", "group", "proxy_group"):
         return build_whitelist_proxy_url(c)
+    if mode in ("socks5_list", "socks5_pool", "proxy_list", "list", "socks5"):
+        if not fetch_live and custom:
+            return custom
+        picked = pick_proxy_from_list(c, rotate=bool(c.get("proxy_rotate", True)))
+        if log_callback:
+            n = len(load_proxy_list(c))
+            log_callback(f"[*] 代理模式: SOCKS5通用池 | {_mask_proxy_url(picked)} | 池大小={n}")
+        return picked
     return custom
 
 
@@ -854,11 +890,14 @@ def apply_resolved_proxy_to_config(log_callback=None, fetch_live=True):
 
 
 def get_configured_proxy():
-    # After job start, cliproxy mode stores resolved ip:port into config['proxy'].
-    # Do not re-fetch API on every request.
     mode = str(config.get("proxy_mode", "") or "").strip().lower()
     if mode in ("cliproxy_white", "cliproxy", "white_api", "api"):
         return str(config.get("proxy", "") or "").strip()
+    if mode in ("socks5_list", "socks5_pool", "proxy_list", "list", "socks5"):
+        sticky = str(config.get("proxy", "") or "").strip()
+        if sticky:
+            return sticky
+        return pick_proxy_from_list(config, rotate=False)
     if mode in ("airport", "mihomo", "kunlun", "airport_mihomo"):
         return str(
             config.get("proxy")
@@ -880,6 +919,181 @@ def get_proxies():
         return {"http": proxy, "https": proxy}
     return {}
 
+
+_PROXY_POOL_LOCK = threading.Lock()
+_PROXY_POOL_INDEX = 0
+_PROXY_POOL_CACHE = {"mtime": None, "path": None, "items": []}
+
+
+def _normalize_proxy_url(raw: str, default_scheme: str = "http") -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"{default_scheme}://{text}"
+    return text
+
+
+def parse_proxy_endpoint_line(line: str, default_scheme: str = "socks5h") -> str:
+    """Parse host:port:user:pass / URL / user:pass@host:port into proxy URL."""
+    raw = str(line or "").strip()
+    if not raw or raw.startswith("#"):
+        return ""
+    raw = raw.strip().strip(",")
+    if "://" in raw:
+        return raw
+    if "@" in raw and raw.count(":") >= 2:
+        return _normalize_proxy_url(raw, default_scheme)
+    parts = raw.split(":")
+    if len(parts) >= 4:
+        host = parts[0].strip()
+        port = parts[1].strip()
+        user = parts[2].strip()
+        password = ":".join(parts[3:]).strip()
+        if not host or not port:
+            return ""
+        user_q = urllib.parse.quote(user, safe="")
+        pass_q = urllib.parse.quote(password, safe="")
+        auth = f"{user_q}:{pass_q}@" if (user or password) else ""
+        return f"{default_scheme}://{auth}{host}:{port}"
+    if len(parts) == 2:
+        host, port = parts[0].strip(), parts[1].strip()
+        if host and port:
+            return f"{default_scheme}://{host}:{port}"
+    return ""
+
+
+def _proxy_list_file_path(cfg=None) -> str:
+    c = cfg if isinstance(cfg, dict) else config
+    name = str(
+        c.get("proxy_list_file")
+        or c.get("email_proxy_list_file")
+        or "socks5_proxies.txt"
+    ).strip() or "socks5_proxies.txt"
+    if os.path.isabs(name):
+        return name
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+def load_proxy_list(cfg=None, force_reload=False) -> list:
+    """Load general proxy pool from proxy_list + proxy_list_file."""
+    global _PROXY_POOL_CACHE
+    c = cfg if isinstance(cfg, dict) else config
+    scheme = str(c.get("proxy_scheme") or c.get("email_proxy_scheme") or "socks5h").strip() or "socks5h"
+    items = []
+    inline = str(c.get("proxy_list") or c.get("email_proxy_list") or "").strip()
+    if inline:
+        for line in re.split(r"[\r\n;]+", inline):
+            url = parse_proxy_endpoint_line(line, default_scheme=scheme)
+            if url:
+                items.append(url)
+    path = _proxy_list_file_path(c)
+    mtime = None
+    try:
+        if os.path.isfile(path):
+            mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = None
+    with _PROXY_POOL_LOCK:
+        cache_hit = (
+            not force_reload
+            and not inline
+            and _PROXY_POOL_CACHE.get("path") == path
+            and _PROXY_POOL_CACHE.get("mtime") == mtime
+            and _PROXY_POOL_CACHE.get("items")
+        )
+        if cache_hit:
+            file_items = list(_PROXY_POOL_CACHE["items"])
+        else:
+            file_items = []
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            url = parse_proxy_endpoint_line(line, default_scheme=scheme)
+                            if url:
+                                file_items.append(url)
+                except Exception:
+                    file_items = []
+            if not inline:
+                _PROXY_POOL_CACHE = {"mtime": mtime, "path": path, "items": list(file_items)}
+    seen = set()
+    out = []
+    for url in items + file_items:
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def _mask_proxy_url(proxy_url: str) -> str:
+    raw = str(proxy_url or "").strip()
+    parsed = _parse_proxy_url(raw)
+    if not parsed or not parsed.hostname:
+        return "(empty)"
+    host = parsed.hostname
+    port = _safe_proxy_port(parsed)
+    scheme = parsed.scheme or "socks5h"
+    auth = "auth@" if (parsed.username is not None or parsed.password is not None) else ""
+    return f"{scheme}://{auth}{host}:{port}" if port else f"{scheme}://{auth}{host}"
+
+
+def pick_proxy_from_list(cfg=None, rotate=None) -> str:
+    global _PROXY_POOL_INDEX
+    c = cfg if isinstance(cfg, dict) else config
+    pool = load_proxy_list(c)
+    if not pool:
+        return ""
+    do_rotate = bool(c.get("proxy_rotate", True)) if rotate is None else bool(rotate)
+    with _PROXY_POOL_LOCK:
+        if not do_rotate:
+            return pool[_PROXY_POOL_INDEX % len(pool)]
+        idx = _PROXY_POOL_INDEX % len(pool)
+        _PROXY_POOL_INDEX = idx + 1
+        return pool[idx]
+
+
+def mark_proxy_bad(proxy_url: str = "", log_callback=None):
+    global _PROXY_POOL_INDEX, config
+    pool = load_proxy_list()
+    if not pool:
+        return
+    with _PROXY_POOL_LOCK:
+        _PROXY_POOL_INDEX = (_PROXY_POOL_INDEX + 1) % len(pool)
+        nxt = pool[_PROXY_POOL_INDEX % len(pool)]
+    try:
+        config["proxy"] = nxt
+    except Exception:
+        pass
+    if log_callback:
+        log_callback(f"[*] 通用代理池切换下一条 | {_mask_proxy_url(nxt)} | 池大小={len(pool)}")
+
+
+def is_socks5_list_mode(cfg=None) -> bool:
+    c = cfg if isinstance(cfg, dict) else config
+    mode = str(c.get("proxy_mode", "") or "").strip().lower()
+    return mode in ("socks5_list", "socks5_pool", "proxy_list", "list", "socks5")
+
+
+# backward-compat aliases
+load_email_proxy_list = load_proxy_list
+pick_email_proxy_url = pick_proxy_from_list
+mark_email_proxy_bad = mark_proxy_bad
+
+
+def get_email_proxies(cfg=None, proxy_url=None):
+    url = proxy_url if proxy_url is not None else get_configured_proxy()
+    if not url:
+        return {}
+    return {"http": url, "https": url}
+
+
+def email_http_get(url, **kwargs):
+    return http_get(url, **kwargs)
+
+
+def email_http_post(url, **kwargs):
+    return http_post(url, **kwargs)
 
 def _parse_proxy_url(proxy):
     raw = str(proxy or "").strip()
@@ -1022,22 +1236,69 @@ class _LocalAuthProxyBridgeHandler(socketserver.BaseRequestHandler):
             first_line = initial.split(b"\r\n", 1)[0].decode("latin1", "ignore")
             if first_line.upper().startswith("CONNECT "):
                 target = first_line.split()[1]
-                upstream = bridge.open_upstream()
-                req = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
-                if bridge.auth_header:
-                    req.append(f"Proxy-Authorization: Basic {bridge.auth_header}")
-                upstream.sendall(("\r\n".join(req) + "\r\n\r\n").encode("latin1"))
-                response = _proxy_recv_until_headers(upstream, timeout=bridge.timeout)
-                if response:
-                    self.request.sendall(response)
-                status = response.split(b"\r\n", 1)[0]
-                if b" 200 " not in status:
-                    return
-                _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
+                if target.startswith("[") and "]:" in target:
+                    h, p = target.rsplit("]:", 1)
+                    th, tp = h[1:], int(p)
+                elif ":" in target:
+                    th, tp = target.rsplit(":", 1)
+                    tp = int(tp)
+                else:
+                    th, tp = target, 443
+                if getattr(bridge, "upstream_scheme", "http") in ("socks5", "socks5h"):
+                    upstream = bridge.open_upstream(th, tp)
+                    self.request.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
+                else:
+                    upstream = bridge.open_upstream()
+                    req = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
+                    if bridge.auth_header:
+                        req.append(f"Proxy-Authorization: Basic {bridge.auth_header}")
+                    upstream.sendall(("\r\n".join(req) + "\r\n\r\n").encode("latin1"))
+                    response = _proxy_recv_until_headers(upstream, timeout=bridge.timeout)
+                    if response:
+                        self.request.sendall(response)
+                    status = response.split(b"\r\n", 1)[0] if response else b""
+                    if b" 200 " not in status:
+                        return
+                    _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
             else:
-                upstream = bridge.open_upstream()
-                upstream.sendall(bridge.inject_proxy_auth(initial))
-                _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
+                if getattr(bridge, "upstream_scheme", "http") in ("socks5", "socks5h"):
+                    try:
+                        parts = first_line.split()
+                        url = parts[1] if len(parts) >= 2 else ""
+                        pu = urllib.parse.urlsplit(url)
+                        th = pu.hostname or ""
+                        tp = pu.port or 80
+                        if not th:
+                            for line in initial.split(b"\r\n")[1:]:
+                                if line.lower().startswith(b"host:"):
+                                    hv = line.split(b":", 1)[1].strip().decode("latin1")
+                                    if ":" in hv:
+                                        th, tps = hv.rsplit(":", 1)
+                                        tp = int(tps)
+                                    else:
+                                        th = hv
+                                    break
+                        upstream = bridge.open_upstream(th, tp)
+                        path = pu.path or "/"
+                        if pu.query:
+                            path += "?" + pu.query
+                        lines = initial.split(b"\r\n")
+                        if len(parts) >= 3:
+                            lines[0] = f"{parts[0]} {path} {parts[2]}".encode("latin1")
+                        lines = [
+                            ln
+                            for ln in lines
+                            if not ln.lower().startswith(b"proxy-connection:")
+                        ]
+                        upstream.sendall(b"\r\n".join(lines))
+                        _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
+                    except Exception:
+                        return
+                else:
+                    upstream = bridge.open_upstream()
+                    upstream.sendall(bridge.inject_proxy_auth(initial))
+                    _proxy_relay(self.request, upstream, timeout=bridge.relay_timeout)
         except Exception:
             return
         finally:
@@ -1047,34 +1308,112 @@ class _LocalAuthProxyBridgeHandler(socketserver.BaseRequestHandler):
                 except Exception:
                     pass
 
-
 class LocalAuthProxyBridge:
+    """Local HTTP proxy bridge for Chromium.
+
+    Supports http/https upstream (Proxy-Authorization) and socks5/socks5h
+    upstream with username/password (RFC1929). Chromium uses 127.0.0.1 without auth.
+    """
+
     def __init__(self, proxy_url):
         parsed = _parse_proxy_url(proxy_url)
         if not parsed or not parsed.hostname:
             raise ValueError("认证代理地址格式无效")
-        if (parsed.scheme or "http").lower() not in ("http", "https"):
-            raise ValueError("Chromium 本地认证代理桥仅支持 http/https 上游代理")
-        self.upstream_scheme = (parsed.scheme or "http").lower()
+        scheme = (parsed.scheme or "http").lower()
+        if scheme not in ("http", "https", "socks5", "socks5h"):
+            raise ValueError(f"本地认证代理桥不支持协议: {scheme}")
+        self.upstream_scheme = scheme
         self.upstream_host = parsed.hostname
-        self.upstream_port = _safe_proxy_port(parsed) or (443 if self.upstream_scheme == "https" else 80)
-        username = urllib.parse.unquote(parsed.username or "")
-        password = urllib.parse.unquote(parsed.password or "")
-        raw_auth = f"{username}:{password}".encode("utf-8")
-        self.auth_header = base64.b64encode(raw_auth).decode("ascii") if (username or password) else ""
+        self.upstream_port = _safe_proxy_port(parsed) or (
+            443 if scheme == "https" else 1080 if scheme.startswith("socks") else 80
+        )
+        self.username = urllib.parse.unquote(parsed.username or "")
+        self.password = urllib.parse.unquote(parsed.password or "")
+        raw_auth = f"{self.username}:{self.password}".encode("utf-8")
+        self.auth_header = (
+            base64.b64encode(raw_auth).decode("ascii")
+            if (self.username or self.password) and scheme in ("http", "https")
+            else ""
+        )
         self.timeout = 20
         self.relay_timeout = 90
         self.server = None
         self.thread = None
         self.local_proxy = ""
 
-    def open_upstream(self):
-        sock = socket.create_connection((self.upstream_host, self.upstream_port), timeout=self.timeout)
+    def open_upstream_http(self):
+        sock = socket.create_connection(
+            (self.upstream_host, self.upstream_port), timeout=self.timeout
+        )
         if self.upstream_scheme == "https":
             context = ssl.create_default_context()
             sock = context.wrap_socket(sock, server_hostname=self.upstream_host)
         sock.settimeout(self.timeout)
         return sock
+
+    def open_upstream_socks5(self, target_host: str, target_port: int):
+        sock = socket.create_connection(
+            (self.upstream_host, self.upstream_port), timeout=self.timeout
+        )
+        sock.settimeout(self.timeout)
+        if self.username or self.password:
+            sock.sendall(b"\x05\x01\x02")
+            resp = sock.recv(2)
+            if len(resp) < 2 or resp[0] != 5 or resp[1] != 2:
+                sock.close()
+                raise OSError("SOCKS5 上游不接受用户名密码认证")
+            u = self.username.encode("utf-8")
+            p = self.password.encode("utf-8")
+            if len(u) > 255 or len(p) > 255:
+                sock.close()
+                raise OSError("SOCKS5 用户名/密码过长")
+            sock.sendall(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+            aresp = sock.recv(2)
+            if len(aresp) < 2 or aresp[1] != 0:
+                sock.close()
+                raise OSError("SOCKS5 用户名密码认证失败")
+        else:
+            sock.sendall(b"\x05\x01\x00")
+            resp = sock.recv(2)
+            if len(resp) < 2 or resp[0] != 5 or resp[1] != 0:
+                sock.close()
+                raise OSError("SOCKS5 握手失败")
+        host_b = str(target_host).encode("idna")
+        if len(host_b) > 255:
+            sock.close()
+            raise OSError("目标主机名过长")
+        req = (
+            b"\x05\x01\x00\x03"
+            + bytes([len(host_b)])
+            + host_b
+            + struct.pack("!H", int(target_port))
+        )
+        sock.sendall(req)
+        hdr = sock.recv(4)
+        if len(hdr) < 4 or hdr[0] != 5 or hdr[1] != 0:
+            sock.close()
+            raise OSError(f"SOCKS5 CONNECT 失败 code={hdr[1] if len(hdr) > 1 else -1}")
+        atyp = hdr[3]
+        if atyp == 1:
+            sock.recv(4 + 2)
+        elif atyp == 3:
+            ln = sock.recv(1)
+            n = ln[0] if ln else 0
+            sock.recv(n + 2)
+        elif atyp == 4:
+            sock.recv(16 + 2)
+        else:
+            sock.close()
+            raise OSError(f"SOCKS5 未知地址类型 {atyp}")
+        sock.settimeout(self.timeout)
+        return sock
+
+    def open_upstream(self, target_host=None, target_port=None):
+        if self.upstream_scheme in ("socks5", "socks5h"):
+            if not target_host or not target_port:
+                raise OSError("SOCKS5 上游需要目标 host:port")
+            return self.open_upstream_socks5(target_host, int(target_port))
+        return self.open_upstream_http()
 
     def inject_proxy_auth(self, data):
         if not self.auth_header or b"\r\n\r\n" not in data:
@@ -1106,16 +1445,6 @@ class LocalAuthProxyBridge:
         self.local_proxy = ""
 
 
-def stop_browser_proxy_bridge():
-    global browser_proxy_bridge
-    if browser_proxy_bridge is not None:
-        try:
-            browser_proxy_bridge.stop()
-        except Exception:
-            pass
-    browser_proxy_bridge = None
-
-
 def prepare_browser_proxy(use_proxy=True, log_callback=None):
     proxy = get_configured_proxy()
     if not use_proxy or not proxy:
@@ -1123,18 +1452,28 @@ def prepare_browser_proxy(use_proxy=True, log_callback=None):
     if _proxy_has_auth(proxy):
         parsed = _parse_proxy_url(proxy)
         scheme = (parsed.scheme or "http").lower() if parsed else ""
-        if scheme in ("http", "https"):
-            bridge = LocalAuthProxyBridge(proxy)
-            browser_proxy = bridge.start()
-            if log_callback:
-                log_callback(f"[*] 已为 Chromium 启动本地认证代理桥: {browser_proxy}")
-            return browser_proxy, bridge
+        if scheme in ("http", "https", "socks5", "socks5h"):
+            try:
+                bridge = LocalAuthProxyBridge(proxy)
+                browser_proxy = bridge.start()
+                if log_callback:
+                    log_callback(
+                        f"[*] 已为 Chromium 启动本地认证代理桥: {browser_proxy} <- {_mask_proxy_url(proxy)}"
+                    )
+                return browser_proxy, bridge
+            except Exception as exc:
+                if log_callback:
+                    log_callback(f"[!] 本地认证代理桥启动失败: {exc}")
+                return _strip_proxy_auth(proxy), None
         stripped = _strip_proxy_auth(proxy)
         if log_callback:
             log_callback("[!] Chromium 暂不直接支持该认证代理协议，已使用去认证代理地址，失败将回退直连")
         return stripped, None
+    parsed = _parse_proxy_url(proxy)
+    scheme = (parsed.scheme or "http").lower() if parsed else "http"
+    if scheme == "socks5h":
+        proxy = proxy.replace("socks5h://", "socks5://", 1)
     return proxy, None
-
 
 def get_duckmail_api_key():
     return config.get("duckmail_api_key", "")
@@ -1554,7 +1893,7 @@ def _post_success_worker_loop():
                     max_http_tries=bg_tries,
                     http_timeout=bg_timeout,
                 )
-            if job.get("do_cpa") and config.get("cpa_export_enabled", True):
+            if job.get("do_cpa") and config.get("cpa_export_enabled", True) and config.get("cpa_auto_add", True):
                 try:
                     export_cpa_after_success(
                         email,
@@ -1647,7 +1986,7 @@ def schedule_post_registration(
     nsfw_async = _config_bool(config.get("nsfw_async", True), default=True)
     post_async = _config_bool(config.get("post_success_async", True), default=True)
     do_g2a = bool(config.get("grok2api_auto_add_remote") or config.get("grok2api_auto_add_local"))
-    do_cpa = bool(config.get("cpa_export_enabled", True))
+    do_cpa = bool(config.get("cpa_export_enabled", True)) and bool(config.get("cpa_auto_add", True))
 
     # Optional sync NSFW before queueing the rest
     if do_nsfw and not nsfw_async:
@@ -1728,7 +2067,7 @@ def export_cpa_after_success(email, password, sso, page=None, cookies=None, log_
     via accounts.x.ai device-flow → cpa_auths/xai-*.json → CLIProxyAPI.
     """
     log = log_callback or (lambda m: print(m, flush=True))
-    if not config.get("cpa_export_enabled", True):
+    if config.get("cpa_export_enabled", True) is False or config.get("cpa_auto_add", True) is False:
         log("[cpa] export disabled, skip")
         return {"ok": False, "skipped": True, "reason": "disabled"}
     if not email:
@@ -2072,10 +2411,30 @@ def http_get(url, **kwargs):
     try:
         return requests.get(url, **request_kwargs)
     except Exception as exc:
-        if request_kwargs.get("proxies") and is_proxy_connection_error(exc):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs["proxies"] = {}
-            return requests.get(url, **_build_request_kwargs(**retry_kwargs))
+        err_l = str(exc).lower()
+        if request_kwargs.get("proxies") and (
+            is_proxy_connection_error(exc) or "socks" in err_l
+        ):
+            if is_socks5_list_mode():
+                pool = load_proxy_list()
+                last = exc
+                for _ in range(max(0, len(pool) - 1)):
+                    mark_proxy_bad(get_configured_proxy())
+                    try:
+                        return requests.get(url, **_build_request_kwargs(**kwargs))
+                    except Exception as exc2:
+                        last = exc2
+                        if not (
+                            is_proxy_connection_error(exc2)
+                            or "socks" in str(exc2).lower()
+                        ):
+                            raise
+                if bool(config.get("proxy_no_direct_fallback", True)):
+                    raise last
+            if not is_socks5_list_mode():
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["proxies"] = {}
+                return requests.get(url, **_build_request_kwargs(**retry_kwargs))
         raise
 
 
@@ -2084,12 +2443,31 @@ def http_post(url, **kwargs):
     try:
         return requests.post(url, **request_kwargs)
     except Exception as exc:
-        if request_kwargs.get("proxies") and is_proxy_connection_error(exc):
-            retry_kwargs = dict(kwargs)
-            retry_kwargs["proxies"] = {}
-            return requests.post(url, **_build_request_kwargs(**retry_kwargs))
+        err_l = str(exc).lower()
+        if request_kwargs.get("proxies") and (
+            is_proxy_connection_error(exc) or "socks" in err_l
+        ):
+            if is_socks5_list_mode():
+                pool = load_proxy_list()
+                last = exc
+                for _ in range(max(0, len(pool) - 1)):
+                    mark_proxy_bad(get_configured_proxy())
+                    try:
+                        return requests.post(url, **_build_request_kwargs(**kwargs))
+                    except Exception as exc2:
+                        last = exc2
+                        if not (
+                            is_proxy_connection_error(exc2)
+                            or "socks" in str(exc2).lower()
+                        ):
+                            raise
+                if bool(config.get("proxy_no_direct_fallback", True)):
+                    raise last
+            if not is_socks5_list_mode():
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["proxies"] = {}
+                return requests.post(url, **_build_request_kwargs(**retry_kwargs))
         raise
-
 
 def raise_if_cancelled(cancel_callback=None):
     if cancel_callback and cancel_callback():
@@ -2256,7 +2634,7 @@ def yyds_get_domains(api_key=None, jwt=None):
         headers["Authorization"] = f"Bearer {token}"
     elif key:
         headers["X-API-Key"] = key
-    resp = http_get(f"{YYDS_API_BASE}/domains", headers=headers)
+    resp = email_http_get(f"{YYDS_API_BASE}/domains", headers=headers)
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", []) if data.get("success") else []
@@ -2277,7 +2655,7 @@ def yyds_create_account(address=None, domain=None, api_key=None, jwt=None):
         payload["domain"] = domain
     elif key or token:
         payload["autoDomainStrategy"] = "prefer_owned"
-    resp = http_post(f"{YYDS_API_BASE}/accounts", json=payload, headers=headers)
+    resp = email_http_post(f"{YYDS_API_BASE}/accounts", json=payload, headers=headers)
     resp.raise_for_status()
     data = resp.json()
     if data.get("success"):
@@ -2293,7 +2671,7 @@ def yyds_get_token(address, api_key=None, jwt=None):
         headers["Authorization"] = f"Bearer {token}"
     elif key:
         headers["X-API-Key"] = key
-    resp = http_post(
+    resp = email_http_post(
         f"{YYDS_API_BASE}/token", json={"address": address}, headers=headers
     )
     resp.raise_for_status()
@@ -2311,7 +2689,7 @@ def yyds_get_messages(address, token=None, api_key=None, jwt=None):
         headers["Authorization"] = f"Bearer {temp_token}"
     elif key:
         headers["X-API-Key"] = key
-    resp = http_get(
+    resp = email_http_get(
         f"{YYDS_API_BASE}/messages",
         params={"address": address},
         headers=headers,
@@ -2331,7 +2709,7 @@ def yyds_get_message_detail(message_id, token=None, api_key=None, jwt=None):
         headers["Authorization"] = f"Bearer {temp_token}"
     elif key:
         headers["X-API-Key"] = key
-    resp = http_get(f"{YYDS_API_BASE}/messages/{message_id}", headers=headers)
+    resp = email_http_get(f"{YYDS_API_BASE}/messages/{message_id}", headers=headers)
     resp.raise_for_status()
     data = resp.json()
     if data.get("success"):
@@ -2376,7 +2754,8 @@ def yyds_get_email_and_token(api_key=None, jwt=None):
         temp_token = yyds_get_token(address, api_key=key, jwt=token)
     if not temp_token:
         raise Exception("鑾峰彇 YYDS token 澶辫触")
-    print(f"[*] 宸插垱寤?YYDS 閭: {address}")
+    ep = pick_email_proxy_url(rotate=False)
+    print(f"[*] YYDS mailbox: {address} | proxy={_mask_proxy_url(ep)}")
     return address, temp_token
 
 
@@ -2459,6 +2838,21 @@ def get_email_provider():
 
 def get_email_and_token(api_key=None):
     provider = get_email_provider()
+    if public_email is not None and public_email.is_public_provider(provider):
+        proxies = get_proxies() or None
+        try:
+            return public_email.create_public_email(
+                provider,
+                proxies=proxies,
+            )
+        except Exception as exc:
+            # Match http_get/http_post: dead local proxy falls back to direct.
+            if proxies and is_proxy_connection_error(exc):
+                return public_email.create_public_email(
+                    provider,
+                    proxies=None,
+                )
+            raise
     if provider == "yyds":
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
     if provider == "cloudflare":
@@ -2511,6 +2905,34 @@ def get_oai_code(
     resend_callback=None,
 ):
     provider = get_email_provider()
+    if public_email is not None and public_email.is_public_provider(provider):
+        proxies = get_proxies() or None
+        try:
+            return public_email.get_public_code(
+                provider,
+                dev_token,
+                email,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+                extract_fn=extract_verification_code,
+                proxies=proxies,
+            )
+        except Exception as exc:
+            if proxies and is_proxy_connection_error(exc):
+                return public_email.get_public_code(
+                    provider,
+                    dev_token,
+                    email,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                    log_callback=log_callback,
+                    cancel_callback=cancel_callback,
+                    extract_fn=extract_verification_code,
+                    proxies=None,
+                )
+            raise
     if provider == "yyds":
         return yyds_get_oai_code(
             dev_token,
@@ -4376,7 +4798,7 @@ class GrokRegisterGUI:
 
         add_label(0, 0, "邮箱服务商:")
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare"], width=12)
+        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org"], width=16)
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
         add_label(0, 2, "注册数量:")

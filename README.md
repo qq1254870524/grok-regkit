@@ -230,3 +230,28 @@ This project is forever grateful for the support and promotion from the [LINUX D
 ## 免责声明
 
 本项目与 xAI / Grok **无官方关系**。自动化可能导致账号或 IP 封禁，使用风险自负。
+
+
+## 融合：grokRegister-cpa（2026-07-17）
+
+已从 [Git-creat7/grokRegister-cpa](https://github.com/Git-creat7/grokRegister-cpa) 融合以下能力（保留本仓库 hybrid / Web / gateway）：
+
+| 能力 | 配置 | 说明 |
+|------|------|------|
+| 授权码 mint | `cpa_prefer_authcode` | SSO→PKCE，`referrer=grok-build`，失败回退 device/protocol |
+| 远程 CPA 入库 | `cpa_remote_upload` + `cpa_remote_url` + `cpa_management_key` | Management API 上传 `xai-*.json`（密钥须为**明文**） |
+| 上游开关别名 | `cpa_auto_add` | 与 `cpa_export_enabled` 同时生效 |
+| 独立补转 | `python sso_to_auth_json.py --sso ...` | 已有 SSO 批量转 OIDC / 远程上传 |
+
+本机 CLIProxyAPI 已把 `auth-dir` 指到 `./cpa_auths` 时，**本地热加载已够用**；远程上传主要用于另一台 CPA 实例。
+
+```bash
+# 已有 SSO 补转并写本地 cpa_auths
+python sso_to_auth_json.py --sso accounts_xxx.txt --cpa-auth-dir ./cpa_auths
+
+# 远程上传（需 CPA management 明文密钥）
+python sso_to_auth_json.py --sso accounts_xxx.txt \
+  --cpa-remote-url http://127.0.0.1:8317 \
+  --cpa-management-key '明文管理密钥'
+```
+

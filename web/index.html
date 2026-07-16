@@ -360,7 +360,8 @@
             <div class="field span-2">
               <div class="label">代理模式</div>
               <select id="proxyMode">
-                <option value="airport" selected>机场 Mihomo</option>
+                <option value="socks5_list" selected>SOCKS5 代理池（推荐）</option>
+                <option value="airport">机场 Mihomo</option>
                 <option value="cliproxy_white">Cliproxy 白名单</option>
                 <option value="direct">直连</option>
                 <option value="custom">自定义代理 URL</option>
@@ -413,6 +414,42 @@
             </div>
             <div class="action-bar">
               <button id="testProxyBtnAirport" class="btn" type="button">测试机场出口</button>
+            </div>
+          </div>
+
+
+          <div id="proxySocks5Box" class="soft-box" style="display:none;margin-top:12px">
+            <div class="form-grid two">
+              <div class="field span-2">
+                <div class="label">SOCKS5 代理池（每行一条，网页保存即可，无需改文件）</div>
+                <textarea id="proxy_list" rows="8" style="width:100%;min-height:140px;font-family:var(--mono);font-size:12px;line-height:1.45;resize:vertical"
+                  placeholder="host:port:user:pass&#10;host:port:user:pass&#10;或 socks5://user:pass@host:port"></textarea>
+                <div class="hint" style="margin-top:6px">
+                  支持格式：<code class="inline">host:port:user:pass</code>、
+                  <code class="inline">user:pass@host:port</code>、
+                  <code class="inline">socks5h://user:pass@host:port</code>。
+                  点「保存配置」写入配置并同步列表文件；注册/HTTP/YYDS/浏览器共用。
+                </div>
+              </div>
+              <div class="field">
+                <div class="label">协议 scheme</div>
+                <select id="proxy_scheme">
+                  <option value="socks5h" selected>socks5h（域名远端解析，推荐）</option>
+                  <option value="socks5">socks5（本地域名解析）</option>
+                </select>
+              </div>
+              <div class="field">
+                <div class="label">池内行数</div>
+                <div id="proxyListCount" class="hint" style="padding-top:8px;font-family:var(--mono)">0</div>
+              </div>
+              <div class="field span-2">
+                <label class="check-row"><input id="proxy_rotate" type="checkbox" checked /> 启用轮询切换（失败自动下一条）</label>
+                <label class="check-row" style="margin-top:6px"><input id="proxy_no_direct_fallback" type="checkbox" checked /> 失败不回落直连（推荐）</label>
+              </div>
+            </div>
+            <div class="action-bar">
+              <button id="testProxyBtnSocks5" class="btn" type="button">测试 SOCKS5 池</button>
+              <span id="proxyListHint" class="hint" style="margin-left:8px"></span>
             </div>
           </div>
 
@@ -519,13 +556,17 @@
           <div class="section-head">
             <div>
               <div class="section-title">邮箱来源</div>
-              <div class="section-sub">只启用一种即可，切换 Tab 填写对应参数</div>
+              <div class="section-sub">一次只启用一种邮箱来源；公共临时邮箱无需 Key，切换 Tab 即可</div>
             </div>
           </div>
           <div class="provider-tabs">
             <button type="button" class="provider-tab active" data-p="cloudflare">Cloudflare</button>
             <button type="button" class="provider-tab" data-p="duckmail">DuckMail</button>
             <button type="button" class="provider-tab" data-p="yyds">YYDS</button>
+            <button type="button" class="provider-tab" data-p="tempmail_io">TempMail.io</button>
+            <button type="button" class="provider-tab" data-p="linshiyouxiang">临时邮箱.net</button>
+            <button type="button" class="provider-tab" data-p="boomlify">Boomlify</button>
+            <button type="button" class="provider-tab" data-p="tempmail_org">TempMail.org</button>
           </div>
           <input type="hidden" id="email_provider" value="cloudflare" />
 
@@ -573,6 +614,38 @@
                 <div class="label">YYDS JWT（可选）</div>
                 <input id="yyds_jwt" type="password" autocomplete="off" />
               </div>
+            </div>
+          </div>
+
+          <div id="panel-tempmail_io" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>TempMail.io</b> 公共接口，无需 API Key。</p>
+              <p>· 推荐优先使用：建箱稳定，收信接口清晰。</p>
+              <p>· 站点：https://temp-mail.io/zh</p>
+            </div>
+          </div>
+
+          <div id="panel-linshiyouxiang" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>临时邮箱.net</b> 公共接口，无需 API Key。</p>
+              <p>· 高频请求可能触发 429 / 验证码，失败会在日志里提示。</p>
+              <p>· 站点：https://www.linshiyouxiang.net/</p>
+            </div>
+          </div>
+
+          <div id="panel-boomlify" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>Boomlify</b> 公共接口，无需 API Key。</p>
+              <p>· 部分环境创建邮箱会要求 CAPTCHA，失败时请换其他来源或稍后重试。</p>
+              <p>· 站点：https://boomlify.com/zh/temp-mail-instant</p>
+            </div>
+          </div>
+
+          <div id="panel-tempmail_org" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>TempMail.org</b> 公共接口（best-effort），无需 API Key。</p>
+              <p>· 本机常被 Cloudflare 拦截；失败请改用 TempMail.io / 临时邮箱.net / Boomlify。</p>
+              <p>· 站点：https://temp-mail.org/zh/</p>
             </div>
           </div>
         </div>
@@ -705,18 +778,38 @@
       document.querySelectorAll('.provider-tab').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.p === p);
       });
-      $('panel-cloudflare').style.display = p === 'cloudflare' ? 'grid' : 'none';
-      $('panel-duckmail').style.display = p === 'duckmail' ? 'grid' : 'none';
-      $('panel-yyds').style.display = p === 'yyds' ? 'grid' : 'none';
+      const panels = [
+        'cloudflare', 'duckmail', 'yyds',
+        'tempmail_io', 'linshiyouxiang', 'boomlify', 'tempmail_org'
+      ];
+      panels.forEach((name) => {
+        const el = $('panel-' + name);
+        if (!el) return;
+        const showAsGrid = (name === 'cloudflare' || name === 'yyds');
+        el.style.display = p === name ? (showAsGrid ? 'grid' : 'block') : 'none';
+      });
     }
 
     function syncProxyMode() {
       const mode = $('proxyMode').value;
       if ($('proxyAirportBox')) $('proxyAirportBox').style.display = mode === 'airport' ? 'block' : 'none';
+      if ($('proxySocks5Box')) $('proxySocks5Box').style.display = (mode === 'socks5_list' || mode === 'socks5_pool' || mode === 'list' || mode === 'socks5') ? 'block' : 'none';
       if ($('proxyCliproxyBox')) $('proxyCliproxyBox').style.display = mode === 'cliproxy_white' ? 'grid' : 'none';
       if ($('proxyCustomBox')) $('proxyCustomBox').style.display = mode === 'custom' ? 'grid' : 'none';
       if ($('proxyGroupBox')) $('proxyGroupBox').style.display = mode === 'whitelist' ? 'grid' : 'none';
+      updateProxyListCount();
       updateProxyPreview();
+    }
+
+    function updateProxyListCount() {
+      const ta = $('proxy_list');
+      const el = $('proxyListCount');
+      if (!el) return;
+      if (!ta) { el.textContent = '0'; return; }
+      const n = (ta.value || '').split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#')).length;
+      el.textContent = String(n);
+      const hint = $('proxyListHint');
+      if (hint) hint.textContent = n ? ('已识别 ' + n + ' 条代理') : '请粘贴代理，每行一条';
     }
 
     function updateProxyPreview() {
@@ -739,6 +832,12 @@
         } else {
           el.textContent = `${base}?region=${encodeURIComponent(region)}&num=${encodeURIComponent(num)}&time=${encodeURIComponent(time)}&format=${encodeURIComponent(format)}&type=txt`;
         }
+        return;
+      }
+      if (mode === 'socks5_list' || mode === 'socks5_pool' || mode === 'list' || mode === 'socks5') {
+        const n = (($('proxy_list')?.value || '').split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#')).length);
+        const scheme = ($('proxy_scheme')?.value || 'socks5h').trim() || 'socks5h';
+        el.textContent = n ? (scheme + ' 通用池 · ' + n + ' 条 · 保存后立即生效') : 'SOCKS5 池为空，请粘贴代理';
         return;
       }
       if (mode !== 'whitelist') {
@@ -867,6 +966,7 @@
       if (mode === 'airport') proxy = airportUrl;
       else if (mode === 'direct') proxy = '';
       else if (mode === 'custom') proxy = customProxy;
+      else if (mode === 'socks5_list' || mode === 'socks5_pool' || mode === 'list' || mode === 'socks5') proxy = '';
       return {
         email_provider: $('email_provider').value,
         cloudflare_api_base: $('cloudflare_api_base').value.trim(),
@@ -904,6 +1004,11 @@
         proxy_duration: String($('proxy_duration').value || '10').trim(),
         proxy_user_template: ($('proxy_user_template')?.value || '{user}{delimiter}region{delimiter}{country}').trim(),
         proxy_session: $('proxy_session')?.value.trim() || '',
+        proxy_list: ($('proxy_list')?.value || '').replace(/\r\n/g, '\n').trim(),
+        proxy_list_file: 'socks5_proxies.txt',
+        proxy_scheme: ($('proxy_scheme')?.value || 'socks5h').trim() || 'socks5h',
+        proxy_rotate: !!$('proxy_rotate')?.checked,
+        proxy_no_direct_fallback: !!$('proxy_no_direct_fallback')?.checked,
         enable_nsfw: $('enable_nsfw').checked,
         nsfw_async: $('nsfw_async') ? $('nsfw_async').checked : true,
         post_success_async: $('post_success_async') ? $('post_success_async').checked : true,
@@ -954,9 +1059,14 @@
       setVal('proxy_duration', c.proxy_duration || '10');
       setVal('proxy_user_template', c.proxy_user_template || '{user}{delimiter}region{delimiter}{country}');
       setVal('proxy_session', c.proxy_session || '');
+      setVal('proxy_list', c.proxy_list || c.proxy_list_text || '');
+      setVal('proxy_scheme', c.proxy_scheme || 'socks5h');
+      setVal('proxy_rotate', c.proxy_rotate !== false);
+      setVal('proxy_no_direct_fallback', c.proxy_no_direct_fallback !== false);
+      updateProxyListCount();
       let mode = (c.proxy_mode || '').trim();
       // 旧配置：custom + 7893 视为机场模式，方便界面识别
-      if (!mode) mode = 'airport';
+      if (!mode) mode = 'socks5_list';
       if (mode === 'custom' && String(c.proxy || '').includes(':7893')) mode = 'airport';
       if (!$('proxyMode').querySelector(`option[value="${mode}"]`)) {
         const opt = document.createElement('option');
@@ -1206,6 +1316,11 @@
       btn.addEventListener('click', () => setProvider(btn.dataset.p));
     });
     $('proxyMode').addEventListener('change', syncProxyMode);
+    if ($('proxy_list')) {
+      $('proxy_list').addEventListener('input', function () { updateProxyListCount(); updateProxyPreview(); });
+    }
+    if ($('proxy_scheme')) $('proxy_scheme').addEventListener('change', updateProxyPreview);
+    if ($('testProxyBtnSocks5')) $('testProxyBtnSocks5').addEventListener('click', testCliproxyFetch);
     $('proxy_airport_url')?.addEventListener('input', updateProxyPreview);
     $('testProxyBtnAirport')?.addEventListener('click', testCliproxyFetch);
     ['proxy_api_url','proxy_api_num','proxy_api_format','proxy_host','proxy_port','proxy_user','proxy_pass','proxy_country','proxy_delimiter','proxy_duration','proxy_user_template','proxy_session']

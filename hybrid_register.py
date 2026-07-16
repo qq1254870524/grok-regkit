@@ -121,7 +121,16 @@ def register_one_hybrid(
             if stop():
                 return False
 
-            code = get_oai_code(mail_token, email, log_callback=log)
+            log(
+                f"[hybrid] 等待邮箱验证码 email={email} timeout=180s "
+                f"(cancel 支持已启用；无信时会每约15s心跳)"
+            )
+            code = get_oai_code(
+                mail_token,
+                email,
+                log_callback=log,
+                cancel_callback=stop,
+            )
             clean = str(code or "").replace("-", "").strip()
             if not clean:
                 log("[hybrid] no mail code")

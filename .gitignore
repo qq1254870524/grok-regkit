@@ -29,3 +29,20 @@ cpa_auths/*
 .vscode/
 DrissionPage/
 autoPortData/
+
+# local secrets / runtime
+token.json
+socks5_proxies.txt
+web_server.log
+web_server.err.log
+
+# local backups / temp
+backup_before_*/
+backup_*/
+__pycache__/
+web/__pycache__/
+*.pyc
+
+# auth exports
+cpa_xai/
+browser/
