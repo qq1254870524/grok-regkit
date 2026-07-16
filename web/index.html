@@ -567,6 +567,9 @@
             <button type="button" class="provider-tab" data-p="linshiyouxiang">临时邮箱.net</button>
             <button type="button" class="provider-tab" data-p="boomlify">Boomlify</button>
             <button type="button" class="provider-tab" data-p="tempmail_org">TempMail.org</button>
+            <button type="button" class="provider-tab" data-p="mailtm">mail.tm</button>
+            <button type="button" class="provider-tab" data-p="tempmail_lol">TempMail.lol</button>
+            <button type="button" class="provider-tab" data-p="tempmail_plus">TempMail.plus</button>
           </div>
           <input type="hidden" id="email_provider" value="cloudflare" />
 
@@ -644,8 +647,32 @@
           <div id="panel-tempmail_org" class="soft-box" style="display:none">
             <div class="tips">
               <p>· <b>TempMail.org</b> 公共接口（best-effort），无需 API Key。</p>
-              <p>· 本机常被 Cloudflare 拦截；失败请改用 TempMail.io / 临时邮箱.net / Boomlify。</p>
+              <p>· 本机常被 Cloudflare 拦截；失败请改用 TempMail.io / 临时邮箱.net / Boomlify / mail.tm。</p>
               <p>· 站点：https://temp-mail.org/zh/</p>
+            </div>
+          </div>
+
+          <div id="panel-mailtm" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>mail.tm</b> 公共接口，无需 API Key。</p>
+              <p>· 通过 api.mail.tm 建箱与收信；已冒烟验证可创建邮箱。</p>
+              <p>· 站点：https://mail.tm/</p>
+            </div>
+          </div>
+
+          <div id="panel-tempmail_lol" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>TempMail.lol</b> 公共接口（v2），无需 API Key。</p>
+              <p>· 通过 api.tempmail.lol 建箱与收信；已冒烟验证可创建邮箱。</p>
+              <p>· 站点：https://tempmail.lol/</p>
+            </div>
+          </div>
+
+          <div id="panel-tempmail_plus" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>TempMail.plus</b> 公共接口，无需 API Key。</p>
+              <p>· 通过 tempmail.plus/api 建箱与收信；已冒烟验证可创建邮箱。</p>
+              <p>· 站点：https://tempmail.plus/</p>
             </div>
           </div>
         </div>
@@ -780,7 +807,7 @@
       });
       const panels = [
         'cloudflare', 'duckmail', 'yyds',
-        'tempmail_io', 'linshiyouxiang', 'boomlify', 'tempmail_org'
+        'tempmail_io', 'linshiyouxiang', 'boomlify', 'tempmail_org', 'mailtm', 'tempmail_lol', 'tempmail_plus'
       ];
       panels.forEach((name) => {
         const el = $('panel-' + name);
