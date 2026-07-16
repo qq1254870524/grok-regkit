@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Public temporary-email providers for grok-regkit.
 
@@ -9,6 +9,9 @@ Changelog:
 - 2026-07-17 v2: Add heartbeat logs every ~15s while waiting for verification codes
   so UI/Web does not look stuck; improve timeout errors with provider+email;
   support cancel during wait (already had cancel_callback, now more visible).
+- 2026-07-17 v3: Survey + integrate more public temp mails that pass live smoke:
+  mail.tm (mailtm), tempmail.lol v2, tempmail.plus (mailto.plus free inbox).
+  Documented other candidates and live status in docs/public-temp-email-catalog.md.
 """
 
 from __future__ import annotations
@@ -29,6 +32,9 @@ CancelCb = Optional[Callable[[], bool]]
 TEMPMAIL_IO_BASE = "https://api.internal.temp-mail.io/api/v3"
 LINSHI_BASE = "https://www.linshiyouxiang.net"
 BOOMLIFY_BASE = "https://v1.boomlify.com"
+MAILTM_BASE = "https://api.mail.tm"
+TEMPMAIL_LOL_BASE = "https://api.tempmail.lol"
+TEMPMAIL_PLUS_BASE = "https://tempmail.plus/api"
 TEMPMAIL_ORG_CANDIDATES = (
     "https://web2.temp-mail.org",
     "https://api2.temp-mail.org",
@@ -811,6 +817,320 @@ def tempmail_org_get_code(
 
 # ---------------- dispatcher ----------------
 
+
+# ---------------------------------------------------------------------------
+# mail.tm  (public, no key)
+# docs: GET /domains, POST /accounts, POST /token, GET /messages
+# ---------------------------------------------------------------------------
+
+
+def mailtm_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
+    s = _session(proxies)
+    r = s.get(f"{MAILTM_BASE}/domains", timeout=25)
+    if r.status_code >= 400:
+        raise Exception(f"mail.tm domains HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json() if r.content else {}
+    members = data.get("hydra:member") or data.get("member") or []
+    if not members:
+        raise Exception("mail.tm 无可用域名")
+    domain = str(members[0].get("domain") or "").strip()
+    if not domain:
+        raise Exception("mail.tm 域名字段为空")
+    local = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(10))
+    address = f"{local}@{domain}"
+    password = secrets.token_urlsafe(12)
+    r2 = s.post(
+        f"{MAILTM_BASE}/accounts",
+        json={"address": address, "password": password},
+        timeout=25,
+    )
+    if r2.status_code not in (200, 201):
+        raise Exception(f"mail.tm create account HTTP {r2.status_code}: {r2.text[:200]}")
+    r3 = s.post(
+        f"{MAILTM_BASE}/token",
+        json={"address": address, "password": password},
+        timeout=25,
+    )
+    if r3.status_code >= 400:
+        raise Exception(f"mail.tm token HTTP {r3.status_code}: {r3.text[:200]}")
+    token_jwt = str((r3.json() or {}).get("token") or "").strip()
+    if not token_jwt:
+        raise Exception("mail.tm token 为空")
+    _log(log_callback, f"[+] mail.tm 建箱成功: {address}")
+    return address, _token_pack("mailtm", jwt=token_jwt, password=password, address=address)
+
+
+def mailtm_messages(token: str, proxies: Optional[dict] = None) -> List[dict]:
+    pack = _token_unpack(token)
+    jwt = pack.get("jwt") or token
+    s = _session(proxies)
+    s.headers["Authorization"] = f"Bearer {jwt}"
+    r = s.get(f"{MAILTM_BASE}/messages", timeout=25)
+    if r.status_code >= 400:
+        raise Exception(f"mail.tm messages HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json() if r.content else {}
+    return list(data.get("hydra:member") or data.get("member") or [])
+
+
+def mailtm_message_body(msg_id: str, token: str, proxies: Optional[dict] = None) -> str:
+    pack = _token_unpack(token)
+    jwt = pack.get("jwt") or token
+    s = _session(proxies)
+    s.headers["Authorization"] = f"Bearer {jwt}"
+    r = s.get(f"{MAILTM_BASE}/messages/{msg_id}", timeout=25)
+    if r.status_code >= 400:
+        return ""
+    item = r.json() if r.content else {}
+    _, subject, blob = _flatten_message(item)
+    return f"{subject}\n{blob}"
+
+
+def mailtm_get_code(
+    token: str,
+    email: str,
+    timeout: int = 180,
+    poll_interval: int = 3,
+    log_callback: LogCb = None,
+    cancel_callback: CancelCb = None,
+    extract_fn=None,
+    proxies: Optional[dict] = None,
+) -> str:
+    started = time.time()
+    last_hb: list = []
+    seen = set()
+    while time.time() - started < timeout:
+        _raise_if_cancelled(cancel_callback)
+        try:
+            messages = mailtm_messages(token, proxies=proxies)
+        except Exception as exc:
+            _log(log_callback, f"[!] mail.tm 拉信失败: {exc}")
+            messages = []
+        _wait_heartbeat(log_callback, "mailtm", email, started, timeout, len(messages), last_hb)
+        for item in messages:
+            msg_id, subject, blob = _flatten_message(item)
+            if msg_id and msg_id in seen:
+                continue
+            if msg_id:
+                seen.add(msg_id)
+            body = blob
+            if msg_id:
+                extra = mailtm_message_body(msg_id, token, proxies=proxies)
+                if extra:
+                    body = body + "\n" + extra
+            code = _extract_code(body, subject, extract_fn=extract_fn)
+            if code:
+                _log(log_callback, f"[+] mail.tm 取到验证码: {code}")
+                return code
+        _sleep(poll_interval, cancel_callback)
+    raise Exception(f"等待验证码超时 provider=mailtm email={email} timeout={timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# tempmail.lol v2  (public, no key)
+# POST /v2/inbox/create -> {address, token}
+# GET  /v2/inbox?token=...
+# ---------------------------------------------------------------------------
+
+
+def tempmail_lol_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
+    s = _session(proxies)
+    r = s.post(f"{TEMPMAIL_LOL_BASE}/v2/inbox/create", json={}, timeout=25)
+    if r.status_code not in (200, 201):
+        # fallback v1 generate
+        r = s.get(f"{TEMPMAIL_LOL_BASE}/generate", timeout=25)
+        if r.status_code >= 400:
+            raise Exception(f"tempmail.lol create HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json() if r.content else {}
+    address = str(data.get("address") or data.get("email") or "").strip()
+    tok = str(data.get("token") or "").strip()
+    if not address or not tok:
+        raise Exception(f"tempmail.lol 响应缺字段: {str(data)[:200]}")
+    _log(log_callback, f"[+] tempmail.lol 建箱成功: {address}")
+    return address, _token_pack("tempmail_lol", token=tok, address=address)
+
+
+def tempmail_lol_messages(token: str, proxies: Optional[dict] = None) -> List[dict]:
+    pack = _token_unpack(token)
+    tok = pack.get("token") or token
+    s = _session(proxies)
+    r = s.get(f"{TEMPMAIL_LOL_BASE}/v2/inbox", params={"token": tok}, timeout=25)
+    if r.status_code >= 400:
+        # v1 style
+        r = s.get(f"{TEMPMAIL_LOL_BASE}/auth/{tok}", timeout=25)
+        if r.status_code >= 400:
+            raise Exception(f"tempmail.lol inbox HTTP {r.status_code}: {r.text[:200]}")
+        data = r.json() if r.content else {}
+        emails = data.get("email") or data.get("emails") or data.get("messages") or []
+        return list(emails) if isinstance(emails, list) else []
+    data = r.json() if r.content else {}
+    emails = data.get("emails") or data.get("email") or data.get("messages") or []
+    return list(emails) if isinstance(emails, list) else []
+
+
+def tempmail_lol_get_code(
+    token: str,
+    email: str,
+    timeout: int = 180,
+    poll_interval: int = 3,
+    log_callback: LogCb = None,
+    cancel_callback: CancelCb = None,
+    extract_fn=None,
+    proxies: Optional[dict] = None,
+) -> str:
+    started = time.time()
+    last_hb: list = []
+    seen = set()
+    while time.time() - started < timeout:
+        _raise_if_cancelled(cancel_callback)
+        try:
+            messages = tempmail_lol_messages(token, proxies=proxies)
+        except Exception as exc:
+            _log(log_callback, f"[!] tempmail.lol 拉信失败: {exc}")
+            messages = []
+        _wait_heartbeat(log_callback, "tempmail_lol", email, started, timeout, len(messages), last_hb)
+        for item in messages:
+            msg_id, subject, blob = _flatten_message(item)
+            # lol may use body / html / text differently
+            if isinstance(item, dict):
+                blob = "\n".join(
+                    [
+                        blob,
+                        str(item.get("body") or ""),
+                        str(item.get("html") or ""),
+                        str(item.get("text") or ""),
+                        str(item.get("content") or ""),
+                    ]
+                )
+            key = msg_id or (subject + blob[:80])
+            if key in seen:
+                continue
+            seen.add(key)
+            code = _extract_code(blob, subject, extract_fn=extract_fn)
+            if code:
+                _log(log_callback, f"[+] tempmail.lol 取到验证码: {code}")
+                return code
+        _sleep(poll_interval, cancel_callback)
+    raise Exception(f"等待验证码超时 provider=tempmail_lol email={email} timeout={timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# tempmail.plus  (public free inbox, no create API; random local@mailto.plus)
+# GET /api/mails?email=...&limit=20
+# GET /api/mails/{id}?email=...
+# ---------------------------------------------------------------------------
+
+
+def tempmail_plus_create(proxies: Optional[dict] = None, log_callback: LogCb = None) -> Tuple[str, str]:
+    local = "g" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(12))
+    # common free domains observed: mailto.plus, fexpost.com, fexbox.org, mailbox.in.ua, rover.info, chitthi.in
+    domains = [
+        "mailto.plus",
+        "fexpost.com",
+        "fexbox.org",
+        "mailbox.in.ua",
+        "rover.info",
+        "chitthi.in",
+        "fextemp.com",
+        "any.pink",
+    ]
+    domain = secrets.choice(domains)
+    address = f"{local}@{domain}"
+    # probe list endpoint once
+    s = _session(proxies)
+    r = s.get(f"{TEMPMAIL_PLUS_BASE}/mails", params={"email": address, "limit": 1}, timeout=25)
+    if r.status_code >= 400:
+        # fallback primary domain
+        address = f"{local}@mailto.plus"
+        r = s.get(f"{TEMPMAIL_PLUS_BASE}/mails", params={"email": address, "limit": 1}, timeout=25)
+        if r.status_code >= 400:
+            raise Exception(f"tempmail.plus 建箱探测 HTTP {r.status_code}: {r.text[:200]}")
+    _log(log_callback, f"[+] tempmail.plus 建箱成功: {address}")
+    return address, _token_pack("tempmail_plus", address=address)
+
+
+def tempmail_plus_messages(token: str, proxies: Optional[dict] = None) -> List[dict]:
+    pack = _token_unpack(token)
+    address = pack.get("address") or ""
+    if not address:
+        raise Exception("tempmail.plus token 缺少 address")
+    s = _session(proxies)
+    r = s.get(f"{TEMPMAIL_PLUS_BASE}/mails", params={"email": address, "limit": 50}, timeout=25)
+    if r.status_code >= 400:
+        raise Exception(f"tempmail.plus list HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json() if r.content else {}
+    return list(data.get("mail_list") or data.get("mails") or [])
+
+
+def tempmail_plus_message_body(mail_id: str, address: str, proxies: Optional[dict] = None) -> str:
+    s = _session(proxies)
+    r = s.get(f"{TEMPMAIL_PLUS_BASE}/mails/{mail_id}", params={"email": address}, timeout=25)
+    if r.status_code >= 400:
+        return ""
+    item = r.json() if r.content else {}
+    if isinstance(item, dict) and "data" in item and isinstance(item["data"], dict):
+        item = item["data"]
+    _, subject, blob = _flatten_message(item if isinstance(item, dict) else {})
+    return f"{subject}\n{blob}"
+
+
+def tempmail_plus_get_code(
+    token: str,
+    email: str,
+    timeout: int = 180,
+    poll_interval: int = 3,
+    log_callback: LogCb = None,
+    cancel_callback: CancelCb = None,
+    extract_fn=None,
+    proxies: Optional[dict] = None,
+) -> str:
+    pack = _token_unpack(token)
+    address = pack.get("address") or email
+    started = time.time()
+    last_hb: list = []
+    seen = set()
+    while time.time() - started < timeout:
+        _raise_if_cancelled(cancel_callback)
+        try:
+            messages = tempmail_plus_messages(token, proxies=proxies)
+        except Exception as exc:
+            _log(log_callback, f"[!] tempmail.plus 拉信失败: {exc}")
+            messages = []
+        _wait_heartbeat(log_callback, "tempmail_plus", address, started, timeout, len(messages), last_hb)
+        for item in messages:
+            msg_id = str(
+                item.get("mail_id")
+                or item.get("id")
+                or item.get("first_id")
+                or item.get("message_id")
+                or ""
+            )
+            subject = str(item.get("subject") or item.get("Subject") or "")
+            blob = "\n".join(
+                [
+                    subject,
+                    str(item.get("from_mail") or ""),
+                    str(item.get("from_name") or ""),
+                    str(item.get("summary") or item.get("text") or item.get("preview") or ""),
+                ]
+            )
+            if msg_id and msg_id not in seen:
+                seen.add(msg_id)
+                extra = tempmail_plus_message_body(msg_id, address, proxies=proxies)
+                if extra:
+                    blob = blob + "\n" + extra
+            elif not msg_id:
+                key = subject + blob[:60]
+                if key in seen:
+                    continue
+                seen.add(key)
+            code = _extract_code(blob, subject, extract_fn=extract_fn)
+            if code:
+                _log(log_callback, f"[+] tempmail.plus 取到验证码: {code}")
+                return code
+        _sleep(poll_interval, cancel_callback)
+    raise Exception(f"等待验证码超时 provider=tempmail_plus email={address} timeout={timeout}s")
+
+
 PUBLIC_PROVIDERS = {
     "tempmail_io": {
         "label": "TempMail.io",
@@ -846,6 +1166,36 @@ PUBLIC_PROVIDERS = {
         "label": "TempMail.org",
         "create": tempmail_org_create,
         "get_code": tempmail_org_get_code,
+    },
+    "mailtm": {
+        "label": "Mail.tm",
+        "create": mailtm_create,
+        "get_code": mailtm_get_code,
+    },
+    "mail.tm": {
+        "label": "Mail.tm",
+        "create": mailtm_create,
+        "get_code": mailtm_get_code,
+    },
+    "tempmail_lol": {
+        "label": "TempMail.lol",
+        "create": tempmail_lol_create,
+        "get_code": tempmail_lol_get_code,
+    },
+    "tempmail.lol": {
+        "label": "TempMail.lol",
+        "create": tempmail_lol_create,
+        "get_code": tempmail_lol_get_code,
+    },
+    "tempmail_plus": {
+        "label": "TempMail.plus",
+        "create": tempmail_plus_create,
+        "get_code": tempmail_plus_get_code,
+    },
+    "tempmail.plus": {
+        "label": "TempMail.plus",
+        "create": tempmail_plus_create,
+        "get_code": tempmail_plus_get_code,
     },
 }
 
@@ -905,6 +1255,12 @@ def smoke_test_provider(provider: str, proxies: Optional[dict] = None) -> dict:
             messages = boomlify_messages(token, proxies=proxies)
         elif key in ("tempmail_org", "temp-mail.org"):
             messages = tempmail_org_messages(token, proxies=proxies)
+        elif key in ("mailtm", "mail.tm"):
+            messages = mailtm_messages(token, proxies=proxies)
+        elif key in ("tempmail_lol", "tempmail.lol"):
+            messages = tempmail_lol_messages(token, proxies=proxies)
+        elif key in ("tempmail_plus", "tempmail.plus"):
+            messages = tempmail_plus_messages(token, proxies=proxies)
     except Exception as exc:
         return {
             "ok": True,

@@ -41,9 +41,12 @@
         "tempmail_io",
         "linshiyouxiang",
         "boomlify",
-        "tempmail_org"
+        "tempmail_org",
+        "mailtm",
+        "tempmail_lol",
+        "tempmail_plus"
     ],
-    "_email_provider_note": "公共临时邮箱 tempmail_io/linshiyouxiang/boomlify/tempmail_org 无需 API Key；推荐 tempmail_io",
+    "_email_provider_note": "公共临时邮箱 tempmail_io/linshiyouxiang/boomlify/tempmail_org 无需 API Key；推荐 tempmail_io 另含公共无 key：mailtm / tempmail_lol / tempmail_plus。",
     "cpa_auto_add": true,
     "cpa_remote_url": "http://127.0.0.1:8317",
     "cpa_management_key": "",

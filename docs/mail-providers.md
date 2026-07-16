@@ -93,3 +93,19 @@ Outlook 独立说明见 chatgpt2api 仓内：`outlook_mail_fetcher_README.md`（
 | `config.example.json` | 字段模板 |
 
 browser 与 hybrid **不需要**为邮箱再选一遍模式。
+
+---
+
+## 公共无 Key 临时邮箱（2026-07-17 增补）
+
+| `email_provider` | 说明 |
+|------------------|------|
+| `mailtm` / `mail.tm` | [Mail.tm](https://mail.tm) 公开 API |
+| `tempmail_lol` / `tempmail.lol` | [TempMail.lol](https://tempmail.lol) v2 |
+| `tempmail_plus` / `tempmail.plus` | [TempMail.plus](https://tempmail.plus) 随机 free 域 |
+| `tempmail_io` | Temp-Mail.io |
+| `linshiyouxiang` | 临时邮箱.net |
+| `boomlify` | Boomlify |
+| `tempmail_org` | Temp-Mail.org（常被 CF） |
+
+完整探测清单见 [public-temp-email-catalog.md](./public-temp-email-catalog.md)。

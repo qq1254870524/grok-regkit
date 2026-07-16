@@ -8,7 +8,7 @@ Changelog:
 - 2026-07-17c: SOCKS5 代理池改为通用 proxy_mode=socks5_list（注册/HTTP/YYDS/浏览器共用），
   socks5_proxies.txt；失败轮询；Chromium 本地 SOCKS5 认证桥；需 PySocks。
 - 2026-07-17b: 原 email_proxy_* 专用池已并入通用代理池。
-- 2026-07-17: 接入公共临时邮箱 provider（tempmail_io / linshiyouxiang / boomlify / tempmail_org），
+- 2026-07-17: 接入公共临时邮箱 provider（tempmail_io / linshiyouxiang / boomlify / tempmail_org） + mailtm / tempmail_lol / tempmail_plus，
   与 cloudflare/duckmail/yyds 共用 email_provider 单选开关；建箱与收验证码走 temp_email_public_providers。
 """
 
@@ -4798,7 +4798,7 @@ class GrokRegisterGUI:
 
         add_label(0, 0, "邮箱服务商:")
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org"], width=16)
+        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org", "mailtm", "tempmail_lol", "tempmail_plus"], width=16)
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
         add_label(0, 2, "注册数量:")
