@@ -1741,6 +1741,11 @@ def add_token_to_grok2api_remote_pool(
         endpoint = f"{api_base}/tokens/add"
         for attempt in range(1, max_http_tries + 1):
             try:
+                if log_callback and attempt == 1:
+                    mode = "直连" if _is_loopback_url(endpoint) else "走代理"
+                    log_callback(
+                        f"[*] 号池远端 POST {endpoint} | pool={remote_pool}/{pool_name} | {mode}"
+                    )
                 resp_add = http_post(
                     endpoint,
                     headers=headers,
@@ -2415,19 +2420,47 @@ def create_browser_options(browser_proxy="", force_headless=None):
     return options
 
 
-def _build_request_kwargs(**kwargs):
+def _is_loopback_url(url) -> bool:
+    """True for local management APIs that must never go through SOCKS/HTTP proxy."""
+    try:
+        host = (urllib.parse.urlparse(str(url or "")).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+        return True
+    if host.endswith(".localhost"):
+        return True
+    # IPv6 loopback variants
+    if host.startswith("127."):
+        return True
+    return False
+
+
+def _build_request_kwargs(url=None, **kwargs):
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
+    # Local services (grok2api/CPA on 127.0.0.1) must be direct; SOCKS5 to
+    # remote would timeout and look like "号池失败".
     if proxies is None:
-        proxies = get_proxies()
+        if url and _is_loopback_url(url):
+            proxies = {}
+        else:
+            proxies = get_proxies()
+    elif proxies and url and _is_loopback_url(url):
+        proxies = {}
     if proxies:
         request_kwargs["proxies"] = proxies
+    elif "proxies" in kwargs or (url and _is_loopback_url(url)):
+        # Explicit empty proxies disables env/system proxy for curl_cffi
+        request_kwargs["proxies"] = {}
     request_kwargs.setdefault("timeout", 15)
     return request_kwargs
 
 
 def http_get(url, **kwargs):
-    request_kwargs = _build_request_kwargs(**kwargs)
+    request_kwargs = _build_request_kwargs(url=url, **kwargs)
     try:
         return requests.get(url, **request_kwargs)
     except Exception as exc:
@@ -2441,7 +2474,7 @@ def http_get(url, **kwargs):
                 for _ in range(max(0, len(pool) - 1)):
                     mark_proxy_bad(get_configured_proxy())
                     try:
-                        return requests.get(url, **_build_request_kwargs(**kwargs))
+                        return requests.get(url, **_build_request_kwargs(url=url, **kwargs))
                     except Exception as exc2:
                         last = exc2
                         if not (
@@ -2454,12 +2487,12 @@ def http_get(url, **kwargs):
             if not is_socks5_list_mode():
                 retry_kwargs = dict(kwargs)
                 retry_kwargs["proxies"] = {}
-                return requests.get(url, **_build_request_kwargs(**retry_kwargs))
+                return requests.get(url, **_build_request_kwargs(url=url, **retry_kwargs))
         raise
 
 
 def http_post(url, **kwargs):
-    request_kwargs = _build_request_kwargs(**kwargs)
+    request_kwargs = _build_request_kwargs(url=url, **kwargs)
     try:
         return requests.post(url, **request_kwargs)
     except Exception as exc:
@@ -2473,7 +2506,7 @@ def http_post(url, **kwargs):
                 for _ in range(max(0, len(pool) - 1)):
                     mark_proxy_bad(get_configured_proxy())
                     try:
-                        return requests.post(url, **_build_request_kwargs(**kwargs))
+                        return requests.post(url, **_build_request_kwargs(url=url, **kwargs))
                     except Exception as exc2:
                         last = exc2
                         if not (
@@ -2486,7 +2519,7 @@ def http_post(url, **kwargs):
             if not is_socks5_list_mode():
                 retry_kwargs = dict(kwargs)
                 retry_kwargs["proxies"] = {}
-                return requests.post(url, **_build_request_kwargs(**retry_kwargs))
+                return requests.post(url, **_build_request_kwargs(url=url, **retry_kwargs))
         raise
 
 def raise_if_cancelled(cancel_callback=None):
