@@ -3,6 +3,10 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-18b: 关闭 UI fallback；协议优先 SignUp；next-action 仅在拿到 SSO 时固化；
+  CreateEmail 成功后禁止重复点击/协议重发，避免验证码过多限流；
+  protocol 返回 RSC fragment/no-sso 时 live re-scrape 再协议重试；
+  验证已过但无 SSO 时落盘 pending_sso 并从邮箱池移除，避免同邮箱反复发信。
 - 2026-07-18: 修复 next-action 失效后 UI 卡在注册页：网络 hook 捕获 next-action；
   browser-fetch 失败后 live re-scrape 再试；UI fallback 接收 email/code 先推进邮箱/验证码页；
   验证已过但无 SSO 时单独落盘 accounts_registered_pending_sso.txt。
@@ -445,18 +449,19 @@ def register_one_hybrid(
             protocol_sent = False
             if browser_sent:
                 log(
-                    f"[hybrid] CreateEmail via browser OK (skip protocol) "
+                    f"[hybrid] CreateEmail via browser OK (skip protocol re-send) "
                     f"castle_len={len(castle)} reason={st.get('reason')}"
                 )
             else:
+                # One careful re-click only if harvest never observed CreateEmail.
                 try:
                     click2 = browser.click_email_continue_for_create(email)
-                    log(f"[hybrid] CreateEmail re-click={click2}")
+                    log(f"[hybrid] CreateEmail single re-click={click2}")
                     time.sleep(2.5)
                     st = browser.create_email_status_via_browser()
                     browser_sent = bool(st.get("sent"))
                     log(
-                        f"[hybrid] CreateEmail after re-click status={st.get('status')} "
+                        f"[hybrid] CreateEmail after single re-click status={st.get('status')} "
                         f"seen={st.get('seen')} ok={st.get('ok')} sent={st.get('sent')} "
                         f"reason={st.get('reason')}"
                     )
@@ -464,8 +469,31 @@ def register_one_hybrid(
                     log(f"[hybrid] CreateEmail re-click error: {re_exc}")
 
             if not browser_sent:
+                # Protocol path only when UI never sent. Never stack protocol on top of browser_sent.
                 r1 = client.create_email_validation_code(email, castle)
-                log(f"[hybrid] CreateEmail protocol status={r1['status']} castle_len={len(castle)}")
+                strings = list(r1.get("strings") or [])
+                log(
+                    f"[hybrid] CreateEmail protocol status={r1['status']} "
+                    f"castle_len={len(castle)} strings={strings[:4]}"
+                )
+                joined = " ".join(str(x) for x in strings)
+                low_joined = joined.lower()
+                if (
+                    "验证码过多" in joined
+                    or "too many" in low_joined
+                    or "too_many" in low_joined
+                    or "rate" in low_joined
+                    or "minute" in low_joined
+                ):
+                    log(
+                        f"[hybrid] CreateEmail rate-limited for {email}; "
+                        f"remove from pool / skip further sends strings={strings[:4]}"
+                    )
+                    try:
+                        remove_mailbox_from_pool(email, reason="create_email_rate_limited", log=log)
+                    except Exception as rm_exc:
+                        log(f"[hybrid] remove rate-limited mailbox fail: {rm_exc}")
+                    return False
                 if r1["status"] >= 400:
                     body_hint = ""
                     try:
@@ -474,7 +502,7 @@ def register_one_hybrid(
                             body_hint = " (Cloudflare block)"
                     except Exception:
                         pass
-                    log(f"[hybrid] CreateEmail fail{body_hint} strings={r1.get('strings')[:2]}")
+                    log(f"[hybrid] CreateEmail fail{body_hint} strings={strings[:4]}")
                     log(
                         "[hybrid] CreateEmail 未真正发信（UI 无 seen/ok 且协议失败），"
                         "跳过 180s 空等验证码"
@@ -597,6 +625,11 @@ def register_one_hybrid(
                     )
 
             log("[hybrid] resolving next-action after turnstile…")
+            try:
+                for a in (browser.read_captured_next_actions() or []):
+                    _add_action(a, "network_hook")
+            except Exception as hook_exc:
+                log(f"[hybrid] network hook next-action fail: {hook_exc}")
             try:
                 scraped = browser.scrape_next_action() or ""
                 _add_action(scraped, "browser_scrape")
@@ -788,13 +821,100 @@ def register_one_hybrid(
                         "stop further protocol candidates; switch to browser same-origin path"
                     )
                     break
-                if st == 404 or "server action not found" in low:
-                    log(f"[hybrid] next-action {act[:16]} invalid (404/not found), try next")
+                if (
+                    st == 404
+                    or "server action not found" in low
+                    or "$sreact.fragment" in low
+                    or "react.fragment" in low
+                ):
+                    log(
+                        f"[hybrid] next-action {act[:16]} invalid/shell "
+                        f"(status={st}, no sso); try next"
+                    )
                     continue
                 log(
                     f"[hybrid] sign-up try {idx} no sso (status={st}); "
                     f"continue next candidate with fresh castle"
                 )
+            # Protocol-first recovery: if candidates only returned RSC shell/no-sso,
+            # live re-scrape next-action and retry protocol once before browser-fetch.
+            if (not sso) and (not protocol_network_dead) and (not stop()):
+                try:
+                    live_retry_acts: list[str] = []
+                    try:
+                        for a in (browser.read_captured_next_actions() or []):
+                            a = (a or "").strip()
+                            if a and a not in live_retry_acts and a != known and a not in candidates:
+                                live_retry_acts.append(a)
+                    except Exception:
+                        pass
+                    try:
+                        scraped2 = (browser.scrape_next_action() or "").strip()
+                        if (
+                            scraped2
+                            and scraped2 not in live_retry_acts
+                            and scraped2 != known
+                            and scraped2 not in candidates
+                        ):
+                            live_retry_acts.append(scraped2)
+                    except Exception as scrape2_exc:
+                        log(f"[hybrid] protocol re-scrape next-action fail: {scrape2_exc}")
+                    if live_retry_acts:
+                        log(
+                            f"[hybrid] protocol live re-scrape retry candidates="
+                            f"{len(live_retry_acts)}"
+                        )
+                    for ridx, act in enumerate(live_retry_acts[:2], 1):
+                        if stop() or sso:
+                            break
+                        try:
+                            jar3 = dict(browser.export_cookies() or {})
+                            for stale in ("sso", "sso-rw"):
+                                jar3.pop(stale, None)
+                            sess.set_cookies(jar3)
+                        except Exception:
+                            pass
+                        castle_tok = _mint_castle_for_try(ridx + 30)
+                        client.next_action = act
+                        log(
+                            f"[hybrid] protocol re-scrape try {ridx} path=protocol/curl "
+                            f"next-action={act[:20]}... castle_len={len(castle_tok)}"
+                        )
+                        t_try = time.time()
+                        try:
+                            r3 = _do_signup(act, castle_tok)
+                        except Exception as signup_exc:
+                            log(f"[hybrid] protocol re-scrape try {ridx} exception: {signup_exc}")
+                            r3 = {
+                                "status": 0,
+                                "text": str(signup_exc),
+                                "cookies": {},
+                                "sso": "",
+                                "error_hints": ["exception"],
+                            }
+                        sso = _extract_sso(r3)
+                        body_txt = str(r3.get("text") or "")
+                        st = r3.get("status")
+                        log(
+                            f"[hybrid] protocol re-scrape try {ridx} status={st} "
+                            f"sso_len={len(sso)} elapsed={time.time() - t_try:.1f}s "
+                            f"body={body_txt[:180]!r}"
+                        )
+                        if not sso:
+                            _log_signup_diag(ridx, r3, path="protocol/curl-rescrape")
+                        if sso:
+                            try:
+                                save_next_action_to_capture(act, log)
+                            except Exception:
+                                pass
+                            break
+                        low = body_txt.lower()
+                        if _is_protocol_network_dead(st, body_txt):
+                            protocol_network_dead = True
+                            break
+                except Exception as prot_live_exc:
+                    log(f"[hybrid] protocol live re-scrape block error: {prot_live_exc}")
+
             log(
                 f"[hybrid] sign-up final status={r3.get('status')} sso_len={len(sso)} "
                 f"elapsed={time.time() - t0:.1f}s protocol_network_dead={protocol_network_dead}"
@@ -940,29 +1060,12 @@ def register_one_hybrid(
                     except Exception as live_exc:
                         log(f"[hybrid] live re-scrape block error: {live_exc}")
 
-                if not sso and not stop():
+                # Explicitly NO UI profile fallback. User requires protocol-first hybrid only.
+                if not sso:
                     log(
-                        "[hybrid] browser-fetch no sso; UI profile submit fallback "
-                        f"email={email} given={given} family={family}"
+                        "[hybrid] browser-fetch no sso; UI fallback DISABLED "
+                        f"(protocol-first) email={email}"
                     )
-                    try:
-                        ui_sso = browser.submit_profile_and_wait_sso(
-                            given_name=given,
-                            family_name=family,
-                            password=password,
-                            turnstile_token=turnstile,
-                            email=email,
-                            code=clean,
-                            timeout=90,
-                            cancel_callback=stop,
-                        )
-                        if ui_sso:
-                            sso = ui_sso
-                            log(f"[hybrid] browser UI fallback sso ok len={len(sso)}")
-                        else:
-                            log("[hybrid] browser UI fallback got no sso")
-                    except Exception as ui_exc:
-                        log(f"[hybrid] browser UI fallback error: {ui_exc}")
             if not sso:
                 # Verification may already have passed; keep email+password for later OOS/SSO.
                 try:
@@ -982,8 +1085,14 @@ def register_one_hybrid(
                         )
                 except Exception as pending_exc:
                     log(f"[hybrid] save pending_sso account fail: {pending_exc}")
+                # Verified mailbox already burned CreateEmail quota; remove from pool.
+                try:
+                    remove_mailbox_from_pool(email, reason="pending_sso_no_sso", log=log)
+                    log(f"[hybrid] removed verified-no-sso mailbox from pool: {email}")
+                except Exception as rm_exc:
+                    log(f"[hybrid] remove pending_sso mailbox fail: {rm_exc}")
                 log(
-                    f"[hybrid] no sso after protocol+browser-fetch+UI cookies="
+                    f"[hybrid] no sso after protocol+browser-fetch cookies="
                     f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"
                 )
                 return False

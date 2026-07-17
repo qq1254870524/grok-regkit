@@ -527,6 +527,9 @@ true;
         deadline = time.time() + max(15, int(timeout))
         last_retry = time.time()
         retries = 0
+        # Hard limit: at most 1 re-click. Multiple CreateEmail on same mailbox
+        # triggers xAI "验证码过多 / retry in N minutes".
+        max_retries = 1
         while time.time() < deadline:
             st = self.create_email_status_via_browser()
             c = self.read_captured_castle()
@@ -536,16 +539,20 @@ true;
                     f"status={st.get('status')} seen={st.get('seen')} net_hits={st.get('net_hits')} "
                     f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
                 )
+                # Once sent is confirmed, NEVER re-click even if castle is late.
                 if c:
                     self._lg(f"[*] native castle len={len(c)} head={c[:20]}")
                     return c
+                # wait a bit more for castle only; no more clicks
+                time.sleep(0.45)
+                continue
             elif c and (time.time() + 8) >= deadline:
                 self._lg(
                     f"[!] CreateEmail not confirmed yet but castle present "
-                    f"len={len(c)} reason={st.get('reason')} — keep waiting/retry click"
+                    f"len={len(c)} reason={st.get('reason')} — wait without extra click"
                 )
 
-            if (not st.get("sent")) and (time.time() - last_retry >= 4.0) and retries < 6:
+            if (not st.get("sent")) and (time.time() - last_retry >= 5.0) and retries < max_retries:
                 retries += 1
                 last_retry = time.time()
                 try:
@@ -555,7 +562,7 @@ true;
                     pass
                 click_r = self.click_email_continue_for_create(email)
                 self._lg(
-                    f"[*] UI CreateEmail retry#{retries} click={click_r} email={email} "
+                    f"[*] UI CreateEmail retry#{retries}/{max_retries} click={click_r} email={email} "
                     f"status={st.get('status')} seen={st.get('seen')} ok={st.get('ok')} "
                     f"net_hits={st.get('net_hits')} reason={st.get('reason')} "
                     f"castle_len={st.get('castle_len')} full_status={st}"
@@ -649,15 +656,16 @@ return all.map(x => String(x || '').trim()).filter(Boolean).slice(0, 20);
         """Find SignUp server-action hash from network hook, HTML, or Next.js chunks."""
         from grok_register_ttk import _get_page
 
-        # Prefer live request headers captured by network hook.
+        # Network hook may capture CreateEmail/other actions. Prefer SignUp-marked
+        # chunk/HTML hashes first; use hook only as a secondary candidate source.
+        hook_actions = []
         try:
-            captured = self.read_captured_next_actions()
-            if captured:
+            hook_actions = self.read_captured_next_actions() or []
+            if hook_actions:
                 self._lg(
-                    f"[*] scrape next-action from network hook "
-                    f"count={len(captured)} value={captured[0][:20]}..."
+                    f"[*] scrape next-action network hook candidates "
+                    f"count={len(hook_actions)} first={str(hook_actions[0])[:20]}..."
                 )
-                return str(captured[0])
         except Exception as e:
             self._lg(f"[Debug] scrape next-action hook: {e}")
 
@@ -666,28 +674,37 @@ return all.map(x => String(x || '').trim()).filter(Boolean).slice(0, 20);
             # Fast path: inline HTML / inline scripts
             action = page.run_js(
                 r"""
-const html = document.documentElement.innerHTML || '';
-let m = html.match(/next-action["'\s:=]+([a-f0-9]{40,})/i);
-if (m) return m[1];
-for (const s of Array.from(document.scripts || [])) {
-  const t = s.textContent || '';
-  if (t.includes('emailValidationCode') && t.includes('castleRequestToken')) {
-    const m2 = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-    if (m2) return m2[1];
+function pickSignupAction(t) {
+  if (!t) return '';
+  const hasSignup =
+    t.includes('emailValidationCode') &&
+    (t.includes('castleRequestToken') || t.includes('createUserAndSession'));
+  if (!hasSignup) return '';
+  let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+  if (m) return m[1];
+  const keys = ['createUserAndSession', 'emailValidationCode', 'castleRequestToken'];
+  for (const key of keys) {
+    const idx = t.indexOf(key);
+    if (idx < 0) continue;
+    const slice = t.slice(Math.max(0, idx - 500), idx + 800);
+    m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+    if (m) return m[1];
+    m = slice.match(/['\"]([a-f0-9]{40,64})['\"]/);
+    if (m) return m[1];
   }
-  const idx = t.indexOf('createUserAndSession');
-  if (idx >= 0) {
-    const slice = t.slice(Math.max(0, idx - 400), idx + 500);
-    const m3 = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-    if (m3) return m3[1];
-    const m4 = slice.match(/[a-f0-9]{40,64}/);
-    if (m4) return m4[0];
-  }
+  return '';
 }
-return '';
+// Prefer inline scripts with signup markers. Do NOT grab arbitrary next-action from full HTML.
+for (const s of Array.from(document.scripts || [])) {
+  const hit = pickSignupAction(s.textContent || '');
+  if (hit) return hit;
+}
+const html = document.documentElement.innerHTML || '';
+return pickSignupAction(html);
 """
             )
             if action:
+                self._lg(f"[*] scrape next-action from inline signup markers len={len(str(action))}")
                 return str(action)
         except Exception as e:
             self._lg(f"[Debug] scrape next-action inline: {e}")
@@ -703,16 +720,29 @@ return (async function(){
     try {
       const t = await fetch(url, {credentials:'same-origin'}).then(r => r.text());
       if (!t) continue;
-      if (!(t.includes('emailValidationCode') && t.includes('castleRequestToken'))) continue;
-      let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+      if (!(
+        t.includes('emailValidationCode') &&
+        (t.includes('castleRequestToken') || t.includes('createUserAndSession'))
+      )) continue;
+      // Prefer createUserAndSession neighborhood first (true SignUp action).
+      let m = null;
+      const idxCu = t.indexOf('createUserAndSession');
+      if (idxCu >= 0) {
+        const sliceCu = t.slice(Math.max(0, idxCu - 500), idxCu + 800);
+        m = sliceCu.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+        if (m) return m[1];
+        m = sliceCu.match(/['\"]([a-f0-9]{40,64})['\"]/);
+        if (m) return m[1];
+      }
+      m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
       if (m) return m[1];
       const idx = t.indexOf('emailValidationCode');
       if (idx >= 0) {
         const slice = t.slice(Math.max(0, idx - 500), idx + 800);
         m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
         if (m) return m[1];
-        m = slice.match(/[a-f0-9]{40,64}/);
-        if (m) return m[0];
+        m = slice.match(/['\"]([a-f0-9]{40,64})['\"]/);
+        if (m) return m[1];
       }
     } catch (e) {}
   }
@@ -726,6 +756,13 @@ return (async function(){
                 return str(action)
         except Exception as e:
             self._lg(f"[Debug] scrape next-action chunks: {e}")
+        # Fallback to network-hook captured action only after SignUp-marked scrape fails.
+        if hook_actions:
+            self._lg(
+                f"[*] scrape next-action fallback network hook "
+                f"value={str(hook_actions[0])[:20]}..."
+            )
+            return str(hook_actions[0])
         return ""
 
     def _extract_castle_pk(self) -> str:
