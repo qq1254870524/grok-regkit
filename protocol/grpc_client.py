@@ -140,12 +140,14 @@ class AuthManagementClient:
         castle_token: str,
         next_action: str = "",
         conversion_id: str = "",
+        tos_accepted_version: int = 1,
         timeout: int = 45,
     ):
         action = (next_action or self.next_action or "").strip()
         if not action:
             raise RuntimeError("next-action hash missing — capture or scrape first")
         clean_code = str(code or "").replace("-", "").strip()
+        tos_ver = int(tos_accepted_version or 1)
         payload = [
             {
                 "emailValidationCode": clean_code,
@@ -154,7 +156,7 @@ class AuthManagementClient:
                     "givenName": given_name,
                     "familyName": family_name,
                     "clearTextPassword": password,
-                    "tosAcceptedVersion": 1,
+                    "tosAcceptedVersion": tos_ver,
                 },
                 "turnstileToken": turnstile_token,
                 "conversionId": conversion_id or str(uuid.uuid4()),
@@ -183,44 +185,83 @@ class AuthManagementClient:
         except Exception:
             text = ""
 
+        sc_parts: list[str] = []
+        try:
+            raw_h = getattr(resp, "headers", None)
+            if raw_h is not None:
+                if hasattr(raw_h, "get_list"):
+                    sc_parts.extend(raw_h.get_list("set-cookie") or [])
+                    sc_parts.extend(raw_h.get_list("Set-Cookie") or [])
+                for k, v in dict(raw_h).items():
+                    if str(k).lower() == "set-cookie" and v:
+                        sc_parts.append(str(v))
+        except Exception:
+            pass
+        sc_blob = "\n".join(sc_parts)
+
         sso = cookies.get("sso") or cookies.get("sso-rw") or ""
-        if not sso:
-            # curl_cffi may expose multiple set-cookie values
-            sc_parts: list[str] = []
-            try:
-                raw_h = getattr(resp, "headers", None)
-                if raw_h is not None:
-                    if hasattr(raw_h, "get_list"):
-                        sc_parts.extend(raw_h.get_list("set-cookie") or [])
-                        sc_parts.extend(raw_h.get_list("Set-Cookie") or [])
-                    for k, v in dict(raw_h).items():
-                        if str(k).lower() == "set-cookie" and v:
-                            sc_parts.append(str(v))
-            except Exception:
-                pass
-            blob = "\n".join(sc_parts)
-            m = re.search(r"\bsso=([^;\s]+)", blob)
+        if not sso and sc_blob:
+            m = re.search(r"\bsso=([^;\s]+)", sc_blob)
             if m:
                 sso = m.group(1)
             if not sso:
-                m = re.search(r"\bsso-rw=([^;\s]+)", blob)
+                m = re.search(r"\bsso-rw=([^;\s]+)", sc_blob)
                 if m:
                     sso = m.group(1)
 
-        if not sso and text:
-            # sometimes JWT appears in RSC stream
-            m = re.search(r"\bsso[\"']?\s*[:=]\s*[\"']([^\"']{20,})[\"']", text)
+        redirect_url = ""
+        if text:
+            # Successful server action often returns a plain string URL in RSC flight.
+            m = re.search(r'(?m)^[0-9]+:"((?:https?:\\/\\/|https?://)[^"]+)"', text)
             if m:
-                sso = m.group(1)
+                redirect_url = m.group(1).replace("\\/", "/")
+            if not redirect_url:
+                m = re.search(r'"(https?://(?:accounts\.x\.ai|grok\.com)[^"]{8,})"', text)
+                if m:
+                    redirect_url = m.group(1).replace("\\/", "/")
+            if not sso:
+                m = re.search(r"\bsso[\"']?\s*[:=]\s*[\"']([^\"']{20,})[\"']", text)
+                if m:
+                    sso = m.group(1)
             if not sso:
                 m = re.search(r"(eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)", text)
-                if m and "session" in text.lower():
+                if m and ("session" in text.lower() or "sso" in text.lower()):
                     sso = m.group(1)
+
+        low = (text or "").lower()
+        error_hints = []
+        for key in (
+            "error",
+            "invalid",
+            "already",
+            "exists",
+            "castle",
+            "turnstile",
+            "tos",
+            "forbidden",
+            "unauthorized",
+            "rate",
+            "blocked",
+            "signInMethods",
+            "server action not found",
+            "$sreact.fragment",
+        ):
+            if key.lower() in low:
+                error_hints.append(key)
 
         return {
             "status": resp.status_code,
             "headers": dict(resp.headers),
-            "text": text[:4000],
+            "text": text[:8000],
+            "text_len": len(text or ""),
             "cookies": cookies,
             "sso": sso,
+            "redirect_url": redirect_url,
+            "set_cookie_parts": sc_parts[:20],
+            "set_cookie_blob": sc_blob[:2000],
+            "error_hints": error_hints,
+            "castle_len": len(castle_token or ""),
+            "turnstile_len": len(turnstile_token or ""),
+            "tos_accepted_version": tos_ver,
+            "next_action": action,
         }

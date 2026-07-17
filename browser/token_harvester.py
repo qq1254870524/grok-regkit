@@ -567,10 +567,12 @@ true;
         return jar
 
     def scrape_next_action(self) -> str:
+        """Find SignUp server-action hash from page HTML or Next.js chunk scripts."""
         from grok_register_ttk import _get_page
 
         page = _get_page()
         try:
+            # Fast path: inline HTML / inline scripts
             action = page.run_js(
                 r"""
 const html = document.documentElement.innerHTML || '';
@@ -578,19 +580,62 @@ let m = html.match(/next-action["'\s:=]+([a-f0-9]{40,})/i);
 if (m) return m[1];
 for (const s of Array.from(document.scripts || [])) {
   const t = s.textContent || '';
+  if (t.includes('emailValidationCode') && t.includes('castleRequestToken')) {
+    const m2 = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+    if (m2) return m2[1];
+  }
   const idx = t.indexOf('createUserAndSession');
   if (idx >= 0) {
-    const slice = t.slice(Math.max(0, idx - 300), idx + 400);
-    const m3 = slice.match(/[a-f0-9]{40,}/);
-    if (m3) return m3[0];
+    const slice = t.slice(Math.max(0, idx - 400), idx + 500);
+    const m3 = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+    if (m3) return m3[1];
+    const m4 = slice.match(/[a-f0-9]{40,64}/);
+    if (m4) return m4[0];
   }
 }
 return '';
 """
             )
-            return str(action or "")
-        except Exception:
-            return ""
+            if action:
+                return str(action)
+        except Exception as e:
+            self._lg(f"[Debug] scrape next-action inline: {e}")
+
+        # Slow path: fetch external chunks (hash lives in createServerReference chunk)
+        try:
+            action = page.run_js(
+                r"""
+return (async function(){
+  const scripts = Array.from(document.querySelectorAll('script[src*="/_next/static/chunks/"]'));
+  const urls = scripts.map(s => s.src).filter(Boolean).slice(0, 80);
+  for (const url of urls) {
+    try {
+      const t = await fetch(url, {credentials:'same-origin'}).then(r => r.text());
+      if (!t) continue;
+      if (!(t.includes('emailValidationCode') && t.includes('castleRequestToken'))) continue;
+      let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+      if (m) return m[1];
+      const idx = t.indexOf('emailValidationCode');
+      if (idx >= 0) {
+        const slice = t.slice(Math.max(0, idx - 500), idx + 800);
+        m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+        if (m) return m[1];
+        m = slice.match(/[a-f0-9]{40,64}/);
+        if (m) return m[0];
+      }
+    } catch (e) {}
+  }
+  return '';
+})();
+"""
+            )
+            # DrissionPage may return promise result already resolved
+            if action and not str(action).startswith("<"):
+                self._lg(f"[*] scrape next-action from chunks len={len(str(action))}")
+                return str(action)
+        except Exception as e:
+            self._lg(f"[Debug] scrape next-action chunks: {e}")
+        return ""
 
     def _extract_castle_pk(self) -> str:
         from grok_register_ttk import _get_page
@@ -1074,6 +1119,220 @@ return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: locati
             time.sleep(0.8)
         self._lg("[!] profile step timeout")
         return False
+
+
+
+    def submit_profile_and_wait_sso(
+        self,
+        *,
+        given_name: str,
+        family_name: str,
+        password: str,
+        turnstile_token: str = "",
+        timeout: int = 90,
+        cancel_callback=None,
+    ) -> str:
+        """Fill profile form in browser and wait for sso cookie after native SignUp."""
+        from grok_register_ttk import _get_page
+
+        page = _get_page()
+        stop = cancel_callback or (lambda: False)
+        self.install_network_hook()
+
+        # Ensure turnstile token is in the page if we already solved it.
+        tok = (turnstile_token or "").strip()
+        if tok:
+            try:
+                page.run_js(
+                    """
+const token = String(arguments[0] || '').trim();
+const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
+if (!cfInput || !token) return 0;
+const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+if (nativeSetter) nativeSetter.call(cfInput, token);
+else cfInput.value = token;
+cfInput.dispatchEvent(new Event('input', { bubbles: true }));
+cfInput.dispatchEvent(new Event('change', { bubbles: true }));
+return String(cfInput.value || '').trim().length;
+""",
+                    tok,
+                )
+                self._lg(f"[*] UI fallback inject turnstile len={len(tok)}")
+            except Exception as e:
+                self._lg(f"[Debug] UI fallback inject turnstile: {e}")
+
+        deadline = time.time() + max(30, int(timeout or 90))
+        filled = False
+        submitted = False
+        while time.time() < deadline:
+            if stop():
+                self._lg("[*] UI fallback cancelled")
+                return ""
+            try:
+                state = page.run_js(
+                    """
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const given = Array.from(document.querySelectorAll('input[name="givenName"], input[data-testid="givenName"], input[autocomplete="given-name"]')).some(isVisible);
+const family = Array.from(document.querySelectorAll('input[name="familyName"], input[data-testid="familyName"], input[autocomplete="family-name"]')).some(isVisible);
+const pw = Array.from(document.querySelectorAll('input[type="password"], input[name="password"]')).some(isVisible);
+const cf = document.querySelector('input[name="cf-turnstile-response"]');
+const cfLen = cf ? String(cf.value||'').trim().length : 0;
+return {given:!!given, family:!!family, pw:!!pw, cfLen:cfLen, url: location.href};
+"""
+                )
+            except Exception as e:
+                self._lg(f"[Debug] UI fallback state: {e}")
+                time.sleep(0.6)
+                continue
+
+            if not isinstance(state, dict):
+                time.sleep(0.5)
+                continue
+
+            self._lg(f"[*] UI fallback state={state}")
+
+            # already left signup? check cookies early
+            jar = self.export_cookies() or {}
+            sso = jar.get("sso") or jar.get("sso-rw") or ""
+            if sso and len(str(sso)) > 20:
+                self._lg(f"[*] UI fallback sso from cookies early len={len(sso)}")
+                return str(sso)
+
+            if state.get("given") and state.get("family") and state.get("pw") and not filled:
+                try:
+                    fill_r = page.run_js(
+                        """
+const givenName = arguments[0];
+const familyName = arguments[1];
+const password = arguments[2];
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function pick(sel) {
+  return Array.from(document.querySelectorAll(sel)).find(n => isVisible(n) && !n.disabled) || null;
+}
+function setVal(input, value) {
+  if (!input) return false;
+  input.focus();
+  try { input.click(); } catch (e) {}
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  if (nativeSetter) nativeSetter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.blur();
+  return String(input.value||'').trim() === String(value||'').trim();
+}
+const g = pick('input[name="givenName"], input[data-testid="givenName"], input[autocomplete="given-name"]');
+const f = pick('input[name="familyName"], input[data-testid="familyName"], input[autocomplete="family-name"]');
+const p = pick('input[type="password"], input[name="password"], input[autocomplete="new-password"]');
+if (!g || !f || !p) return 'not-ready';
+const ok = setVal(g, givenName) && setVal(f, familyName) && setVal(p, password);
+return ok ? 'filled' : 'fill-failed';
+""",
+                        given_name,
+                        family_name,
+                        password,
+                    )
+                    self._lg(f"[*] UI fallback fill={fill_r} name={given_name} {family_name}")
+                    if fill_r == "filled":
+                        filled = True
+                except Exception as e:
+                    self._lg(f"[Debug] UI fallback fill: {e}")
+
+            if filled and not submitted:
+                # require turnstile if present
+                cf_len = int(state.get("cfLen") or 0)
+                if cf_len < 80 and tok:
+                    try:
+                        page.run_js(
+                            """
+const token = String(arguments[0] || '').trim();
+const cfInput = document.querySelector('input[name="cf-turnstile-response"]');
+if (!cfInput || !token) return 0;
+const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+if (nativeSetter) nativeSetter.call(cfInput, token);
+else cfInput.value = token;
+cfInput.dispatchEvent(new Event('input', { bubbles: true }));
+cfInput.dispatchEvent(new Event('change', { bubbles: true }));
+return String(cfInput.value || '').trim().length;
+""",
+                            tok,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    click_r = page.run_js(
+                        r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function buttonText(node) {
+  return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'))
+  .filter(n => isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true');
+const submitBtn = buttons.find(n => {
+  const t = buttonText(n).replace(/\s+/g, '').toLowerCase();
+  return t.includes('完成注册') || t.includes('创建账户') || t.includes('signup') || t.includes('createaccount') || t.includes('sign up') || t.includes('register');
+}) || buttons.find(n => String(n.getAttribute('type')||'').toLowerCase() === 'submit') || null;
+if (!submitBtn) {
+  return 'no-submit:' + buttons.map(buttonText).filter(Boolean).slice(0, 8).join(' | ');
+}
+submitBtn.focus();
+submitBtn.click();
+return 'submitted:' + buttonText(submitBtn);
+"""
+                    )
+                    self._lg(f"[*] UI fallback click={click_r}")
+                    if str(click_r).startswith("submitted"):
+                        submitted = True
+                except Exception as e:
+                    self._lg(f"[Debug] UI fallback click: {e}")
+
+            # poll sso after submit or always
+            jar = self.export_cookies() or {}
+            sso = jar.get("sso") or jar.get("sso-rw") or ""
+            if sso and len(str(sso)) > 20:
+                self._lg(f"[*] UI fallback sso ok len={len(sso)}")
+                return str(sso)
+
+            # document.cookie fallback
+            try:
+                doc = page.run_js(
+                    "return document.cookie || '';"
+                ) or ""
+                import re as _re
+
+                m = _re.search(r"(?:^|;\s*)sso=([^;]+)", str(doc))
+                if m and len(m.group(1)) > 20:
+                    self._lg(f"[*] UI fallback sso from document.cookie len={len(m.group(1))}")
+                    return m.group(1)
+            except Exception:
+                pass
+
+            time.sleep(0.8)
+
+        self._lg("[!] UI fallback timeout without sso")
+        return ""
+
 
 
 def harvest_tokens(

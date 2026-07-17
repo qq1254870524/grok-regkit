@@ -10,6 +10,7 @@ create/acquire: rent mailbox from pool, IMAP LOGIN
 poll_code: IMAP INBOX + Junk/Spam/Bulk, extract xAI/Grok code
 
 Changelog:
+- 2026-07-17c: 登录失败/注册成功后从账号池文件永久删除该行；内存+磁盘同步。
 - 2026-07-17b: login fail -> mark bad + next account; scan ALL IMAP folders.
 - 2026-07-17: initial AOL IMAP provider (imap.aol.com:993).
 """
@@ -419,11 +420,20 @@ class AolAccountPool:
         with _POOL_LOCK:
             if not self.accounts:
                 raise Exception("AOL account pool empty; configure aol_accounts or aol_accounts.txt")
-            n = len(self.accounts)
             last_err = None
-            for i in range(n):
-                acc = self.accounts[(self._idx + i) % n]
+            # while: 登录失败会删除账号，列表长度变化，不能用固定 range(n)
+            attempts = 0
+            max_attempts = max(1, len(self.accounts) * 2)
+            while attempts < max_attempts and self.accounts:
+                attempts += 1
+                n = len(self.accounts)
+                if n <= 0:
+                    break
+                if self._idx >= n:
+                    self._idx = 0
+                acc = self.accounts[self._idx % n]
                 if acc.status in ("bad", "registered") or acc.cooldown_until > _now() or acc.status == "in_use":
+                    self._idx = (self._idx + 1) % n
                     continue
                 try:
                     self._lg(f"[*] AOL acquire: {acc.email} | pool={n} | auth=IMAP password/app-password")
@@ -431,7 +441,7 @@ class AolAccountPool:
                     acc.status = "in_use"
                     acc.last_used_at = _now()
                     acc.last_error = ""
-                    self._idx = (self._idx + i + 1) % n
+                    self._idx = (self._idx + 1) % max(1, len(self.accounts))
                     token_blob = json.dumps(
                         {
                             "email": acc.email,
@@ -455,38 +465,99 @@ class AolAccountPool:
                         or "authentication failed" in msg.lower()
                     )
                     if auth_fail:
-                        acc.status = "bad"
-                        acc.cooldown_until = _now() + 86400 * 365
                         self._lg(
-                            f"[!] AOL IMAP 登录失败，标记坏号并换下一个 | email={acc.email} | "
+                            f"[!] AOL IMAP 登录失败，从账号池删除并换下一个 | email={acc.email} | "
                             f"err={exc}"
                         )
+                        self.accounts = [a for a in self.accounts if a.identity() != acc.identity()]
+                        try:
+                            self.persist_accounts_file()
+                        except Exception as pe:
+                            self._lg(f"[!] AOL 删除后写回失败: {pe}")
+                        # 删除后不推进 idx，下一轮从同位置取“下一个”
+                        if self._idx >= len(self.accounts) and self.accounts:
+                            self._idx = 0
                     else:
-                        # temporary: cooldown then retry later
                         acc.status = "idle"
                         acc.cooldown_until = _now() + 120
                         self._lg(
                             f"[!] AOL 临时失败，冷却 120s 后可再试 | email={acc.email} | err={exc}"
                         )
+                        self._idx = (self._idx + 1) % max(1, len(self.accounts))
                     self._lg(
                         f"[*] AOL 继续尝试池内下一个账号 | tried={acc.email} | "
-                        f"pool={n} | remaining_scan={n - i - 1}"
+                        f"pool={len(self.accounts)}"
                     )
             raise Exception(f"AOL no available account (all login failed): {last_err}")
 
     def release(self, email: str, ok: bool = True, bad: bool = False) -> None:
         with _POOL_LOCK:
+            em = (email or "").lower()
+            if bad:
+                # 登录失败：直接从池删除（内存+文件）
+                before = len(self.accounts)
+                self.accounts = [a for a in self.accounts if a.identity() != em]
+                if before != len(self.accounts):
+                    self._lg(
+                        f"[*] AOL release 登录失败删除 email={email} remaining={len(self.accounts)}"
+                    )
+                    try:
+                        self.persist_accounts_file()
+                    except Exception as pe:
+                        self._lg(f"[!] AOL release 写回失败: {pe}")
+                return
             for acc in self.accounts:
-                if acc.identity() == (email or "").lower():
-                    if bad:
-                        acc.status = "bad"
-                    elif acc.status == "registered":
+                if acc.identity() == em:
+                    if acc.status == "registered":
                         pass
                     else:
                         acc.status = "idle"
                         if not ok:
                             acc.cooldown_until = _now() + 60
                     break
+
+
+    def _format_line(self, acc: AolAccount) -> str:
+        if acc.totp_secret:
+            return f"{acc.email}----{acc.password}----{acc.totp_secret}"
+        return f"{acc.email}----{acc.password}"
+
+    def persist_accounts_file(self) -> None:
+        """Rewrite source accounts file from current in-memory pool (no secrets in logs)."""
+        path = (self.source_file or "").strip()
+        if not path:
+            self._lg("[!] AOL persist skip: no source_file")
+            return
+        p = Path(path)
+        lines = [self._format_line(a) for a in self.accounts if (a.email or "").strip()]
+        body = "\n".join(lines)
+        if body:
+            body += "\n"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+        self._lg(f"[*] AOL 账号池已写回 file={p} remaining={len(self.accounts)}")
+
+    def remove_account(self, email: str, reason: str = "removed") -> bool:
+        """Permanently remove email from memory pool and accounts file."""
+        em = (email or "").strip().lower()
+        if not em:
+            return False
+        with _POOL_LOCK:
+            before = len(self.accounts)
+            self.accounts = [a for a in self.accounts if a.identity() != em]
+            removed = before - len(self.accounts)
+            if removed:
+                self._lg(
+                    f"[*] AOL 从账号池删除 email={email} reason={reason} "
+                    f"removed={removed} remaining={len(self.accounts)}"
+                )
+                try:
+                    self.persist_accounts_file()
+                except Exception as exc:
+                    self._lg(f"[!] AOL 写回账号池失败: {exc}")
+                return True
+            self._lg(f"[*] AOL 删除跳过(池中无此号) email={email} reason={reason}")
+            return False
 
     def resolve_credentials(self, email: str, token_blob: str) -> Tuple[str, str]:
         data = {}
@@ -525,7 +596,8 @@ def build_pool_from_config(config: dict, log_callback=None) -> AolAccountPool:
             if acc.identity() not in {a.identity() for a in accounts}:
                 accounts.append(acc)
     _log(log_callback, f"[*] AOL pool loaded accounts={len(accounts)} file={file_path}")
-    return AolAccountPool(accounts, log_callback=log_callback)
+    pool = AolAccountPool(accounts, log_callback=log_callback, source_file=file_path)
+    return pool
 
 
 def get_pool(config: dict, log_callback=None, force_reload: bool = False) -> AolAccountPool:
@@ -731,3 +803,9 @@ def is_aol_provider(name: str) -> bool:
         "aim",
         "verizon_aol",
     }
+
+
+def remove_from_pool(config: dict, email: str, reason: str = "removed", log_callback=None) -> bool:
+    """Public helper: permanently drop mailbox from AOL pool file."""
+    pool = get_pool(config, log_callback=log_callback)
+    return pool.remove_account(email, reason=reason)

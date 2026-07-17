@@ -3,6 +3,9 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-17d: SignUp 提交前强制刷新 castle（不再复用 CreateEmail 旧 token）；
+  200 无 sso 详细日志（body/set-cookie/hints）；协议失败后浏览器 UI 资料提交兜底；
+  注册成功/登录失败邮箱从 AOL/Outlook 账号池文件永久删除。
 - 2026-07-17c: 邮箱登录失败自动换下一个（最多 20 次）；preflight 预登录；
   CreateEmail 后等 3s 再查信；AOL/Outlook 扫 ALL 文件夹（非仅 Inbox/Junk）。
   修复缩进损坏导致 IndentationError 无法启动。
@@ -162,33 +165,72 @@ def remember_registered_email(email: str, log: Callable[[str], None] | None = No
 
 
 def mark_outlook_registered(email: str, log: Callable[[str], None] | None = None) -> None:
-    """Prevent reusing an Outlook mailbox that already completed Grok registration."""
+    """Mark registered and permanently remove mailbox from AOL/Outlook pools."""
     remember_registered_email(email, log)
+    remove_mailbox_from_pool(email, reason="registered", log=log)
+
+
+def remove_mailbox_from_pool(
+    email: str,
+    reason: str = "removed",
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Permanently delete email from AOL/Outlook account pool files."""
+    em = (email or "").strip()
+    if not em:
+        return
+    em_l = em.lower()
+    try:
+        from grok_register_ttk import config as _cfg
+    except Exception:
+        _cfg = {}
+
+    # AOL / AIM
+    try:
+        import aol_mail as am
+
+        pool = getattr(am, "_POOL", None)
+        if pool is None:
+            try:
+                pool = am.get_pool(_cfg, log_callback=log)
+            except Exception:
+                pool = getattr(am, "_POOL", None)
+        if pool is not None and hasattr(pool, "remove_account"):
+            pool.remove_account(em, reason=reason)
+        elif pool is not None:
+            # fallback release bad
+            try:
+                pool.release(em, ok=False, bad=True)
+            except Exception:
+                pass
+    except Exception as exc:
+        if log:
+            log(f"[hybrid] AOL pool remove fail email={em}: {exc}")
+
+    # Outlook / Hotmail / Live
     try:
         import outlook_mail as om
 
         pool = getattr(om, "_POOL", None)
         if pool is None:
             try:
-                from grok_register_ttk import config as _cfg
-
                 pool = om.get_pool(_cfg, log_callback=log)
             except Exception:
                 pool = getattr(om, "_POOL", None)
-        if pool is None:
-            return
-        with om._POOL_LOCK:
-            for acc in pool.accounts:
-                if acc.identity() == (email or "").lower():
-                    acc.status = "registered"
-                    acc.cooldown_until = time.time() + 86400 * 365
-                    if log:
-                        log(f"[hybrid] Outlook marked registered (skip future): {email}")
-                    break
+        if pool is not None and hasattr(pool, "remove_account"):
+            pool.remove_account(em, reason=reason)
+        elif pool is not None:
+            with om._POOL_LOCK:
+                for acc in list(pool.accounts):
+                    if acc.identity() == em_l:
+                        acc.status = "registered" if reason == "registered" else "bad"
+                        acc.cooldown_until = time.time() + 86400 * 365
+                        if log:
+                            log(f"[hybrid] Outlook marked {acc.status}: {em}")
+                        break
     except Exception as exc:
         if log:
-            log(f"[hybrid] mark outlook registered fail: {exc}")
-
+            log(f"[hybrid] Outlook pool remove fail email={em}: {exc}")
 
 
 def register_one_hybrid(
@@ -303,36 +345,36 @@ def register_one_hybrid(
                         f"换下一个邮箱 continue try={_try + 1}/20"
                     )
                     try:
-                        from grok_register_ttk import config as _cfg_pre2
                         em_l2 = (email or "").lower()
-                        if em_l2.endswith(("@aol.com", "@aim.com")):
-                            import aol_mail as am2
-                            pool2 = am2.get_pool(_cfg_pre2, log_callback=log)
-                            bad = any(
-                                x in str(pre_exc)
-                                for x in ("AUTHENTICATIONFAILED", "Invalid credentials", "LOGIN")
+                        bad = any(
+                            x in str(pre_exc)
+                            for x in (
+                                "AUTHENTICATIONFAILED",
+                                "Invalid credentials",
+                                "LOGIN",
+                                "password login failed",
+                                "MFA/TOTP",
+                                "401",
+                                "invalid_grant",
+                                "AADSTS",
+                                "authentication failed",
                             )
-                            pool2.release(email, ok=False, bad=bad)
-                            if bad:
-                                for acc in pool2.accounts:
-                                    if acc.identity() == em_l2:
-                                        acc.status = "bad"
-                                        acc.cooldown_until = __import__("time").time() + 86400 * 365
-                                        break
+                        )
+                        if bad:
+                            remove_mailbox_from_pool(email, reason="login_fail", log=log)
                         else:
-                            import outlook_mail as om2
-                            pool2 = om2.get_pool(_cfg_pre2, log_callback=log)
-                            bad = any(
-                                x in str(pre_exc)
-                                for x in (
-                                    "password login failed",
-                                    "MFA/TOTP",
-                                    "401",
-                                    "invalid_grant",
-                                    "AADSTS",
+                            # temporary: release back to idle/cooldown without permanent delete
+                            from grok_register_ttk import config as _cfg_pre2
+                            if em_l2.endswith(("@aol.com", "@aim.com")):
+                                import aol_mail as am2
+                                am2.get_pool(_cfg_pre2, log_callback=log).release(
+                                    email, ok=False, bad=False
                                 )
-                            )
-                            pool2.release(email, ok=False, bad=bad)
+                            else:
+                                import outlook_mail as om2
+                                om2.get_pool(_cfg_pre2, log_callback=log).release(
+                                    email, ok=False, bad=False
+                                )
                     except Exception as rel_pre:
                         log(f"[hybrid] pre-login release email: {rel_pre}")
                     email, mail_token = "", ""
@@ -484,9 +526,35 @@ def register_one_hybrid(
                 log(f"[hybrid] turnstile short len={len(turnstile)}")
                 return False
 
+            # CRITICAL: frontend mints a NEW castle via createRequestToken() on every SignUp.
+            # Reusing CreateEmail castle often yields HTTP 200 RSC fragment with no sso cookie.
             castle2 = browser.read_captured_castle() or castle
             if len(castle2) < 1000:
                 castle2 = castle
+            log(
+                f"[hybrid] mint fresh castle for SignUp (old_len={len(castle2)} "
+                f"old_head={(castle2 or '')[:36]})"
+            )
+            try:
+                fresh_castle = browser.get_castle_token_injected(timeout=20) or ""
+                if (not fresh_castle or len(fresh_castle) < 1000) and hasattr(
+                    browser, "get_castle_token"
+                ):
+                    fresh_castle = browser.get_castle_token(timeout=15) or fresh_castle
+                if fresh_castle and len(fresh_castle) >= 1000:
+                    castle2 = fresh_castle
+                    log(
+                        f"[hybrid] fresh castle ok len={len(castle2)} "
+                        f"head={castle2[:48]}"
+                    )
+                else:
+                    log(
+                        f"[hybrid] fresh castle weak len={len(fresh_castle or '')}; "
+                        f"reuse previous head={(castle2 or '')[:36]}"
+                    )
+            except Exception as castle_exc:
+                log(f"[hybrid] fresh castle mint fail: {castle_exc}; reuse previous")
+
             browser_cookies = browser.export_cookies()
             jar2 = dict(browser_cookies or {})
             for stale in ("sso", "sso-rw"):
@@ -527,6 +595,7 @@ def register_one_hybrid(
             if stop():
                 return False
             _add_action(load_next_action_from_capture(), "capture_file")
+            # Dead hash only last; 404s are expected after redeploy.
             _add_action(known, "hardcoded_fallback")
             if not candidates:
                 log("[hybrid] no next-action candidates at all")
@@ -534,7 +603,24 @@ def register_one_hybrid(
             if stop():
                 return False
 
-            def _do_signup(act: str):
+            def _mint_castle_for_try(try_idx: int) -> str:
+                nonlocal castle2
+                if try_idx == 1:
+                    return castle2
+                try:
+                    c = browser.get_castle_token_injected(timeout=12) or ""
+                    if c and len(c) >= 1000:
+                        castle2 = c
+                        log(
+                            f"[hybrid] re-mint castle for try {try_idx} "
+                            f"len={len(c)} head={c[:40]}"
+                        )
+                        return c
+                except Exception as exc:
+                    log(f"[hybrid] re-mint castle fail try={try_idx}: {exc}")
+                return castle2
+
+            def _do_signup(act: str, castle_tok: str):
                 return client.create_user_via_server_action(
                     email=email,
                     code=clean,
@@ -542,7 +628,7 @@ def register_one_hybrid(
                     family_name=family,
                     password=password,
                     turnstile_token=turnstile,
-                    castle_token=castle2,
+                    castle_token=castle_tok,
                     next_action=act,
                     conversion_id=str(uuid.uuid4()),
                     timeout=40,
@@ -554,6 +640,25 @@ def register_one_hybrid(
                     ck = (resp or {}).get("cookies") or {}
                     s = ck.get("sso") or ck.get("sso-rw") or ""
                 return s or ""
+
+            def _log_signup_diag(idx: int, resp: dict) -> None:
+                body = str((resp or {}).get("text") or "")
+                sc = (resp or {}).get("set_cookie_blob") or ""
+                hints = (resp or {}).get("error_hints") or []
+                redir = (resp or {}).get("redirect_url") or ""
+                log(
+                    f"[hybrid] sign-up diag try={idx} status={resp.get('status')} "
+                    f"sso_len={len(_extract_sso(resp))} text_len={resp.get('text_len') or len(body)} "
+                    f"castle_len={resp.get('castle_len')} turnstile_len={resp.get('turnstile_len')} "
+                    f"tos={resp.get('tos_accepted_version')} redirect={redir!r} "
+                    f"hints={hints} cookies={list(((resp.get('cookies') or {}).keys()))[:16]}"
+                )
+                if body:
+                    log(f"[hybrid] sign-up body_head={body[:500]!r}")
+                    if len(body) > 500:
+                        log(f"[hybrid] sign-up body_tail={body[-400:]!r}")
+                if sc:
+                    log(f"[hybrid] sign-up set-cookie={sc[:500]!r}")
 
             r3 = {}
             sso = ""
@@ -568,14 +673,24 @@ def register_one_hybrid(
                     sess.set_cookies(jar3)
                 except Exception:
                     pass
+                castle_tok = _mint_castle_for_try(idx)
                 client.next_action = act
-                log(f"[hybrid] sign-up try {idx}/{len(candidates)} next-action={act[:20]}...")
+                log(
+                    f"[hybrid] sign-up try {idx}/{len(candidates)} "
+                    f"next-action={act[:20]}... castle_len={len(castle_tok)}"
+                )
                 t_try = time.time()
                 try:
-                    r3 = _do_signup(act)
+                    r3 = _do_signup(act, castle_tok)
                 except Exception as signup_exc:
                     log(f"[hybrid] sign-up try {idx} exception: {signup_exc}")
-                    r3 = {"status": 0, "text": str(signup_exc), "cookies": {}, "sso": ""}
+                    r3 = {
+                        "status": 0,
+                        "text": str(signup_exc),
+                        "cookies": {},
+                        "sso": "",
+                        "error_hints": ["exception"],
+                    }
                 sso = _extract_sso(r3)
                 body_txt = str(r3.get("text") or "")
                 st = r3.get("status")
@@ -583,6 +698,8 @@ def register_one_hybrid(
                     f"[hybrid] sign-up try {idx} status={st} sso_len={len(sso)} "
                     f"elapsed={time.time() - t_try:.1f}s body={body_txt[:180]!r}"
                 )
+                if not sso:
+                    _log_signup_diag(idx, r3)
                 if sso:
                     try:
                         save_next_action_to_capture(act, log)
@@ -590,16 +707,19 @@ def register_one_hybrid(
                         pass
                     break
                 low = body_txt.lower()
+                # Keep keywords specific — avoid matching random RSC noise.
                 if any(
                     k in low
                     for k in (
-                        "already",
-                        "exists",
-                        "taken",
-                        "registered",
-                        "isloggedinwithsso",
+                        "already registered",
+                        "already exists",
+                        "email already",
+                        "account already",
+                        "signinmethods",
+                        "sign_in_methods",
                         "email_already",
                         "already_exists",
+                        "isloggedinwithsso",
                     )
                 ):
                     log(
@@ -614,14 +734,45 @@ def register_one_hybrid(
                 if st == 404 or "server action not found" in low:
                     log(f"[hybrid] next-action {act[:16]} invalid (404/not found), try next")
                     continue
+                log(
+                    f"[hybrid] sign-up try {idx} no sso (status={st}); "
+                    f"continue next candidate with fresh castle"
+                )
             log(
                 f"[hybrid] sign-up final status={r3.get('status')} sso_len={len(sso)} "
                 f"elapsed={time.time() - t0:.1f}s"
             )
             if not sso:
                 log(
-                    f"[hybrid] no sso cookies={list((r3.get('cookies') or {}).keys())[:12]} "
+                    f"[hybrid] protocol no sso cookies={list((r3.get('cookies') or {}).keys())[:12]} "
                     f"body={body_txt[:240]}"
+                )
+                if stop():
+                    return False
+                log(
+                    "[hybrid] protocol SignUp failed; browser UI profile submit fallback "
+                    f"email={email} given={given} family={family}"
+                )
+                try:
+                    ui_sso = browser.submit_profile_and_wait_sso(
+                        given_name=given,
+                        family_name=family,
+                        password=password,
+                        turnstile_token=turnstile,
+                        timeout=90,
+                        cancel_callback=stop,
+                    )
+                    if ui_sso:
+                        sso = ui_sso
+                        log(f"[hybrid] browser UI fallback sso ok len={len(sso)}")
+                    else:
+                        log("[hybrid] browser UI fallback got no sso")
+                except Exception as ui_exc:
+                    log(f"[hybrid] browser UI fallback error: {ui_exc}")
+            if not sso:
+                log(
+                    f"[hybrid] no sso after protocol+UI cookies="
+                    f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"
                 )
                 return False
 

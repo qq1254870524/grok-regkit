@@ -591,12 +591,13 @@ class OutlookSession:
 
 
 class OutlookAccountPool:
-    def __init__(self, accounts, cache=None, proxies=None, log_callback=None, client_id=DEFAULT_CLIENT_ID):
+    def __init__(self, accounts, cache=None, proxies=None, log_callback=None, client_id=DEFAULT_CLIENT_ID, source_file: str = ""):
         self.accounts = accounts
         self.cache = cache or TokenCache()
         self.proxies = proxies
         self.log_callback = log_callback
         self.client_id = client_id or DEFAULT_CLIENT_ID
+        self.source_file = (source_file or "").strip()
         self._idx = 0
         for acc in self.accounts:
             c = self.cache.get(acc.email)
@@ -689,11 +690,16 @@ class OutlookAccountPool:
                         )
                     ) or "login failed" in msg.lower()
                     if auth_fail:
-                        acc.status = "bad"
-                        acc.cooldown_until = _now() + 86400 * 365
                         self._lg(
-                            f"[!] Outlook 登录失败，标记坏号并换下一个 | email={acc.email} | err={exc}"
+                            f"[!] Outlook 登录失败，从账号池删除并换下一个 | email={acc.email} | err={exc}"
                         )
+                        self.accounts = [a for a in self.accounts if a.identity() != acc.identity()]
+                        try:
+                            self.persist_accounts_file()
+                        except Exception as pe:
+                            self._lg(f"[!] Outlook 删除后写回失败: {pe}")
+                        if self._idx >= len(self.accounts) and self.accounts:
+                            self._idx = 0
                     else:
                         acc.cooldown_until = _now() + 120
                         self._lg(
@@ -706,17 +712,80 @@ class OutlookAccountPool:
 
     def release(self, email: str, ok: bool = True, bad: bool = False) -> None:
         with _POOL_LOCK:
+            em = (email or "").lower()
+            if bad:
+                before = len(self.accounts)
+                self.accounts = [a for a in self.accounts if a.identity() != em]
+                if before != len(self.accounts):
+                    self._lg(
+                        f"[*] Outlook release 登录失败删除 email={email} remaining={len(self.accounts)}"
+                    )
+                    try:
+                        self.persist_accounts_file()
+                    except Exception as pe:
+                        self._lg(f"[!] Outlook release 写回失败: {pe}")
+                return
             for acc in self.accounts:
-                if acc.identity() == email.lower():
-                    if bad:
-                        acc.status = "bad"
-                    elif acc.status == "registered":
+                if acc.identity() == em:
+                    if acc.status == "registered":
                         pass
                     else:
                         acc.status = "idle"
                         if not ok:
                             acc.cooldown_until = _now() + 60
                     break
+
+    def _format_line(self, acc: OutlookAccount) -> str:
+        if (acc.source_line or "").strip():
+            return acc.source_line.strip()
+        if acc.refresh_token and not acc.password:
+            if acc.client_id and acc.client_id != DEFAULT_CLIENT_ID:
+                return f"{acc.email}----{acc.client_id}----{acc.refresh_token}"
+            return f"{acc.email}----{acc.refresh_token}"
+        if acc.password and acc.totp_secret:
+            if acc.client_id and acc.client_id != DEFAULT_CLIENT_ID:
+                return f"{acc.email}----{acc.password}----{acc.totp_secret}----{acc.client_id}"
+            return f"{acc.email}----{acc.password}----{acc.totp_secret}"
+        if acc.password:
+            return f"{acc.email}----{acc.password}"
+        return (acc.email or "").strip()
+
+    def persist_accounts_file(self) -> None:
+        """Rewrite source accounts file from current in-memory pool."""
+        path = (self.source_file or "").strip()
+        if not path:
+            self._lg("[!] Outlook persist skip: no source_file")
+            return
+        pth = Path(path)
+        lines = [self._format_line(a) for a in self.accounts if (a.email or "").strip()]
+        body = "\n".join(lines)
+        if body:
+            body += "\n"
+        pth.parent.mkdir(parents=True, exist_ok=True)
+        pth.write_text(body, encoding="utf-8")
+        self._lg(f"[*] Outlook 账号池已写回 file={pth} remaining={len(self.accounts)}")
+
+    def remove_account(self, email: str, reason: str = "removed") -> bool:
+        """Permanently remove email from memory pool and accounts file."""
+        em = (email or "").strip().lower()
+        if not em:
+            return False
+        with _POOL_LOCK:
+            before = len(self.accounts)
+            self.accounts = [a for a in self.accounts if a.identity() != em]
+            removed = before - len(self.accounts)
+            if removed:
+                self._lg(
+                    f"[*] Outlook 从账号池删除 email={email} reason={reason} "
+                    f"removed={removed} remaining={len(self.accounts)}"
+                )
+                try:
+                    self.persist_accounts_file()
+                except Exception as exc:
+                    self._lg(f"[!] Outlook 写回账号池失败: {exc}")
+                return True
+            self._lg(f"[*] Outlook 删除跳过(池中无此号) email={email} reason={reason}")
+            return False
 
     def resolve_access_token(self, email: str, token_blob: str) -> str:
         data = {}
@@ -774,8 +843,14 @@ def build_pool_from_config(config: dict, proxies=None, log_callback=None) -> Out
     cp = Path(cache_path)
     if not cp.is_absolute():
         cp = _root_dir() / cache_path
-    return OutlookAccountPool(uniq, cache=TokenCache(cp), proxies=proxies,
-                              log_callback=log_callback, client_id=client_id)
+    return OutlookAccountPool(
+        uniq,
+        cache=TokenCache(cp),
+        proxies=proxies,
+        log_callback=log_callback,
+        client_id=client_id,
+        source_file=str(file_path),
+    )
 
 
 def get_pool(config: dict, proxies=None, log_callback=None, force_reload: bool = False) -> OutlookAccountPool:
