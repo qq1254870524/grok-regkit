@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
+2026-07-17b: added Sub2API post-import usability verification settings.
 2026-07-17: added Sub2API SSO-to-OAuth settings; password is masked and preserved
 when the Web UI submits the masked placeholder.
 """
@@ -338,6 +339,10 @@ class ConfigBody(BaseModel):
     sub2api_concurrency: Optional[int] = None
     sub2api_priority: Optional[int] = None
     sub2api_timeout_sec: Optional[int] = None
+    sub2api_verify_after_add: Optional[bool] = None
+    sub2api_verify_attempts: Optional[int] = None
+    sub2api_verify_timeout_sec: Optional[int] = None
+    sub2api_verify_retry_delay_sec: Optional[int] = None
     defaultDomains: Optional[str] = None
     email_provider: Optional[str] = None
     proxy_list_file: Optional[str] = None

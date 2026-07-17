@@ -14,13 +14,25 @@ from sub2api_client import Sub2APIClient, _parse_group_ids
 
 
 class FakeResponse:
-    def __init__(self, status_code, payload):
+    def __init__(self, status_code, payload, lines=None):
         self.status_code = status_code
         self._payload = payload
         self.text = json.dumps(payload)
+        self._lines = list(lines or [])
+        self.closed = False
 
     def json(self):
         return self._payload
+
+    def iter_lines(self, decode_unicode=False):
+        for line in self._lines:
+            if decode_unicode:
+                yield line
+            else:
+                yield line.encode('utf-8') if isinstance(line, str) else line
+
+    def close(self):
+        self.closed = True
 
 
 class FakeSession:
@@ -56,11 +68,24 @@ class RegressionTests(unittest.TestCase):
         client = build_client([
             FakeResponse(200, {'code': 0, 'data': {'access_token': 'header.payload.signature'}}),
             FakeResponse(200, {'code': 0, 'data': {'created': [{'account': {'id': 12, 'name': 'mail@example.com'}}], 'failed': []}}),
+            FakeResponse(200, {}, lines=[
+                'data: {"type":"test_start","model":"grok-4.5"}',
+                'data: {"type":"content","text":"OK"}',
+                'data: {"type":"test_complete","success":true}',
+            ]),
         ], logs)
-        result = client.import_grok_sso('very-secret-sso', email='mail@example.com', group_ids='3,4')
+        result = client.import_grok_sso(
+            'very-secret-sso', email='mail@example.com', group_ids='3,4',
+            verify_retry_delay_sec=0,
+        )
         self.assertTrue(result['ok'])
+        self.assertTrue(result['usable'])
         self.assertEqual(result['account_id'], 12)
-        self.assertEqual(client.session.calls[1][2]['json']['group_ids'], [3, 4])
+        request_json = client.session.calls[1][2]['json']
+        self.assertEqual(request_json['group_ids'], [3, 4])
+        self.assertEqual(request_json['sso_tokens'], ['very-secret-sso'])
+        self.assertNotIn('sso_token', request_json)
+        self.assertTrue(client.session.calls[2][2]['stream'])
         joined = '\n'.join(logs)
         self.assertNotIn('private-password', joined)
         self.assertNotIn('very-secret-sso', joined)
@@ -73,9 +98,15 @@ class RegressionTests(unittest.TestCase):
             FakeResponse(401, {'code': 401, 'message': 'expired'}),
             FakeResponse(200, {'code': 0, 'data': {'access_token': 'second.token.value'}}),
             FakeResponse(200, {'code': 0, 'data': {'created': [{'account': {'id': 13}}], 'failed': []}}),
+            FakeResponse(200, {}, lines=[
+                'data: {"type":"test_start","model":"grok-4.5"}',
+                'data: {"type":"test_complete","success":true}',
+            ]),
         ], logs)
-        self.assertEqual(client.import_grok_sso('sso', email='a@example.com')['account_id'], 13)
-        self.assertEqual(len(client.session.calls), 4)
+        self.assertEqual(client.import_grok_sso(
+            'sso', email='a@example.com', verify_retry_delay_sec=0
+        )['account_id'], 13)
+        self.assertEqual(len(client.session.calls), 5)
         self.assertTrue(any('重新登录' in line for line in logs))
 
     def test_failed_conversion_raises(self):
@@ -85,6 +116,35 @@ class RegressionTests(unittest.TestCase):
         ], [])
         with self.assertRaisesRegex(RuntimeError, 'invalid sso'):
             client.import_grok_sso('bad-sso', email='bad@example.com')
+
+    def test_unwrapped_import_response_is_supported(self):
+        client = build_client([
+            FakeResponse(200, {'code': 0, 'data': {'access_token': 'token.value.test'}}),
+            FakeResponse(200, {'created': [{'id': 21, 'name': 'unwrapped'}], 'failed': []}),
+        ], [])
+        result = client.import_grok_sso(
+            'sso', email='unwrapped@example.com', verify_after_import=False
+        )
+        self.assertTrue(result['ok'])
+        self.assertIsNone(result['usable'])
+        self.assertEqual(result['account_id'], 21)
+
+    def test_created_but_unusable_is_not_reported_as_success(self):
+        logs = []
+        client = build_client([
+            FakeResponse(200, {'code': 0, 'data': {'access_token': 'token.value.test'}}),
+            FakeResponse(200, {'code': 0, 'data': {'created': [{'account': {'id': 22}}], 'failed': []}}),
+            FakeResponse(200, {}, lines=[
+                'data: {"type":"test_start","model":"grok-4.5"}',
+                'data: {"type":"error","error":"upstream unavailable"}',
+            ]),
+        ], logs)
+        with self.assertRaisesRegex(RuntimeError, '已创建 account_id=22.*可用性验证失败'):
+            client.import_grok_sso(
+                'sso', email='bad@example.com', verify_attempts=1,
+                verify_retry_delay_sec=0,
+            )
+        self.assertFalse(any('入池可用' in line for line in logs))
 
     def test_stop_race_does_not_call_new_tab(self):
         import grok_register_ttk as engine
@@ -152,12 +212,17 @@ class RegressionTests(unittest.TestCase):
         html = (ROOT / 'web' / 'index.html').read_text(encoding='utf-8')
         server = (ROOT / 'web' / 'server.py').read_text(encoding='utf-8')
         self.assertIn('id="sub2api_auto_add" type="checkbox" checked', html)
+        self.assertIn('id="sub2api_verify_after_add" type="checkbox" checked', html)
+        self.assertIn('id="sub2api_verify_timeout_sec" type="number" min="15" value="105"', html)
+        self.assertIn('id="sub2api_verify_attempts" type="number" min="1" max="5" value="2"', html)
         self.assertIn('id="stopBtn" class="btn btn-danger" type="button">停止注册</button>', html)
         self.assertIn('不会停止 grok2api、Sub2API、CLIProxyAPI 或 CPA Gateway', html)
         self.assertIn('c.sub2api_auto_add !== false', html)
         self.assertIn("'sub2api_admin_password'", html)
         self.assertIn('"sub2api_admin_password"', server)
         self.assertIn('sub2api_group_ids: Optional[List[int]]', server)
+        self.assertIn('sub2api_verify_after_add: Optional[bool]', server)
+        self.assertIn('sub2api_verify_timeout_sec: Optional[int]', server)
 
     def test_masked_sub2api_password_is_preserved_on_config_save(self):
         import asyncio

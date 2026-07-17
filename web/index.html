@@ -775,6 +775,7 @@
             <div class="section-sub" style="margin-bottom:10px"><b>Sub2API Grok OAuth 入池</b>：使用注册成功后的 SSO 调用官方 sso-to-oauth 接口</div>
             <div class="form-grid two">
               <label class="check-row span-2"><input id="sub2api_auto_add" type="checkbox" checked /> 注册成功后自动加入 Sub2API（默认开启）</label>
+              <label class="check-row span-2"><input id="sub2api_verify_after_add" type="checkbox" checked /> 导入后直接测试账号可用性；只有测试通过才记录“入池可用”</label>
               <div class="field span-2">
                 <div class="label">Sub2API 地址</div>
                 <input id="sub2api_base_url" type="text" value="http://127.0.0.1:8080" />
@@ -800,8 +801,20 @@
                 <input id="sub2api_priority" type="number" value="1" />
               </div>
               <div class="field">
-                <div class="label">接口超时（秒）</div>
+                <div class="label">导入接口超时（秒）</div>
                 <input id="sub2api_timeout_sec" type="number" min="10" value="60" />
+              </div>
+              <div class="field">
+                <div class="label">可用性测试超时（秒）</div>
+                <input id="sub2api_verify_timeout_sec" type="number" min="15" value="105" />
+              </div>
+              <div class="field">
+                <div class="label">可用性测试次数</div>
+                <input id="sub2api_verify_attempts" type="number" min="1" max="5" value="2" />
+              </div>
+              <div class="field">
+                <div class="label">测试重试间隔（秒）</div>
+                <input id="sub2api_verify_retry_delay_sec" type="number" min="0" value="3" />
               </div>
             </div>
           </div>
@@ -1140,6 +1153,10 @@
         sub2api_concurrency: parseInt($('sub2api_concurrency')?.value || '1', 10) || 1,
         sub2api_priority: parseInt($('sub2api_priority')?.value || '1', 10) || 1,
         sub2api_timeout_sec: parseInt($('sub2api_timeout_sec')?.value || '60', 10) || 60,
+        sub2api_verify_after_add: $('sub2api_verify_after_add') ? $('sub2api_verify_after_add').checked : true,
+        sub2api_verify_attempts: parseInt($('sub2api_verify_attempts')?.value || '2', 10) || 2,
+        sub2api_verify_timeout_sec: parseInt($('sub2api_verify_timeout_sec')?.value || '105', 10) || 105,
+        sub2api_verify_retry_delay_sec: parseInt($('sub2api_verify_retry_delay_sec')?.value || '3', 10) || 0,
       };
     }
 
@@ -1230,6 +1247,10 @@
       setVal('sub2api_concurrency', c.sub2api_concurrency || 1);
       setVal('sub2api_priority', c.sub2api_priority != null ? c.sub2api_priority : 1);
       setVal('sub2api_timeout_sec', c.sub2api_timeout_sec || 60);
+      setVal('sub2api_verify_after_add', c.sub2api_verify_after_add !== false);
+      setVal('sub2api_verify_attempts', c.sub2api_verify_attempts || 2);
+      setVal('sub2api_verify_timeout_sec', c.sub2api_verify_timeout_sec || 105);
+      setVal('sub2api_verify_retry_delay_sec', c.sub2api_verify_retry_delay_sec != null ? c.sub2api_verify_retry_delay_sec : 3);
       appendLog('[*] 配置已加载');
     }
 

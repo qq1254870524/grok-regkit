@@ -3,6 +3,9 @@
 """Sub2API Grok SSO -> OAuth importer.
 
 Changelog:
+- 2026-07-17b: align with the current Sub2API contract (``sso_tokens`` array),
+  accept wrapped and unwrapped import responses, and verify every newly created
+  Grok account through the account-test SSE endpoint before reporting it usable.
 - 2026-07-17: initial integration for grok-regkit. Logs endpoint/status/account id,
   never logs the admin password, access token, or full SSO credential. A failed
   import is reported to the post-success worker and does not change registration
@@ -132,6 +135,136 @@ class Sub2APIClient:
         _log(self.log_callback, f"[+] Sub2API 登录成功 status={response.status_code} token_ttl≈{ttl}s")
         return token
 
+    @staticmethod
+    def _payload_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = payload.get("data")
+        return data if isinstance(data, dict) else payload
+
+    @staticmethod
+    def _payload_ok(payload: Dict[str, Any]) -> bool:
+        if "code" not in payload:
+            return True
+        code = payload.get("code")
+        return str(code).strip().lower() in {"0", "200", "success"}
+
+    def verify_grok_account(
+        self,
+        account_id: Any,
+        *,
+        attempts: int = 2,
+        timeout_sec: float = 105,
+        retry_delay_sec: float = 3,
+    ) -> Dict[str, Any]:
+        account_id_text = str(account_id or "").strip()
+        if not account_id_text:
+            return {"ok": False, "account_id": "", "error": "missing account id", "attempts": 0}
+
+        max_attempts = max(1, int(attempts or 1))
+        read_timeout = max(15.0, float(timeout_sec or 105))
+        retry_delay = max(0.0, float(retry_delay_sec or 0))
+        last_error = "account test returned no final result"
+        for attempt in range(1, max_attempts + 1):
+            token = self.login(force=False)
+            response = None
+            saw_start = False
+            saw_content = False
+            model = ""
+            try:
+                _log(
+                    self.log_callback,
+                    f"[*] Sub2API 可用性验证开始 account_id={account_id_text} "
+                    f"attempt={attempt}/{max_attempts} timeout={int(read_timeout)}s",
+                )
+                response = self.session.request(
+                    "POST",
+                    f"{self.base_url}/api/v1/admin/accounts/{account_id_text}/test",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={},
+                    stream=True,
+                    timeout=(min(15.0, read_timeout), read_timeout),
+                )
+                if response.status_code == 401:
+                    self._access_token = ""
+                    self._token_expires_at = 0.0
+                    last_error = "admin access token expired during account test"
+                    continue
+                if response.status_code >= 400:
+                    last_error = f"HTTP {response.status_code}: {_body_summary(response)}"
+                    continue
+
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if isinstance(raw_line, bytes):
+                        line = raw_line.decode("utf-8", errors="replace")
+                    else:
+                        line = str(raw_line or "")
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    raw_event = line[5:].strip()
+                    if not raw_event or raw_event == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(raw_event)
+                    except Exception:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    event_type = str(event.get("type") or "").strip().lower()
+                    if event.get("model"):
+                        model = str(event.get("model"))
+                    if event_type == "test_start":
+                        saw_start = True
+                    elif event_type == "content":
+                        saw_content = saw_content or bool(event.get("text") or event.get("content"))
+                    elif event_type in {"error", "test_error"}:
+                        last_error = str(event.get("error") or event.get("message") or "Unknown error")[:500]
+                        break
+                    elif event_type in {"test_complete", "test_end", "success"}:
+                        success = event.get("success", True)
+                        if success is True or str(success).strip().lower() in {"1", "true", "yes", "ok"}:
+                            _log(
+                                self.log_callback,
+                                f"[+] Sub2API 可用性验证通过 account_id={account_id_text} "
+                                f"model={model or '-'} attempt={attempt}/{max_attempts}",
+                            )
+                            return {
+                                "ok": True,
+                                "account_id": account_id,
+                                "attempts": attempt,
+                                "model": model,
+                                "saw_start": saw_start,
+                                "saw_content": saw_content,
+                            }
+                        last_error = str(event.get("error") or event.get("message") or "test_complete success=false")[:500]
+                        break
+                else:
+                    last_error = "account test stream ended without test_complete"
+            except requests.RequestException as exc:
+                last_error = f"{type(exc).__name__}: {str(exc)[:400]}"
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {str(exc)[:400]}"
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+
+            _log(
+                self.log_callback,
+                f"[!] Sub2API 可用性验证未通过 account_id={account_id_text} "
+                f"attempt={attempt}/{max_attempts} detail={last_error}",
+            )
+            if attempt < max_attempts and retry_delay > 0:
+                time.sleep(retry_delay)
+
+        return {
+            "ok": False,
+            "account_id": account_id,
+            "attempts": max_attempts,
+            "error": last_error,
+        }
+
     def import_grok_sso(
         self,
         sso_token: str,
@@ -140,6 +273,10 @@ class Sub2APIClient:
         group_ids: Any = None,
         concurrency: int = 1,
         priority: int = 1,
+        verify_after_import: bool = True,
+        verify_attempts: int = 2,
+        verify_timeout_sec: float = 105,
+        verify_retry_delay_sec: float = 3,
     ) -> Dict[str, Any]:
         sso = str(sso_token or "").strip()
         if not sso:
@@ -147,7 +284,8 @@ class Sub2APIClient:
         groups = _parse_group_ids(group_ids)
         name = str(email or "").strip() or f"grok-{hashlib.sha256(sso.encode()).hexdigest()[:10]}"
         body = {
-            "sso_token": sso,
+            # Current Sub2API contract is plural even for one credential.
+            "sso_tokens": [sso],
             "name": name,
             "group_ids": groups,
             "concurrency": max(1, int(concurrency or 1)),
@@ -170,10 +308,10 @@ class Sub2APIClient:
                 self._access_token = ""
                 self._token_expires_at = 0.0
                 continue
-            if response.status_code >= 400 or int(payload.get("code", -1)) != 0:
+            if response.status_code >= 400 or not self._payload_ok(payload):
                 detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
                 raise RuntimeError(f"Sub2API 入池请求失败 status={response.status_code} detail={detail}")
-            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            data = self._payload_data(payload)
             created = data.get("created") if isinstance(data.get("created"), list) else []
             failed = data.get("failed") if isinstance(data.get("failed"), list) else []
             if created:
@@ -183,9 +321,39 @@ class Sub2APIClient:
                 account_name = account.get("name") or item.get("name") or name
                 _log(
                     self.log_callback,
-                    f"[+] Sub2API 入池成功 email={name} account_id={account_id or '-'} name={account_name}",
+                    f"[*] Sub2API 账号记录已创建 email={name} account_id={account_id or '-'} name={account_name}",
                 )
-                return {"ok": True, "created": created, "failed": failed, "account_id": account_id}
+                verification: Dict[str, Any]
+                if verify_after_import:
+                    verification = self.verify_grok_account(
+                        account_id,
+                        attempts=verify_attempts,
+                        timeout_sec=verify_timeout_sec,
+                        retry_delay_sec=verify_retry_delay_sec,
+                    )
+                    if not verification.get("ok"):
+                        raise RuntimeError(
+                            f"Sub2API 已创建 account_id={account_id or '-'}，但可用性验证失败: "
+                            f"{verification.get('error') or 'unknown error'}"
+                        )
+                else:
+                    verification = {"ok": None, "skipped": True, "account_id": account_id}
+                    _log(
+                        self.log_callback,
+                        f"[!] Sub2API account_id={account_id or '-'} 已创建，但配置为跳过可用性验证",
+                    )
+                _log(
+                    self.log_callback,
+                    f"[+] Sub2API 入池可用 email={name} account_id={account_id or '-'} name={account_name}",
+                )
+                return {
+                    "ok": True,
+                    "usable": verification.get("ok"),
+                    "created": created,
+                    "failed": failed,
+                    "account_id": account_id,
+                    "verification": verification,
+                }
             if failed:
                 item = failed[0] if isinstance(failed[0], dict) else {}
                 detail = item.get("error") or "unknown conversion/import failure"
@@ -238,4 +406,8 @@ def import_grok_sso_to_sub2api(
         group_ids=cfg.get("sub2api_group_ids", [3]),
         concurrency=int(cfg.get("sub2api_concurrency") or 1),
         priority=int(cfg.get("sub2api_priority") or 1),
+        verify_after_import=bool(cfg.get("sub2api_verify_after_add", True)),
+        verify_attempts=int(cfg.get("sub2api_verify_attempts") or 2),
+        verify_timeout_sec=float(cfg.get("sub2api_verify_timeout_sec") or 105),
+        verify_retry_delay_sec=float(cfg.get("sub2api_verify_retry_delay_sec") or 3),
     )
