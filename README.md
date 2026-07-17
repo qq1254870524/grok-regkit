@@ -149,8 +149,17 @@ python grok_register_ttk.py --cli
 快速导入 CPA/CLIProxy 的 `xai-*.json` 到 Sub2API：
 
 ```bash
+# 推荐：客户端 API 直导（兼容官方 Sub2API 镜像，不依赖网页「导入数据」）
 python -B scripts/import_cpa_to_sub2api.py --dir "C:/path/to/Grok/cpa"
+python -B scripts/import_cpa_to_sub2api.py --file path/to/xai-xxx.json --verify
+
+# 若必须用 Sub2API 网页「导入数据」：先转成 sub2api-data 备份格式
+python -B scripts/convert_cpa_to_sub2api_data.py --file path/to/xai-xxx.json --out sub2api_data.json
+python -B scripts/convert_cpa_to_sub2api_data.py --dir "C:/path/to/Grok/cpa" --out sub2api_data_bundle.json
+# 然后在 http://127.0.0.1:8080 管理后台 → 账号 → 导入数据 → 上传 sub2api_data*.json
 ```
+
+说明：官方 Sub2API 网页「导入数据」只认 `type=sub2api-data/sub2api-bundle` 备份；原始 `xai-*.json` 不是坏文件，只是入口不匹配。fork 前端已支持直接吃 xai JSON，但需自建镜像才生效。
 
 Web：`http://127.0.0.1:8092` → 号池联动 → CPA 目录 → 导入 CPA 到 Sub2API。
 

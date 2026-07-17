@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Import CLIProxy/CPA xai-*.json OAuth files into Sub2API.
 
@@ -8,6 +8,12 @@ Usage examples:
   python -B scripts/import_cpa_to_sub2api.py --dir ./cpa_auths --limit 20 --no-verify
 
 Never prints access/refresh/id tokens or admin password.
+
+Note:
+  Sub2API Web admin 'Import Data' only accepts backup export JSON by default.
+  Raw xai-*.json must use this script, or convert first:
+    python -B scripts/convert_cpa_to_sub2api_data.py --dir <cpa_dir> --out bundle.json
+  then upload bundle.json in Sub2API UI.
 """
 from __future__ import annotations
 
@@ -152,3 +158,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
