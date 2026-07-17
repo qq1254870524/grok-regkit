@@ -6,6 +6,10 @@ from __future__ import annotations
 Fused from Git-creat7/grokRegister-cpa (MIT) into grok-regkit.
 
 Changelog:
+- 2026-07-18c: consent 快速路径不再默认死哈希 401b73e...；404 拉黑并清空
+  _working_next_action_id；优先 HTML live action，其次上次真正成功的 action，
+  硬编码仅作最后 fallback；Round0 无 live 候选时直接扫 JS chunks，去掉
+  “必现第一次 404 再兜底成功”的慢路径。
 - 2026-07-17 fuse-v1: Adopt upstream authcode mint (referrer=grok-build) and
   Management API upload helpers for local cpa_export + CLI backfill.
 
@@ -51,8 +55,12 @@ GROK_VERSION = "0.2.93"
 GROK_TOKEN_UA = f"grok-pager/{GROK_VERSION} grok-shell/{GROK_VERSION} (linux; x86_64)"
 # consent 提交用的 Next.js Server Action ID（快速路径；失效时再从 consent 页 JS 动态解析）
 # 2026-07 实测 createServerReference 在 accounts.x.ai chunks 内，HTML 里的 400b2e4e... 不是 consent allow
+# 2026-07-18: 401b73e... 对当前前端已 404，不再作为默认快速路径首候选。
 NEXT_ACTION_ID = "401b73e22a5e68737d0037e1aa449fef82cd1b35fb"
-_working_next_action_id = NEXT_ACTION_ID
+# 仅缓存“真正返回 authorization code”的 action；初始为空，避免必现死哈希 404。
+_working_next_action_id = ""
+# 进程内拉黑：404 / server action not found 的 action 不再优先重试。
+_blacklisted_next_action_ids: set[str] = set()
 _NEXT_ACTION_RE = re.compile(
     r'(?:\$ACTION_ID_|next-action["\']?\s*[:=]\s*["\']|["\'])([0-9a-f]{40,44})["\']',
     re.I,
@@ -143,7 +151,7 @@ def _parse_consent_code(body: str) -> str | None:
     return None
 
 
-def _extract_next_action_ids(html: str) -> list[str]:
+def _extract_next_action_ids(html: str, *, include_hardcoded_fallback: bool = False) -> list[str]:
     """仅从 HTML 文本抽哈希（弱信号；真正 id 多在 JS chunk）。"""
     found: list[str] = []
     seen: set[str] = set()
@@ -162,8 +170,10 @@ def _extract_next_action_ids(html: str) -> list[str]:
         _add(m.group(1))
     for m in _NEXT_ACTION_RE.finditer(text):
         _add(m.group(1))
-    if NEXT_ACTION_ID and NEXT_ACTION_ID.lower() not in seen:
-        found.append(NEXT_ACTION_ID.lower())
+    if include_hardcoded_fallback:
+        fb = str(NEXT_ACTION_ID or "").strip().lower()
+        if fb and fb not in seen and fb not in _blacklisted_next_action_ids:
+            found.append(fb)
     return found
 
 
@@ -221,10 +231,12 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
             _add(m.group(1), prefer=prefer)
 
     # HTML 弱信号放后
-    for aid in _extract_next_action_ids(html):
+    for aid in _extract_next_action_ids(html, include_hardcoded_fallback=False):
         _add(aid, prefer=False)
 
     ordered = priority + [x for x in found if x not in priority]
+    # 过滤已拉黑的死哈希，避免扫 JS 后仍先打 404
+    ordered = [x for x in ordered if x not in _blacklisted_next_action_ids]
     if log:
         log(f"  [*] 从 JS chunks 解析 Next-Action {len(ordered)} 个（扫 {fetched} 个脚本）")
     return ordered
@@ -235,7 +247,8 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
 
     使用授权码流程（Authorization Code + PKCE）：
     authorize 注入 referrer=grok-build + plan=generic，
-    consent 优先复用已成功的 Next-Action，失效时才扫描页面 JS 并重试。
+    consent 优先 HTML live action / 上次真正成功的 Next-Action；
+    死哈希与 404 拉黑；无 live 候选时直接扫 JS chunks。
     """
     global _working_next_action_id
 
@@ -303,21 +316,45 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
             action_ids = _discover_action_ids_from_js(s, html, base_url=base, log=log)
         else:
             action_ids = []
-            cached = str(_working_next_action_id or "").strip().lower()
-            if cached:
-                action_ids.append(cached)
-            for action_id in _extract_next_action_ids(html):
+            # 1) HTML 内 live action（若有）
+            for action_id in _extract_next_action_ids(html, include_hardcoded_fallback=False):
+                if action_id in _blacklisted_next_action_ids:
+                    continue
                 if action_id not in action_ids:
                     action_ids.append(action_id)
-            log(f"  [*] consent 快速路径 Next-Action {len(action_ids)} 个（跳过 JS chunks 扫描）")
+            # 2) 上次真正成功的 working id（非硬编码死哈希）
+            cached = str(_working_next_action_id or "").strip().lower()
+            if (
+                cached
+                and cached not in _blacklisted_next_action_ids
+                and cached != str(NEXT_ACTION_ID or "").strip().lower()
+                and cached not in action_ids
+            ):
+                # 成功缓存放最前：已知可工作
+                action_ids.insert(0, cached)
+            log(
+                f"  [*] consent 快速路径 Next-Action {len(action_ids)} 个"
+                f"（HTML/缓存；跳过 JS chunks；已拉黑 {len(_blacklisted_next_action_ids)}）"
+            )
         return resp, url, action_ids
 
     r, final_url, action_ids = _open_consent()
     if r is None:
         return None
     if not action_ids:
-        action_ids = [NEXT_ACTION_ID]
-        log(f"  ⚠️ 未解析到 Next-Action，使用 fallback {NEXT_ACTION_ID[:12]}...")
+        # 无 HTML/缓存 live 候选：直接扫 JS，避免先 POST 死哈希 404
+        log("  [*] 快速路径无 live Next-Action，直接扫描 JS chunks...")
+        r, final_url, action_ids = _open_consent(discover_actions=True)
+        if r is None:
+            return None
+    if not action_ids:
+        fb = str(NEXT_ACTION_ID or "").strip().lower()
+        if fb and fb not in _blacklisted_next_action_ids:
+            action_ids = [fb]
+            log(f"  ⚠️ 未解析到 Next-Action，使用 hardcoded fallback {fb[:12]}...")
+        else:
+            log("  ❌ 未解析到可用 Next-Action（含硬编码 fallback 已拉黑）")
+            return None
     else:
         log(f"  [*] consent Next-Action 候选 {len(action_ids)} 个（首个 {action_ids[0][:12]}...）")
 
@@ -340,7 +377,7 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
     code = None
     last_err = ""
     tried: set[str] = set()
-    # 最多 2 轮：第一轮优先试上次成功/内置 id；失败再重开 consent 扫 JS chunks。
+    # 最多 2 轮：第一轮 live/缓存；失败再重开 consent 扫 JS chunks。
     for round_i in range(2):
         if round_i > 0:
             log("  [*] consent 失败，重新进入 authorize/consent 并解析 Next-Action...")
@@ -348,10 +385,17 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
             if r is None:
                 return None
             if not action_ids:
-                action_ids = [NEXT_ACTION_ID]
+                fb = str(NEXT_ACTION_ID or "").strip().lower()
+                if fb and fb not in _blacklisted_next_action_ids and fb not in tried:
+                    action_ids = [fb]
+                    log(f"  ⚠️ JS 扫描仍无候选，fallback {fb[:12]}...")
+                else:
+                    break
 
         for action_id in action_ids[:8]:
             if action_id in tried:
+                continue
+            if action_id in _blacklisted_next_action_ids:
                 continue
             tried.add(action_id)
             try:
@@ -377,6 +421,12 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
             if r.status_code == 404 or "server action not found" in body.lower():
                 last_err = f"consent HTTP {r.status_code}: {body[:160]}"
                 log(f"  ⚠️ Next-Action {action_id[:12]}... 无效: {last_err}")
+                _blacklisted_next_action_ids.add(action_id)
+                if str(_working_next_action_id or "").strip().lower() == action_id:
+                    _working_next_action_id = ""
+                    log(f"  [*] 已清空失效 working Next-Action {action_id[:12]}...")
+                else:
+                    log(f"  [*] 已拉黑无效 Next-Action {action_id[:12]}...")
                 continue
             if r.status_code < 200 or r.status_code >= 300:
                 last_err = f"consent HTTP {r.status_code}: {body[:200]}"
