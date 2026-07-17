@@ -116,6 +116,33 @@ class RegressionTests(unittest.TestCase):
             engine.browser = old_browser
             engine.browser_started_with_proxy = old_proxy
 
+    def test_web_stop_only_stops_registration_controller(self):
+        import asyncio
+        import web.server as server
+
+        class FakeController:
+            def __init__(self):
+                self.calls = []
+            def stop(self, force_cleanup=False):
+                self.calls.append(force_cleanup)
+
+        original_controller = server._controller
+        original_running = server._job_state.get("running")
+        fake = FakeController()
+        try:
+            server._controller = fake
+            server._job_state["running"] = True
+            result = asyncio.run(server.api_stop(x_access_key=None))
+            self.assertTrue(result["ok"])
+            self.assertEqual(fake.calls, [True])
+            stop_source = (ROOT / "web" / "server.py").read_text(encoding="utf-8")
+            stop_block = stop_source.split('@app.post("/api/stop")', 1)[1].split('@app.', 1)[0]
+            for service_name in ("grok2api", "sub2api", "cliproxyapi", "cpa_gateway", "service_manager"):
+                self.assertNotIn(service_name, stop_block.lower())
+        finally:
+            server._controller = original_controller
+            server._job_state["running"] = original_running
+
     def test_aol_pool_accepts_source_file(self):
         import aol_mail
         pool = aol_mail.AolAccountPool([], source_file='aol_accounts.txt')
@@ -125,6 +152,8 @@ class RegressionTests(unittest.TestCase):
         html = (ROOT / 'web' / 'index.html').read_text(encoding='utf-8')
         server = (ROOT / 'web' / 'server.py').read_text(encoding='utf-8')
         self.assertIn('id="sub2api_auto_add" type="checkbox" checked', html)
+        self.assertIn('id="stopBtn" class="btn btn-danger" type="button">停止注册</button>', html)
+        self.assertIn('不会停止 grok2api、Sub2API、CLIProxyAPI 或 CPA Gateway', html)
         self.assertIn('c.sub2api_auto_add !== false', html)
         self.assertIn("'sub2api_admin_password'", html)
         self.assertIn('"sub2api_admin_password"', server)

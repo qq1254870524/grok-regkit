@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -51,3 +51,4 @@ browser/
 outlook_token_cache.json
 outlook_accounts.txt
 aol_accounts.txt
+capture_out/

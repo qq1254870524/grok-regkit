@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """AOL mailbox provider via IMAP protocol (email----password/app password).
 
 Account line formats:
