@@ -63,3 +63,40 @@ git checkout stable-2026-07-18
 2. 三个关联仓都 push 到 GitHub
 3. 新建 tag，例如 `stable-YYYY-MM-DD`
 4. 更新本文件表格中的 commit / release 链接
+
+---
+
+# Restore Point #3 — stable-2026-07-18-matrix-uifallback
+
+- **Tag / Release**: `stable-2026-07-18-matrix-uifallback`
+- **Sequence**: 第 3 次还原点（不覆盖 #1/#2）
+- **Marked at**: 2026-07-18
+- **Purpose**: UI fallback 最后兜底 + 矩阵实跑（hybrid/browser × direct/SOCKS5 × AOL/Outlook）可用快照
+
+## grok-regkit
+
+| 项 | 值 |
+|----|----|
+| Repo | https://github.com/qq1254870524/grok-regkit |
+| Tag | `stable-2026-07-18-matrix-uifallback` |
+| Local | `C:\Users\zhang\grok-regkit` |
+
+### 本快照关键能力
+
+- 主路径：注册 → 即时 SSO → 入池（不变）
+- UI fallback 仅在 protocol + browser-fetch 都无 SSO 后启用
+- pending_sso 仅在 UI 仍失败后落盘
+- 矩阵：hybrid/browser、direct/socks5_list、AOL/Outlook、pending 二次补
+
+### 还原
+
+```bash
+git fetch mygithub --tags
+git checkout stable-2026-07-18-matrix-uifallback
+```
+
+## 历史还原点（保留，勿覆盖）
+
+1. `stable-2026-07-18`
+2. `stable-2026-07-18-sso-mainflow`
+3. `stable-2026-07-18-matrix-uifallback`（本点）

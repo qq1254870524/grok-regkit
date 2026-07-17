@@ -36,6 +36,9 @@ Changelog:
               browser-fetch run_js 改为闭包传参（DrissionPage 不注入 arguments 给 async IIFE）；
               识别 turnstile/业务错误，避免把唯一 live next-action 标死导致 no candidates。
               主流程仍是 注册→即时SSO→入池；pending 仅兜底。
+2026-07-18l: 重新启用 UI fallback 为最后兜底：协议 SignUp → browser-fetch → UI profile submit → pending_sso。
+              主路径不变：协议/browser-fetch 拿到 SSO 立刻 schedule_post 入池；UI 不抢主路径、不重复发信；
+              仅在 protocol+browser-fetch 均无 SSO 时调用 submit_profile_and_wait_sso；仍无 SSO 才落盘 pending。
 """
 from __future__ import annotations
 
@@ -771,7 +774,7 @@ def register_one_hybrid(
 
             log("[hybrid] resolving next-action after turnstile…")
             # Main path unchanged: protocol SignUp with live candidates, then immediate SSO + pool.
-            # pending_sso is fallback only after protocol/browser-fetch both fail.
+            # pending_sso is fallback only after protocol/browser-fetch/UI all fail.
             try:
                 for a in (browser.read_captured_next_actions() or []):
                     _add_action(a, "network_hook")
@@ -1245,12 +1248,50 @@ def register_one_hybrid(
                     except Exception as live_exc:
                         log(f"[hybrid] live re-scrape block error: {live_exc}")
 
-                # Explicitly NO UI profile fallback. User requires protocol-first hybrid only.
+                # Last-resort UI fallback only. Main path remains protocol/browser-fetch → immediate SSO.
                 if not sso:
                     log(
-                        "[hybrid] browser-fetch no sso; UI fallback DISABLED "
-                        f"(protocol-first) email={email}"
+                        f"[hybrid] browser-fetch no sso; UI profile submit fallback "
+                        f"email={email} given={given} family={family}"
                     )
+                    try:
+                        ui_sso = browser.submit_profile_and_wait_sso(
+                            given_name=given,
+                            family_name=family,
+                            password=password,
+                            turnstile_token=turnstile,
+                            email=email,
+                            code=clean,
+                            timeout=90,
+                            cancel_callback=stop,
+                        )
+                        ui_sso = (ui_sso or "").strip()
+                        if ui_sso:
+                            sso = ui_sso
+                            log(
+                                f"[hybrid] UI fallback SSO ok len={len(sso)} email={email}"
+                            )
+                            try:
+                                # Capture any live next-action observed during UI submit for later runs.
+                                for a in (browser.read_captured_next_actions() or []):
+                                    if a and not is_dead_next_action(a):
+                                        save_next_action_to_capture(a, log)
+                                        break
+                            except Exception:
+                                pass
+                        else:
+                            log(
+                                f"[hybrid] UI fallback finished without SSO email={email}"
+                            )
+                    except Exception as ui_exc:
+                        if stop():
+                            log("[hybrid] stop during UI fallback")
+                            return _result(STATUS_STOPPED)
+                        log(f"[hybrid] UI fallback exception: {ui_exc}")
+                        try:
+                            log(traceback.format_exc())
+                        except Exception:
+                            pass
             if not sso:
                 # Verification may already have passed; keep email+password for later OOS/SSO.
                 try:
@@ -1277,7 +1318,7 @@ def register_one_hybrid(
                 except Exception as rm_exc:
                     log(f"[hybrid] remove pending_sso mailbox fail: {rm_exc}")
                 log(
-                    f"[hybrid] no sso after protocol+browser-fetch cookies="
+                    f"[hybrid] no sso after protocol+browser-fetch+UI cookies="
                     f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"
                 )
                 return _result(STATUS_PENDING_SSO, email=email, detail="verified_no_sso")
