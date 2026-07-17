@@ -771,9 +771,44 @@
             <button id="refreshG2aBtn" class="btn btn-ghost" type="button">刷新状态</button>
             <a id="openG2aBtn" class="btn" href="http://127.0.0.1:8010/admin/account" target="_blank" rel="noopener">打开账号池</a>
           </div>
+          <div class="soft-box" style="margin-top:14px">
+            <div class="section-sub" style="margin-bottom:10px"><b>Sub2API Grok OAuth 入池</b>：使用注册成功后的 SSO 调用官方 sso-to-oauth 接口</div>
+            <div class="form-grid two">
+              <label class="check-row span-2"><input id="sub2api_auto_add" type="checkbox" checked /> 注册成功后自动加入 Sub2API（默认开启）</label>
+              <div class="field span-2">
+                <div class="label">Sub2API 地址</div>
+                <input id="sub2api_base_url" type="text" value="http://127.0.0.1:8080" />
+              </div>
+              <div class="field">
+                <div class="label">管理员邮箱</div>
+                <input id="sub2api_admin_email" type="email" autocomplete="username" />
+              </div>
+              <div class="field">
+                <div class="label">管理员密码</div>
+                <input id="sub2api_admin_password" type="password" autocomplete="current-password" />
+              </div>
+              <div class="field">
+                <div class="label">组 ID（逗号分隔）</div>
+                <input id="sub2api_group_ids" type="text" value="3" placeholder="3" />
+              </div>
+              <div class="field">
+                <div class="label">账号并发</div>
+                <input id="sub2api_concurrency" type="number" min="1" value="1" />
+              </div>
+              <div class="field">
+                <div class="label">优先级</div>
+                <input id="sub2api_priority" type="number" value="1" />
+              </div>
+              <div class="field">
+                <div class="label">接口超时（秒）</div>
+                <input id="sub2api_timeout_sec" type="number" min="10" value="60" />
+              </div>
+            </div>
+          </div>
           <div class="tips">
-            <p>· 内网优先：<code class="inline">http://127.0.0.1:8010</code></p>
-            <p>· 密钥显示 <code class="inline">***</code> 表示已保存，不改则保留。</p>
+            <p>· grok2api 内网优先：<code class="inline">http://127.0.0.1:8010</code>；Sub2API 默认：<code class="inline">http://127.0.0.1:8080</code></p>
+            <p>· 密钥/密码显示星号表示已保存，不改则保留。</p>
+            <p>· Sub2API 入池失败只记录日志并保留注册成功账号，不会回滚成功结果。</p>
           </div>
         </div>
       </div>
@@ -1097,6 +1132,14 @@
         grok2api_remote_app_key: $('grok2api_remote_app_key').value,
         grok2api_pool_name: $('grok2api_pool_name').value.trim() || 'ssoBasic',
         grok2api_local_token_file: $('grok2api_local_token_file').value.trim(),
+        sub2api_auto_add: $('sub2api_auto_add') ? $('sub2api_auto_add').checked : true,
+        sub2api_base_url: ($('sub2api_base_url')?.value || 'http://127.0.0.1:8080').trim(),
+        sub2api_admin_email: ($('sub2api_admin_email')?.value || '').trim(),
+        sub2api_admin_password: $('sub2api_admin_password')?.value || '',
+        sub2api_group_ids: (($('sub2api_group_ids')?.value || '3').split(',').map((x) => parseInt(x.trim(), 10)).filter((x) => Number.isInteger(x) && x > 0)),
+        sub2api_concurrency: parseInt($('sub2api_concurrency')?.value || '1', 10) || 1,
+        sub2api_priority: parseInt($('sub2api_priority')?.value || '1', 10) || 1,
+        sub2api_timeout_sec: parseInt($('sub2api_timeout_sec')?.value || '60', 10) || 60,
       };
     }
 
@@ -1179,6 +1222,14 @@
       setVal('grok2api_remote_app_key', c.grok2api_remote_app_key || '');
       setVal('grok2api_pool_name', c.grok2api_pool_name || 'ssoBasic');
       setVal('grok2api_local_token_file', c.grok2api_local_token_file || '');
+      setVal('sub2api_auto_add', c.sub2api_auto_add !== false);
+      setVal('sub2api_base_url', c.sub2api_base_url || 'http://127.0.0.1:8080');
+      setVal('sub2api_admin_email', c.sub2api_admin_email || '');
+      setVal('sub2api_admin_password', c.sub2api_admin_password || '');
+      setVal('sub2api_group_ids', Array.isArray(c.sub2api_group_ids) && c.sub2api_group_ids.length ? c.sub2api_group_ids.join(',') : '3');
+      setVal('sub2api_concurrency', c.sub2api_concurrency || 1);
+      setVal('sub2api_priority', c.sub2api_priority != null ? c.sub2api_priority : 1);
+      setVal('sub2api_timeout_sec', c.sub2api_timeout_sec || 60);
       appendLog('[*] 配置已加载');
     }
 

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FastAPI control plane for grok-regkit."""
+"""FastAPI control plane for grok-regkit.
+
+2026-07-17: added Sub2API SSO-to-OAuth settings; password is masked and preserved
+when the Web UI submits the masked placeholder.
+"""
 
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ SECRET_FIELDS = {
     "yyds_api_key",
     "yyds_jwt",
     "grok2api_remote_app_key",
+    "sub2api_admin_password",
     "proxy",
     "proxy_pass",
 }
@@ -325,6 +330,14 @@ class ConfigBody(BaseModel):
     grok2api_auto_add_remote: Optional[bool] = None
     grok2api_remote_base: Optional[str] = None
     grok2api_remote_app_key: Optional[str] = None
+    sub2api_auto_add: Optional[bool] = None
+    sub2api_base_url: Optional[str] = None
+    sub2api_admin_email: Optional[str] = None
+    sub2api_admin_password: Optional[str] = None
+    sub2api_group_ids: Optional[List[int]] = None
+    sub2api_concurrency: Optional[int] = None
+    sub2api_priority: Optional[int] = None
+    sub2api_timeout_sec: Optional[int] = None
     defaultDomains: Optional[str] = None
     email_provider: Optional[str] = None
     proxy_list_file: Optional[str] = None

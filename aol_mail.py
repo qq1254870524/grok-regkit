@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """AOL mailbox provider via IMAP protocol (email----password/app password).
 
 Account line formats:
@@ -393,9 +393,10 @@ class AolImapSession:
 
 
 class AolAccountPool:
-    def __init__(self, accounts: List[AolAccount], log_callback=None):
+    def __init__(self, accounts: List[AolAccount], log_callback=None, source_file: str = ""):
         self.accounts = accounts
         self.log_callback = log_callback
+        self.source_file = str(source_file or "").strip()
         self._idx = 0
 
     def _lg(self, msg: str) -> None:
@@ -596,7 +597,7 @@ def build_pool_from_config(config: dict, log_callback=None) -> AolAccountPool:
             if acc.identity() not in {a.identity() for a in accounts}:
                 accounts.append(acc)
     _log(log_callback, f"[*] AOL pool loaded accounts={len(accounts)} file={file_path}")
-    pool = AolAccountPool(accounts, log_callback=log_callback, source_file=file_path)
+    pool = AolAccountPool(accounts, log_callback=log_callback, source_file=str(file_path))
     return pool
 
 

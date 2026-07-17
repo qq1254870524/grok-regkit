@@ -543,10 +543,11 @@ true;
         self.close()
         return False
 
-    def open_signup(self):
+    def open_signup(self, cancel_callback=None):
+        """Open signup in the current browser and honor an external stop request."""
         from grok_register_ttk import open_signup_page
 
-        open_signup_page(log_callback=self.log)
+        open_signup_page(log_callback=self.log, cancel_callback=cancel_callback)
 
     def export_cookies(self) -> dict:
         from grok_register_ttk import _get_browser

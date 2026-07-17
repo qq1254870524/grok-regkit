@@ -3,6 +3,8 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-17f: 修复 Web 停止竞态：打开注册页时传入 should_stop，浏览器被停止关闭后
+  不再继续 new_tab；停止操作不计为注册失败，也不输出误导性的 NoneType 堆栈。
 - 2026-07-17e: 协议 curl 超时(0 bytes)根因修复：跳过已有候选时的 curl chunk discover；
   SignUp 超时降至 18s；curl 超时/status=0 立即停止协议重试（不再试 hardcoded 死哈希）；
   协议失败后优先浏览器同源 fetch SignUp，再 UI 点提交；详细网络路径日志不脱敏。
@@ -266,7 +268,7 @@ def register_one_hybrid(
             if stop():
                 return False
             log("[browser] open signup page for this account")
-            browser.open_signup()
+            browser.open_signup(cancel_callback=stop)
             browser.install_network_hook()
             action = action or browser.scrape_next_action() or action
             log(f"[hybrid] next-action ready len={len(action or '')} value={action or ''}")
@@ -951,6 +953,9 @@ def register_one_hybrid(
             log(f"[hybrid] account success elapsed={time.time()-t0:.1f}s email={email}")
             return True
     except Exception as e:
+        if stop():
+            log("[hybrid] 已按停止请求中断当前账号，不计为注册失败")
+            return False
         log(f"[hybrid] exception: {e}")
         try:
             log(traceback.format_exc())
@@ -1022,14 +1027,15 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
                 should_stop=controller.should_stop,
                 post_success=True,
             )
+            if controller.should_stop():
+                log("[*] 当前账号因停止请求中断，统计保持不变")
+                break
             if ok:
                 success_count += 1
             else:
                 fail_count += 1
             i += 1
             log(f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count}")
-            if controller.should_stop():
-                break
             engine.sleep_with_cancel(1, controller.should_stop)
     except KeyboardInterrupt:
         controller.stop()

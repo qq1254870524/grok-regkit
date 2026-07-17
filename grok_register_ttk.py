@@ -5,6 +5,9 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-17f: 修复 AOL 账号池 source_file 构造参数遗漏；修复停止时浏览器已关闭但
+  open_signup_page 仍调用 new_tab 的竞态；新增 Sub2API Grok SSO→OAuth 后台入池，
+  默认启用且失败不影响注册成功结果。
 - 2026-07-17e: 接入 AOL 邮箱 provider（IMAP 协议登录，账号----密码/应用专用密码；
   配置 aol_accounts / aol_accounts_file；Web/GUI 可选 aol）。
 - 2026-07-17d: 接入微软 Outlook/Hotmail 邮箱 provider（password+TOTP 或 refresh_token），
@@ -160,6 +163,15 @@ DEFAULT_CONFIG = {
     "grok2api_auto_add_remote": False,
     "grok2api_remote_base": "",
     "grok2api_remote_app_key": "",
+    # ===== Sub2API: successful Grok SSO -> OAuth account import =====
+    "sub2api_auto_add": True,
+    "sub2api_base_url": "http://127.0.0.1:8080",
+    "sub2api_admin_email": "",
+    "sub2api_admin_password": "",
+    "sub2api_group_ids": [3],
+    "sub2api_concurrency": 1,
+    "sub2api_priority": 1,
+    "sub2api_timeout_sec": 60,
     # ===== CPA / free Grok 4.5 (OIDC via Grok Build, NOT SSO) =====
     # SSO → web model pool; OIDC → CLIProxyAPI → cli-chat-proxy → grok-4.5
     "cpa_export_enabled": True,
@@ -1884,7 +1896,7 @@ def _config_bool(value, default=False):
 
 
 def _post_success_worker_loop():
-    """Background worker: NSFW / g2a 入池 / CPA mint（不阻塞下一号浏览器注册）。"""
+    """Background worker: NSFW / g2a / Sub2API / CPA（不阻塞下一号浏览器注册）。"""
     while True:
         job = _post_success_q.get()
         if job is None:
@@ -1921,6 +1933,18 @@ def _post_success_worker_loop():
                     max_http_tries=bg_tries,
                     http_timeout=bg_timeout,
                 )
+            if job.get("do_sub2api"):
+                try:
+                    from sub2api_client import import_grok_sso_to_sub2api
+
+                    import_grok_sso_to_sub2api(
+                        sso,
+                        email=email,
+                        config=config,
+                        log_callback=log,
+                    )
+                except Exception as sub2api_exc:
+                    log(f"[bg] Sub2API 入池未成功（注册结果保留）: {sub2api_exc}")
             if job.get("do_cpa") and config.get("cpa_export_enabled", True) and config.get("cpa_auto_add", True):
                 try:
                     export_cpa_after_success(
@@ -1956,7 +1980,7 @@ def ensure_post_success_worker(log_callback=None):
         t.start()
         _post_success_worker_started = True
         if log_callback:
-            log_callback("[*] 后处理后台线程已启动（g2a/CPA/NSFW 可异步）")
+            log_callback("[*] 后处理后台线程已启动（g2a/Sub2API/CPA/NSFW 可异步）")
 
 
 def wait_post_success_queue(timeout=300, log_callback=None):
@@ -1988,7 +2012,7 @@ def schedule_post_registration(
     """After sso saved: NSFW + g2a + CPA. Prefer async so next account starts sooner.
 
     - enable_nsfw + nsfw_async=False → NSFW 同步（你需要立刻开时）
-    - post_success_async=True → g2a / CPA（及 async NSFW）进后台
+    - post_success_async=True → g2a / Sub2API / CPA（及 async NSFW）进后台
     - cookies: optional pre-exported jar (hybrid path has no live page)
     """
     log = log_callback or (lambda m: print(m, flush=True))
@@ -2014,6 +2038,7 @@ def schedule_post_registration(
     nsfw_async = _config_bool(config.get("nsfw_async", True), default=True)
     post_async = _config_bool(config.get("post_success_async", True), default=True)
     do_g2a = bool(config.get("grok2api_auto_add_remote") or config.get("grok2api_auto_add_local"))
+    do_sub2api = _config_bool(config.get("sub2api_auto_add", True), default=True)
     do_cpa = bool(config.get("cpa_export_enabled", True)) and bool(config.get("cpa_auto_add", True))
 
     # Optional sync NSFW before queueing the rest
@@ -2029,7 +2054,7 @@ def schedule_post_registration(
             log(f"[!] NSFW 异常，继续: {nsfw_exc}")
         do_nsfw = False  # already done
 
-    need_queue = do_g2a or do_cpa or do_nsfw
+    need_queue = do_g2a or do_sub2api or do_cpa or do_nsfw
     if not need_queue:
         return {"async": False, "queued": False}
 
@@ -2047,6 +2072,18 @@ def schedule_post_registration(
                 log(f"[!] NSFW 异常，继续: {nsfw_exc}")
         if do_g2a:
             add_token_to_grok2api_pools(sso, email=email, log_callback=log)
+        if do_sub2api:
+            try:
+                from sub2api_client import import_grok_sso_to_sub2api
+
+                import_grok_sso_to_sub2api(
+                    sso,
+                    email=email,
+                    config=config,
+                    log_callback=log,
+                )
+            except Exception as sub2api_exc:
+                log(f"[!] Sub2API 入池未成功（注册结果保留）: {sub2api_exc}")
         if do_cpa:
             try:
                 export_cpa_after_success(
@@ -2073,6 +2110,7 @@ def schedule_post_registration(
             "cookies": cookies,
             "do_nsfw": do_nsfw,
             "do_g2a": do_g2a,
+            "do_sub2api": do_sub2api,
             "do_cpa": do_cpa,
             "log": log,
         }
@@ -2082,6 +2120,8 @@ def schedule_post_registration(
         parts.append("NSFW")
     if do_g2a:
         parts.append("g2a入池")
+    if do_sub2api:
+        parts.append("Sub2API入池")
     if do_cpa:
         parts.append("CPA")
     log(f"[*] 后处理已入队后台: {'+'.join(parts) or '无'} → 立即开下一号")
@@ -4051,7 +4091,12 @@ def open_signup_page(log_callback=None, cancel_callback=None):
         except Exception as e:
             if log_callback:
                 log_callback(f"[Debug] 打开URL异常: {e}")
-            page = browser.new_tab(SIGNUP_URL)
+            # Web 停止会先关闭全局 browser；此时绝不能继续 browser.new_tab。
+            raise_if_cancelled(cancel_callback)
+            current_browser = browser
+            if current_browser is None:
+                raise RegistrationCancelled("浏览器已按停止请求关闭")
+            page = current_browser.new_tab(SIGNUP_URL)
         try:
             page.wait.doc_loaded()
         except Exception:
@@ -4064,6 +4109,8 @@ def open_signup_page(log_callback=None, cancel_callback=None):
         raise_if_cancelled(cancel_callback)
         try:
             _open_with_current_browser()
+        except RegistrationCancelled:
+            raise
         except Exception as e:
             last_err = e
             if browser_started_with_proxy and get_configured_proxy():
