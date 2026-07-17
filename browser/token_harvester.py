@@ -139,32 +139,167 @@ class BrowserTokenSession:
             self._lg(f"[Debug] net hook: {e}")
             return False
 
-    def create_email_sent_via_browser(self) -> bool:
+
+    def create_email_status_via_browser(self) -> dict:
+        """Return detailed CreateEmailValidationCode network evidence from page hook."""
         from grok_register_ttk import _get_page
 
         page = _get_page()
+        data = {
+            "ok": False,
+            "status": 0,
+            "seen": False,
+            "castle_len": 0,
+            "net_hits": 0,
+            "sent": False,
+            "reason": "no_data",
+        }
         try:
-            data = page.run_js(
+            raw = page.run_js(
                 """
+const net = window.__hybrid_net || [];
+const hits = net.filter(n => String((n&&n.url)||'').includes('CreateEmailValidationCode'));
 return {
   ok: !!window.__hybrid_create_email_ok,
   status: Number(window.__hybrid_create_email_status||0),
   seen: !!window.__hybrid_create_email_seen,
-  castle: (window.__hybrid_castle||'').length
+  castle_len: Number((window.__hybrid_castle||'').length||0),
+  net_hits: hits.length,
+  net_urls: hits.slice(0, 5).map(n => String((n&&n.url)||'').slice(0, 160))
 };
 """
             )
-            if isinstance(data, dict):
-                if data.get("ok") or int(data.get("status") or 0) in (200, 0) and data.get("seen"):
-                    # status 0 + seen: some enginges don't expose status; castle captured is enough
-                    if data.get("ok") or int(data.get("status") or 0) == 200:
-                        return True
-                    if data.get("seen") and int(data.get("castle") or 0) > 1000:
-                        return True
-        except Exception:
-            pass
-        # if we captured a long native castle after UI submit, CreateEmail almost certainly fired
-        return bool(self.read_captured_castle())
+            if isinstance(raw, dict):
+                data.update(
+                    {
+                        "ok": bool(raw.get("ok")),
+                        "status": int(raw.get("status") or 0),
+                        "seen": bool(raw.get("seen")),
+                        "castle_len": int(raw.get("castle_len") or 0),
+                        "net_hits": int(raw.get("net_hits") or 0),
+                        "net_urls": list(raw.get("net_urls") or []),
+                    }
+                )
+        except Exception as exc:
+            data["reason"] = f"js_error:{exc}"
+            return data
+
+        status = int(data.get("status") or 0)
+        ok = bool(data.get("ok"))
+        seen = bool(data.get("seen")) or int(data.get("net_hits") or 0) > 0
+        # Strict: only treat as sent when CreateEmail request was observed.
+        # Do NOT treat "have castle only" as CreateEmail success.
+        if ok and (status == 0 or 200 <= status < 300):
+            data["sent"] = True
+            data["reason"] = f"ok_status={status}"
+        elif seen and 200 <= status < 300:
+            data["sent"] = True
+            data["reason"] = f"seen_status={status}"
+        elif seen and status == 0:
+            data["sent"] = True
+            data["reason"] = "seen_status_unknown"
+        elif seen and status >= 400:
+            data["sent"] = False
+            data["reason"] = f"seen_http_{status}"
+        else:
+            data["sent"] = False
+            data["reason"] = "not_seen"
+        return data
+
+    def create_email_sent_via_browser(self) -> bool:
+        st = self.create_email_status_via_browser()
+        return bool(st.get("sent"))
+
+    def click_email_continue_for_create(self, email: str) -> str:
+        """Fill email and click Continue/Send to fire CreateEmailValidationCode."""
+        from grok_register_ttk import _get_page
+
+        page = _get_page()
+        try:
+            r = page.run_js(
+                r"""
+const email = arguments[0];
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function setInputValue(input, v) {
+  input.focus();
+  try { input.click(); } catch (e) {}
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  if (setter) setter.call(input, v); else input.value = v;
+  input.dispatchEvent(new InputEvent('input', {bubbles:true, data:v, inputType:'insertText'}));
+  input.dispatchEvent(new Event('change', {bubbles:true}));
+  input.dispatchEvent(new Event('blur', {bubbles:true}));
+}
+const inputs = Array.from(document.querySelectorAll('input, textarea'));
+let input = inputs.find((n) => {
+  if (!isVisible(n)) return false;
+  const meta = [n.type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete]
+    .join(' ').toLowerCase();
+  return n.type === 'email' || meta.includes('email') || meta.includes('e-mail') || meta.includes('\u90ae\u7bb1');
+});
+if (!input) {
+  input = inputs.find((n) => isVisible(n) && !['password','hidden','checkbox','radio','submit','button'].includes(String(n.type||'').toLowerCase()));
+}
+if (!input) return 'no-input';
+setInputValue(input, email);
+const btnNodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a'));
+const scoreBtn = (n) => {
+  if (!isVisible(n)) return -1;
+  if (n.disabled || n.getAttribute('aria-disabled') === 'true') return -1;
+  const t = ((n.innerText || n.textContent || n.value || n.getAttribute('aria-label') || '') + '')
+    .replace(/\s+/g, '').toLowerCase();
+  let s = 0;
+  if (t.includes('\u7ee7\u7eed') || t.includes('continue')) s += 50;
+  if (t.includes('\u4e0b\u4e00\u6b65') || t.includes('next')) s += 40;
+  if (t.includes('\u53d1\u9001') || t.includes('send')) s += 45;
+  if (t.includes('\u9a8c\u8bc1') || t.includes('verify')) s += 35;
+  if (t.includes('\u6ce8\u518c') || t.includes('signup') || t.includes('sign-up') || t.includes('create')) s += 30;
+  if (t.includes('\u786e\u8ba4') || t.includes('confirm') || t.includes('submit')) s += 25;
+  if (String(n.getAttribute('type')||'').toLowerCase() === 'submit') s += 20;
+  if (t.includes('google') || t.includes('apple') || t.includes('github') || t.includes('\u767b\u5f55') || t.includes('login')) s -= 80;
+  return s;
+};
+let best = null, bestScore = 0;
+for (const n of btnNodes) {
+  const sc = scoreBtn(n);
+  if (sc > bestScore) { bestScore = sc; best = n; }
+}
+if (best && bestScore > 0) {
+  try { best.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {}
+  try {
+    best.click();
+    return 'clicked:' + bestScore + ':' + ((best.innerText||best.value||'').replace(/\s+/g,'').slice(0,40));
+  } catch (e) {}
+  try {
+    best.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+    return 'mouse-click:' + bestScore;
+  } catch (e2) {}
+}
+try {
+  const form = input.form || input.closest('form');
+  if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); return 'form-requestSubmit'; }
+  if (form) { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); return 'form-submit-event'; }
+} catch (e) {}
+try {
+  input.focus();
+  input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+  input.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+  return 'enter-key';
+} catch (e) {}
+return 'filled-no-button';
+                """,
+                email,
+            )
+            return str(r or "")
+        except Exception as exc:
+            return f"error:{exc}"
 
     def browser_user_agent(self) -> str:
         from grok_register_ttk import _get_page
@@ -201,70 +336,79 @@ return {castle: String(best||''), n: list.length};
             pass
         return ""
 
+
     def harvest_castle_via_email_submit(self, email: str, timeout: int = 40) -> str:
-        """Trigger React useCastle() by submitting email in UI; capture ~14KB token."""
+        """Fill email + click Continue/Send so native CreateEmail fires; capture castle."""
         from grok_register_ttk import _get_page
 
         if not self._hooked:
             self.install_network_hook()
         page = _get_page()
-        # clear previous
+        # clear previous castle + CreateEmail evidence
         try:
             page.run_js(
-                "window.__hybrid_castle=''; window.__hybrid_castles=[]; window.__hybrid_net=[]; true;"
+                """
+window.__hybrid_castle='';
+window.__hybrid_castles=[];
+window.__hybrid_net=[];
+window.__hybrid_create_email_ok=false;
+window.__hybrid_create_email_status=0;
+window.__hybrid_create_email_seen=false;
+true;
+"""
             )
         except Exception:
             pass
-        try:
-            r = page.run_js(
-                """
-const email = arguments[0];
-function isVisible(node) {
-  if (!node) return false;
-  const style = window.getComputedStyle(node);
-  if (style.display === 'none' || style.visibility === 'hidden') return false;
-  const rect = node.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
-}
-function setInputValue(input, v) {
-  input.focus(); input.click();
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-  const tracker = input._valueTracker;
-  if (tracker) tracker.setValue('');
-  if (setter) setter.call(input, v); else input.value = v;
-  input.dispatchEvent(new InputEvent('input', {bubbles:true, data:v, inputType:'insertText'}));
-  input.dispatchEvent(new Event('change', {bubbles:true}));
-}
-const input = Array.from(document.querySelectorAll('input')).find((n) => {
-  if (!isVisible(n)) return false;
-  const meta = [n.type, n.name, n.id, n.placeholder, n.getAttribute('data-testid')].join(' ').toLowerCase();
-  return meta.includes('email') || n.type === 'email';
-});
-if (!input) return 'no-input';
-setInputValue(input, email);
-const btn = Array.from(document.querySelectorAll('button')).find((n) => {
-  if (!isVisible(n) || n.disabled) return false;
-  const t = (n.innerText||'').replace(/\\s+/g,'');
-  return t.includes('继续') || t.includes('注册') || t.includes('Continue') || n.type==='submit';
-});
-if (btn) { btn.click(); return 'submitted'; }
-return 'filled-no-button';
-                """,
-                email,
-            )
-            self._lg(f"[*] UI email for castle: {r}")
-        except Exception as e:
-            self._lg(f"[Debug] UI email castle: {e}")
-            return ""
 
-        deadline = time.time() + timeout
+        click_r = self.click_email_continue_for_create(email)
+        self._lg(f"[*] UI email submit click={click_r}")
+
+        deadline = time.time() + max(15, int(timeout))
+        last_retry = time.time()
+        retries = 0
         while time.time() < deadline:
+            st = self.create_email_status_via_browser()
             c = self.read_captured_castle()
-            if c:
-                self._lg(f"[*] native castle len={len(c)} head={c[:20]}")
-                return c
-            time.sleep(0.4)
-        # fallback: injected SDK (usually wrong size; last resort)
+            if st.get("sent"):
+                self._lg(
+                    f"[*] CreateEmail UI evidence sent=1 reason={st.get('reason')} "
+                    f"status={st.get('status')} seen={st.get('seen')} net_hits={st.get('net_hits')} "
+                    f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
+                )
+                if c:
+                    self._lg(f"[*] native castle len={len(c)} head={c[:20]}")
+                    return c
+            elif c and (time.time() + 8) >= deadline:
+                self._lg(
+                    f"[!] CreateEmail not confirmed yet but castle present "
+                    f"len={len(c)} reason={st.get('reason')} — keep waiting/retry click"
+                )
+
+            if (not st.get("sent")) and (time.time() - last_retry >= 4.0) and retries < 6:
+                retries += 1
+                last_retry = time.time()
+                try:
+                    self._hooked = False
+                    self.install_network_hook()
+                except Exception:
+                    pass
+                click_r = self.click_email_continue_for_create(email)
+                self._lg(
+                    f"[*] UI CreateEmail retry#{retries} click={click_r} "
+                    f"status={st.get('status')} seen={st.get('seen')} reason={st.get('reason')}"
+                )
+            time.sleep(0.45)
+
+        st = self.create_email_status_via_browser()
+        c = self.read_captured_castle()
+        self._lg(
+            f"[!] harvest end CreateEmail sent={st.get('sent')} reason={st.get('reason')} "
+            f"status={st.get('status')} seen={st.get('seen')} net_hits={st.get('net_hits')} "
+            f"castle_len={len(c) if c else 0}"
+        )
+        if c:
+            self._lg(f"[*] native castle (unconfirmed CreateEmail) len={len(c)} head={c[:20]}")
+            return c
         self._lg("[!] native castle timeout; try injected SDK")
         return self.get_castle_token_injected(timeout=15)
 

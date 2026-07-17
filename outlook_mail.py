@@ -398,9 +398,16 @@ class OutlookSession:
                 resp = self.s.post(action, data=data, headers=headers, timeout=self.timeout, allow_redirects=True)
         return None
 
-    def list_inbox(self, access_token: str, top: int = 15) -> List[dict]:
+    def _graph_get_messages(
+        self,
+        access_token: str,
+        folder: str,
+        top: int = 15,
+    ) -> List[dict]:
+        """Fetch messages from one Graph mail folder (inbox/junkemail/...)."""
+        folder_key = (folder or "inbox").strip().strip("/")
         url = (
-            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+            f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_key}/messages"
             f"?$top={int(top)}&$orderby=receivedDateTime desc"
             "&$select=id,subject,bodyPreview,body,from,receivedDateTime,isRead"
         )
@@ -419,17 +426,58 @@ class OutlookSession:
                 if r.status_code == 401:
                     raise Exception("Graph 401: access_token expired")
                 r.raise_for_status()
-                self._lg(f"[*] Outlook Graph via {label} ok")
-                return list((r.json() or {}).get("value") or [])
+                items = list((r.json() or {}).get("value") or [])
+                for m in items:
+                    if isinstance(m, dict):
+                        m["_folder"] = folder_key
+                self._lg(
+                    f"[*] Outlook Graph via {label} ok folder={folder_key} count={len(items)}"
+                )
+                return items
             except Exception as exc:
                 last_exc = exc
-                self._lg(f"[!] Outlook Graph via {label} fail: {exc}")
+                self._lg(f"[!] Outlook Graph via {label} fail folder={folder_key}: {exc}")
                 if "401" in str(exc):
                     raise
                 continue
         if last_exc:
             raise last_exc
         return []
+
+    def list_inbox(self, access_token: str, top: int = 15) -> List[dict]:
+        """List recent mail from Inbox + Junk/Spam (deduped by id)."""
+        folders = ("inbox", "junkemail")
+        merged: List[dict] = []
+        seen_ids: set[str] = set()
+        last_exc: Exception | None = None
+        folder_counts: dict[str, int] = {}
+        for folder in folders:
+            try:
+                items = self._graph_get_messages(access_token, folder, top=top)
+            except Exception as exc:
+                last_exc = exc
+                if folder == "inbox":
+                    raise
+                self._lg(f"[!] Outlook skip folder={folder}: {exc}")
+                continue
+            folder_counts[folder] = len(items)
+            for msg in items:
+                mid = str((msg or {}).get("id") or "")
+                if mid and mid in seen_ids:
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+                merged.append(msg)
+
+        def _recv_key(msg: dict) -> str:
+            return str((msg or {}).get("receivedDateTime") or "")
+
+        merged.sort(key=_recv_key, reverse=True)
+        self._lg(
+            f"[*] Outlook folders merged counts={folder_counts} total={len(merged)}"
+            + (f" last_err={last_exc}" if last_exc and "inbox" not in folder_counts else "")
+        )
+        return merged
 
 
 class OutlookAccountPool:
@@ -716,7 +764,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
     baseline_ts = float(since_ts) if since_ts else poll_started
     _log(
         log_callback,
-        f"[*] Outlook poll code | email={email} | API=Microsoft Graph inbox"
+        f"[*] Outlook poll code | email={email} | API=Microsoft Graph inbox+junkemail"
         f" | ignore_existing={ignore_existing} | since={baseline_ts:.0f}",
     )
     deadline = poll_started + timeout
@@ -743,7 +791,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                     msgs = sess_direct.list_inbox(access, top=25)
                 else:
                     raise
-            _log(log_callback, f"[*] Outlook Graph inbox count={len(msgs)} email={email}")
+            _log(log_callback, f"[*] Outlook Graph messages count={len(msgs)} email={email} folders=inbox+junkemail")
 
             # First poll: baseline-skip non-xAI noise only. Keep recent/xAI mails
             # evaluable so a fast verification letter is not dropped.
@@ -801,9 +849,11 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                     )
                     continue
 
+                folder = msg.get("_folder") or "inbox"
                 _log(
                     log_callback,
-                    f"[*] Outlook check xAI mail subject={subject[:80]} from={frm} received={received}",
+                    f"[*] Outlook check xAI mail folder={folder} subject={subject[:80]} "
+                    f"from={frm} received={received}",
                 )
                 code = None
                 if extract_fn:
@@ -814,10 +864,11 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                 if not code:
                     code = _default_extract(text_body, subject)
                 if code:
+                    folder = msg.get("_folder") or "inbox"
                     _log(
                         log_callback,
                         f"[+] Outlook code ok email={email} code={code} "
-                        f"subject={subject[:60]} from={frm} source=Graph/inbox",
+                        f"subject={subject[:60]} from={frm} source=Graph/{folder}",
                     )
                     pool.release(email, ok=True)
                     return code

@@ -263,12 +263,38 @@ def register_one_hybrid(
             if action:
                 client.next_action = action
 
-            browser_sent = browser.create_email_sent_via_browser()
+            # Strict CreateEmail evidence: never skip polling on "have castle only".
+            st = browser.create_email_status_via_browser()
+            log(
+                f"[hybrid] CreateEmail UI click status={st.get('status')} seen={st.get('seen')} "
+                f"ok={st.get('ok')} net_hits={st.get('net_hits')} sent={st.get('sent')} "
+                f"reason={st.get('reason')} castle_len={len(castle)}"
+            )
+            browser_sent = bool(st.get("sent"))
+            protocol_sent = False
             if browser_sent:
-                log(f"[hybrid] CreateEmail via browser OK (skip protocol) castle_len={len(castle)}")
+                log(
+                    f"[hybrid] CreateEmail via browser OK (skip protocol) "
+                    f"castle_len={len(castle)} reason={st.get('reason')}"
+                )
             else:
+                try:
+                    click2 = browser.click_email_continue_for_create(email)
+                    log(f"[hybrid] CreateEmail re-click={click2}")
+                    time.sleep(2.5)
+                    st = browser.create_email_status_via_browser()
+                    browser_sent = bool(st.get("sent"))
+                    log(
+                        f"[hybrid] CreateEmail after re-click status={st.get('status')} "
+                        f"seen={st.get('seen')} ok={st.get('ok')} sent={st.get('sent')} "
+                        f"reason={st.get('reason')}"
+                    )
+                except Exception as re_exc:
+                    log(f"[hybrid] CreateEmail re-click error: {re_exc}")
+
+            if not browser_sent:
                 r1 = client.create_email_validation_code(email, castle)
-                log(f"[hybrid] CreateEmail status={r1['status']} castle_len={len(castle)}")
+                log(f"[hybrid] CreateEmail protocol status={r1['status']} castle_len={len(castle)}")
                 if r1["status"] >= 400:
                     body_hint = ""
                     try:
@@ -278,19 +304,32 @@ def register_one_hybrid(
                     except Exception:
                         pass
                     log(f"[hybrid] CreateEmail fail{body_hint} strings={r1.get('strings')[:2]}")
+                    log(
+                        "[hybrid] CreateEmail 未真正发信（UI 无 seen/ok 且协议失败），"
+                        "跳过 180s 空等验证码"
+                    )
                     return False
+                protocol_sent = True
+                log(f"[hybrid] CreateEmail via protocol OK status={r1['status']}")
+
+            if not browser_sent and not protocol_sent:
+                log("[hybrid] CreateEmail 无发信迹象，禁止空等验证码")
+                return False
             if stop():
                 return False
 
+            send_ts = time.time()
             log(
                 f"[hybrid] 等待邮箱验证码 email={email} timeout=180s "
-                f"(cancel 支持已启用；无信时会每约15s心跳)"
+                f"CreateEmail browser_sent={browser_sent} protocol_sent={protocol_sent} "
+                f"(scan Inbox+Junk/Spam; cancel 支持已启用)"
             )
             code = get_oai_code(
                 mail_token,
                 email,
                 log_callback=log,
                 cancel_callback=stop,
+                since_ts=send_ts,
             )
             clean = str(code or "").replace("-", "").strip()
             if not clean:
