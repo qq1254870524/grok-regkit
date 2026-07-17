@@ -4,6 +4,7 @@
 
 2026-07-18b: parse hybrid/browser progress logs and update success/fail in
 _job_state while a job is running, so Web UI metrics refresh in real time.
+2026-07-18c: added CPA OAuth JSON directory import API for Sub2API.
 2026-07-17b: added Sub2API post-import usability verification settings.
 2026-07-17: added Sub2API SSO-to-OAuth settings; password is masked and preserved
 when the Web UI submits the masked placeholder.
@@ -370,6 +371,8 @@ class ConfigBody(BaseModel):
     sub2api_verify_attempts: Optional[int] = None
     sub2api_verify_timeout_sec: Optional[int] = None
     sub2api_verify_retry_delay_sec: Optional[int] = None
+    sub2api_cpa_import_dir: Optional[str] = None
+    sub2api_cpa_update_existing: Optional[bool] = None
     defaultDomains: Optional[str] = None
     email_provider: Optional[str] = None
     proxy_list_file: Optional[str] = None
@@ -871,6 +874,90 @@ async def api_logs_clear(x_access_key: Optional[str] = Header(None)):
         seq = _log_seq
         _log_cond.notify_all()
     return {"ok": True, "seq": seq, "cleared": True}
+
+
+class CpaImportBody(BaseModel):
+    directory: Optional[str] = None
+    file: Optional[str] = None
+    limit: Optional[int] = 0
+    verify: Optional[bool] = False
+    update_existing: Optional[bool] = True
+    stop_on_error: Optional[bool] = False
+
+
+@app.post("/api/sub2api/import-cpa")
+async def api_sub2api_import_cpa(body: CpaImportBody, x_access_key: Optional[str] = Header(None)):
+    """Import CLIProxy/CPA xai-*.json OAuth files into Sub2API admin accounts."""
+    _check_auth(x_access_key)
+    cfg = engine.load_config()
+    directory = (body.directory or cfg.get("sub2api_cpa_import_dir") or "").strip()
+    file_path = (body.file or "").strip()
+    if not directory and not file_path:
+        raise HTTPException(status_code=400, detail="directory 或 file 必填")
+    update_existing = True if body.update_existing is None else bool(body.update_existing)
+    if body.update_existing is None and "sub2api_cpa_update_existing" in cfg:
+        update_existing = bool(cfg.get("sub2api_cpa_update_existing"))
+    verify = bool(body.verify)
+    limit = int(body.limit or 0)
+    stop_on_error = bool(body.stop_on_error)
+
+    def _job_log(msg: str) -> None:
+        try:
+            engine.append_log(msg)
+        except Exception:
+            pass
+
+    try:
+        from sub2api_client import import_cpa_dir_to_sub2api, import_cpa_file_to_sub2api
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"sub2api_client 不可用: {exc}") from exc
+
+    try:
+        if file_path:
+            result = await asyncio.to_thread(
+                import_cpa_file_to_sub2api,
+                file_path,
+                config=cfg,
+                log_callback=_job_log,
+                update_existing=update_existing,
+                verify_after_import=verify,
+            )
+            return {
+                "ok": bool(result.get("ok")),
+                "mode": "file",
+                "account_id": result.get("account_id"),
+                "action": result.get("action") or result.get("mode"),
+                "email": result.get("email") or "",
+                "usable": result.get("usable"),
+                "source": Path(str(result.get("source") or file_path)).name,
+            }
+        summary = await asyncio.to_thread(
+            import_cpa_dir_to_sub2api,
+            directory,
+            config=cfg,
+            log_callback=_job_log,
+            update_existing=update_existing,
+            verify_after_import=verify,
+            limit=limit,
+            stop_on_error=stop_on_error,
+        )
+        return {
+            "ok": bool(summary.get("ok")),
+            "mode": "directory",
+            "directory": summary.get("directory"),
+            "total": summary.get("total"),
+            "imported": summary.get("imported"),
+            "created": summary.get("created"),
+            "updated": summary.get("updated"),
+            "failed": summary.get("failed"),
+            "errors": summary.get("errors") or [],
+            "results": (summary.get("results") or [])[:50],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _job_log(f"[!] Sub2API CPA 导入异常: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
 
 
 @app.get("/api/accounts")

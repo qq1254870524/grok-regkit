@@ -818,11 +818,29 @@
                 <input id="sub2api_verify_retry_delay_sec" type="number" min="0" value="3" />
               </div>
             </div>
+            <div class="section-sub" style="margin:14px 0 10px"><b>存量 CPA / CLIProxy OAuth JSON 导入 Sub2API</b>：兼容 <code class="inline">xai-*.json</code>（Desktop/Grok/cpa 或 cpa_auths）</div>
+            <div class="form-grid two">
+              <div class="field span-2">
+                <div class="label">CPA 目录</div>
+                <input id="sub2api_cpa_import_dir" type="text" placeholder="C:\Users\zhang\Desktop\Grok\cpa" />
+              </div>
+              <label class="check-row"><input id="sub2api_cpa_update_existing" type="checkbox" checked /> 同邮箱/sub 已存在则更新</label>
+              <label class="check-row"><input id="sub2api_cpa_verify" type="checkbox" /> 导入后做可用性测试（目录批量默认关闭）</label>
+              <div class="field">
+                <div class="label">最多导入文件数（0=全部）</div>
+                <input id="sub2api_cpa_limit" type="number" min="0" value="0" />
+              </div>
+              <div class="field" style="display:flex;align-items:end;gap:8px">
+                <button id="importCpaBtn" class="btn" type="button">导入 CPA 到 Sub2API</button>
+              </div>
+            </div>
+            <div id="cpaImportResult" class="file-line">CPA 导入结果：—</div>
           </div>
           <div class="tips">
             <p>· grok2api 内网优先：<code class="inline">http://127.0.0.1:8010</code>；Sub2API 默认：<code class="inline">http://127.0.0.1:8080</code></p>
             <p>· 密钥/密码显示星号表示已保存，不改则保留。</p>
             <p>· Sub2API SSO→OAuth 创建成功即视为入池成功；可用性测试失败默认只告警、不撤销账号，也不影响注册成功结果。</p>
+            <p>· 存量 CPA 目录走 <code class="inline">POST /api/v1/admin/accounts</code> 直建 OAuth，不是 sso-to-oauth。也可 CLI：<code class="inline">python -B scripts/import_cpa_to_sub2api.py --dir path</code></p>
           </div>
         </div>
       </div>
@@ -1158,6 +1176,8 @@
         sub2api_verify_attempts: parseInt($('sub2api_verify_attempts')?.value || '2', 10) || 2,
         sub2api_verify_timeout_sec: parseInt($('sub2api_verify_timeout_sec')?.value || '105', 10) || 105,
         sub2api_verify_retry_delay_sec: parseInt($('sub2api_verify_retry_delay_sec')?.value || '3', 10) || 0,
+        sub2api_cpa_import_dir: ($('sub2api_cpa_import_dir')?.value || '').trim(),
+        sub2api_cpa_update_existing: $('sub2api_cpa_update_existing') ? $('sub2api_cpa_update_existing').checked : true,
       };
     }
 
@@ -1253,6 +1273,8 @@
       setVal('sub2api_verify_attempts', c.sub2api_verify_attempts || 2);
       setVal('sub2api_verify_timeout_sec', c.sub2api_verify_timeout_sec || 105);
       setVal('sub2api_verify_retry_delay_sec', c.sub2api_verify_retry_delay_sec != null ? c.sub2api_verify_retry_delay_sec : 3);
+      setVal('sub2api_cpa_import_dir', c.sub2api_cpa_import_dir || '');
+      setVal('sub2api_cpa_update_existing', c.sub2api_cpa_update_existing !== false);
       appendLog('[*] 配置已加载');
     }
 
@@ -1518,6 +1540,52 @@
       const ok = await ensureAuth();
       if (ok) await boot();
     })();
+  
+    async function importCpaToSub2api() {
+      const btn = $('importCpaBtn');
+      const out = $('cpaImportResult');
+      const directory = ($('sub2api_cpa_import_dir')?.value || '').trim();
+      if (!directory) {
+        toast('请先填写 CPA 目录', false);
+        return;
+      }
+      const body = {
+        directory,
+        limit: parseInt($('sub2api_cpa_limit')?.value || '0', 10) || 0,
+        verify: !!($('sub2api_cpa_verify') && $('sub2api_cpa_verify').checked),
+        update_existing: !($('sub2api_cpa_update_existing') && !$('sub2api_cpa_update_existing').checked),
+        stop_on_error: false,
+      };
+      if (btn) btn.disabled = true;
+      if (out) out.textContent = 'CPA 导入结果：进行中…';
+      try {
+        // persist directory first
+        await api('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({
+            sub2api_cpa_import_dir: directory,
+            sub2api_cpa_update_existing: body.update_existing,
+          }),
+        });
+        const res = await api('/api/sub2api/import-cpa', {
+          method: 'POST',
+          body: JSON.stringify(body),
+        });
+        const text = `CPA 导入结果：ok=${res.ok} total=${res.total ?? 0} imported=${res.imported ?? 0} created=${res.created ?? 0} updated=${res.updated ?? 0} failed=${res.failed ?? 0}`;
+        if (out) out.textContent = text;
+        toast(res.ok ? 'CPA 导入完成' : 'CPA 导入有失败', !!res.ok);
+        await refreshLogs(true);
+      } catch (err) {
+        if (out) out.textContent = `CPA 导入结果：失败 ${err.message || err}`;
+        toast(`CPA 导入失败: ${err.message || err}`, false);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+    if ($('importCpaBtn')) {
+      $('importCpaBtn').addEventListener('click', importCpaToSub2api);
+    }
+
   </script>
 </body>
 </html>

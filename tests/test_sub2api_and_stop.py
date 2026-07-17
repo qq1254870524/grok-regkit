@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import sys
@@ -238,3 +238,167 @@ def test_ui_sub2api_defaults_and_password_masking_schema():
     assert "sub2api_group_ids: Optional[List[int]]" in server
     assert "sub2api_verify_after_add: Optional[bool]" in server
     assert "sub2api_verify_timeout_sec: Optional[int]" in server
+
+
+def _fake_jwt(payload: dict) -> str:
+    import base64
+    import json as _json
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+    header = b64(_json.dumps({"alg": "none", "typ": "JWT"}).encode())
+    body = b64(_json.dumps(payload).encode())
+    return f"{header}.{body}.sig"
+
+
+def test_parse_cpa_auth_payload_maps_credentials():
+    from sub2api_client import parse_cpa_auth_payload
+
+    access = _fake_jwt(
+        {
+            "sub": "sub-123",
+            "client_id": "client-abc",
+            "team_id": "team-xyz",
+            "scope": "openid profile",
+            "exp": 1893456000,
+        }
+    )
+    payload = {
+        "type": "xai",
+        "auth_kind": "oauth",
+        "email": "demo@example.com",
+        "sub": "sub-123",
+        "access_token": access,
+        "refresh_token": "refresh-secret",
+        "id_token": "id-secret",
+        "token_type": "Bearer",
+        "base_url": "https://cli-chat-proxy.grok.com/v1",
+        "expired": "2030-01-01T00:00:00Z",
+    }
+    parsed = parse_cpa_auth_payload(payload, source="xai-demo.json")
+    creds = parsed["credentials"]
+    assert parsed["email"] == "demo@example.com"
+    assert creds["access_token"] == access
+    assert creds["refresh_token"] == "refresh-secret"
+    assert creds["client_id"] == "client-abc"
+    assert creds["team_id"] == "team-xyz"
+    assert creds["expires_at"] == "2030-01-01T00:00:00Z"
+    assert "refresh-secret" not in str(parsed.get("source"))
+
+
+def test_import_cpa_oauth_creates_account_without_secret_logs():
+    from sub2api_client import Sub2APIClient
+
+    logs = []
+    access = _fake_jwt(
+        {
+            "sub": "sub-999",
+            "client_id": "b1a00492-073a-47ea-816f-4c329264a828",
+            "team_id": "team-1",
+            "scope": "openid profile email offline_access",
+            "exp": 1893456000,
+        }
+    )
+    responses = [
+        FakeResponse(200, {"code": 0, "data": {"access_token": "admin.token.value"}}),
+        # list existing -> empty
+        FakeResponse(200, {"code": 0, "data": {"items": []}}),
+        # create account
+        FakeResponse(200, {"code": 0, "data": {"id": 88, "name": "cpa@example.com", "platform": "grok", "type": "oauth"}}),
+        # verify stream
+        FakeResponse(200, {}, lines=_success_test_lines()),
+    ]
+    client = Sub2APIClient(
+        base_url="http://127.0.0.1:8080",
+        admin_email="admin@example.com",
+        admin_password="private-password",
+        timeout_sec=60,
+        session=FakeSession(responses),
+        log_callback=logs.append,
+    )
+    result = client.import_grok_oauth_credentials(
+        {
+            "email": "cpa@example.com",
+            "sub": "sub-999",
+            "access_token": access,
+            "refresh_token": "refresh-secret-value",
+            "id_token": "id-secret-value",
+            "client_id": "b1a00492-073a-47ea-816f-4c329264a828",
+            "team_id": "team-1",
+            "base_url": "https://cli-chat-proxy.grok.com/v1",
+            "token_type": "Bearer",
+            "scope": "openid profile email offline_access",
+            "expires_at": "2030-01-01T00:00:00Z",
+        },
+        email="cpa@example.com",
+        group_ids=[3],
+        verify_retry_delay_sec=0,
+    )
+    assert result["ok"] is True
+    assert result["account_id"] == 88
+    assert result["action"] == "create"
+    create_call = client.session.calls[2]
+    assert create_call[0] == "POST"
+    assert create_call[1].endswith("/api/v1/admin/accounts")
+    body = create_call[2]["json"]
+    assert body["platform"] == "grok"
+    assert body["type"] == "oauth"
+    assert body["credentials"]["refresh_token"] == "refresh-secret-value"
+    joined = "\n".join(logs)
+    assert "private-password" not in joined
+    assert "refresh-secret-value" not in joined
+    assert "id-secret-value" not in joined
+    assert access not in joined
+
+
+def test_import_cpa_updates_existing_by_email():
+    from sub2api_client import Sub2APIClient
+
+    logs = []
+    responses = [
+        FakeResponse(200, {"code": 0, "data": {"access_token": "admin.token.value"}}),
+        FakeResponse(
+            200,
+            {
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "id": 42,
+                            "name": "exist@example.com",
+                            "credentials": {"email": "exist@example.com", "sub": "sub-exist"},
+                        }
+                    ]
+                },
+            },
+        ),
+        FakeResponse(200, {"code": 0, "data": {"id": 42, "name": "exist@example.com"}}),
+    ]
+    client = Sub2APIClient(
+        base_url="http://127.0.0.1:8080",
+        admin_email="admin@example.com",
+        admin_password="private-password",
+        timeout_sec=60,
+        session=FakeSession(responses),
+        log_callback=logs.append,
+    )
+    result = client.import_grok_oauth_credentials(
+        {
+            "email": "exist@example.com",
+            "sub": "sub-exist",
+            "access_token": "access-token-value",
+            "refresh_token": "refresh-token-value",
+            "client_id": "client",
+            "base_url": "https://cli-chat-proxy.grok.com/v1",
+            "token_type": "Bearer",
+        },
+        email="exist@example.com",
+        verify_after_import=False,
+    )
+    assert result["ok"] is True
+    assert result["action"] == "update"
+    assert result["account_id"] == 42
+    assert client.session.calls[2][0] == "PUT"
+    assert client.session.calls[2][1].endswith("/api/v1/admin/accounts/42")
+

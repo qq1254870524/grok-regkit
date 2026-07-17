@@ -1,8 +1,13 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Sub2API Grok SSO -> OAuth importer.
+"""Sub2API Grok importer: SSO->OAuth and CPA OAuth JSON direct import.
 
 Changelog:
+- 2026-07-18c: add CPA/CLIProxy OAuth JSON import via POST /api/v1/admin/accounts.
+  Accepts Desktop/Grok/cpa style xai-*.json (type=xai, auth_kind=oauth) and maps
+  access/refresh/id tokens + JWT claims into Sub2API grok oauth credentials.
+  Supports single-file/dir import, email/sub dedupe update, optional SSO fallback
+  when JSON includes sso, and never logs token/password plaintext.
 - 2026-07-18b: wait briefly before first post-import verify to reduce transient
   permission-denied/forbidden false negatives on brand-new Grok accounts; keep
   create-success as import success by default.
@@ -26,6 +31,7 @@ import hashlib
 import json
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
@@ -82,6 +88,138 @@ def _jwt_payload_keys(token: str) -> List[str]:
     except Exception:
         return []
     return []
+
+
+def _jwt_payload(token: str) -> Dict[str, Any]:
+    try:
+        payload = str(token or "").split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+DEFAULT_GROK_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+DEFAULT_GROK_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+DEFAULT_GROK_SCOPE = (
+    "openid profile email offline_access grok-cli:access api:access "
+    "conversations:read conversations:write"
+)
+
+
+def _iso_from_epoch(ts: Any) -> str:
+    try:
+        value = float(ts)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
+
+
+def parse_cpa_auth_payload(payload: Any, *, source: str = "") -> Dict[str, Any]:
+    """Normalize CLIProxy/CPA xai OAuth JSON into Sub2API credentials + meta.
+
+    Expected input shape (Desktop/Grok/cpa or cpa_auths):
+      type=xai, auth_kind=oauth, email/sub, access_token/refresh_token/id_token,
+      base_url/token_type/expired, optional sso.
+    """
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        raise ValueError(f"CPA JSON 不是对象 source={source or '-'}")
+
+    access_token = str(payload.get("access_token") or payload.get("accessToken") or "").strip()
+    refresh_token = str(payload.get("refresh_token") or payload.get("refreshToken") or "").strip()
+    id_token = str(payload.get("id_token") or payload.get("idToken") or "").strip()
+    sso = _normalize_sso_token(payload.get("sso") or payload.get("sso_token") or "")
+    if not access_token and not refresh_token and not sso:
+        raise ValueError(f"CPA JSON 缺少 access_token/refresh_token/sso source={source or '-'}")
+
+    jwt_claims = _jwt_payload(access_token) or _jwt_payload(id_token)
+    email = str(payload.get("email") or payload.get("name") or jwt_claims.get("email") or "").strip()
+    sub = str(payload.get("sub") or jwt_claims.get("sub") or jwt_claims.get("principal_id") or "").strip()
+    client_id = str(
+        payload.get("client_id")
+        or jwt_claims.get("client_id")
+        or jwt_claims.get("aud")
+        or DEFAULT_GROK_CLIENT_ID
+    ).strip()
+    team_id = str(payload.get("team_id") or jwt_claims.get("team_id") or "").strip()
+    scope = str(payload.get("scope") or jwt_claims.get("scope") or DEFAULT_GROK_SCOPE).strip()
+    token_type = str(payload.get("token_type") or "Bearer").strip() or "Bearer"
+    base_url = str(payload.get("base_url") or payload.get("baseUrl") or DEFAULT_GROK_BASE_URL).strip()
+    expires_at = str(payload.get("expired") or payload.get("expires_at") or payload.get("expiresAt") or "").strip()
+    if not expires_at:
+        expires_at = _iso_from_epoch(jwt_claims.get("exp"))
+
+    credentials: Dict[str, Any] = {
+        "base_url": base_url or DEFAULT_GROK_BASE_URL,
+        "client_id": client_id or DEFAULT_GROK_CLIENT_ID,
+        "token_type": token_type,
+        "scope": scope or DEFAULT_GROK_SCOPE,
+    }
+    if email:
+        credentials["email"] = email
+    if sub:
+        credentials["sub"] = sub
+    if team_id:
+        credentials["team_id"] = team_id
+    if expires_at:
+        credentials["expires_at"] = expires_at
+    if access_token:
+        credentials["access_token"] = access_token
+    if refresh_token:
+        credentials["refresh_token"] = refresh_token
+    if id_token:
+        credentials["id_token"] = id_token
+
+    if not refresh_token and not sso:
+        raise ValueError(f"CPA JSON 缺少 refresh_token，无法创建长期 OAuth 账号 source={source or '-'}")
+
+    auth_kind = str(payload.get("auth_kind") or payload.get("type") or "oauth").strip().lower()
+    return {
+        "email": email,
+        "sub": sub,
+        "name": email or (f"grok-{sub[:10]}" if sub else "grok-cpa"),
+        "credentials": credentials,
+        "sso": sso,
+        "auth_kind": auth_kind,
+        "source": source,
+        "has_access_token": bool(access_token),
+        "has_refresh_token": bool(refresh_token),
+        "has_id_token": bool(id_token),
+        "has_sso": bool(sso),
+        "client_id": credentials.get("client_id"),
+        "team_id": team_id,
+        "expires_at": expires_at,
+        "base_url": credentials.get("base_url"),
+    }
+
+
+def parse_cpa_auth_file(path: str | Path) -> Dict[str, Any]:
+    file_path = Path(path)
+    raw = file_path.read_text(encoding="utf-8-sig")
+    payload = json.loads(raw)
+    return parse_cpa_auth_payload(payload, source=str(file_path))
+
+
+def iter_cpa_auth_files(directory: str | Path) -> List[Path]:
+    root_dir = Path(directory)
+    if not root_dir.exists():
+        raise FileNotFoundError(f"CPA 目录不存在: {root_dir}")
+    if root_dir.is_file():
+        return [root_dir]
+    files = sorted(
+        [
+            p
+            for p in root_dir.rglob("*.json")
+            if p.is_file() and not p.name.startswith(".")
+        ],
+        key=lambda p: p.name.lower(),
+    )
+    return files
 
 
 def _normalize_sso_token(raw: str) -> str:
@@ -337,6 +475,425 @@ class Sub2APIClient:
             "error": last_error,
         }
 
+    def list_accounts(
+        self,
+        *,
+        platform: str = "grok",
+        search: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict[str, Any]:
+        token = self.login(force=False)
+        params: Dict[str, Any] = {
+            "page": max(1, int(page or 1)),
+            "page_size": max(1, min(200, int(page_size or 50))),
+            "lite": "true",
+        }
+        if platform:
+            params["platform"] = platform
+        if search:
+            params["search"] = str(search).strip()[:100]
+        response, payload = self._request_json(
+            "GET",
+            "/api/v1/admin/accounts",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+        )
+        if response.status_code >= 400 or not self._payload_ok(payload):
+            detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
+            raise RuntimeError(f"Sub2API 列表账号失败 status={response.status_code} detail={detail}")
+        data = self._payload_data(payload)
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        return {"items": items, "raw": data}
+
+    def find_account_by_email_or_sub(
+        self,
+        *,
+        email: str = "",
+        sub: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        email_l = str(email or "").strip().lower()
+        sub_l = str(sub or "").strip().lower()
+        # One search is enough: prefer email, then sub. Avoid double list calls.
+        query = email_l or sub_l
+        if not query:
+            return None
+        try:
+            listed = self.list_accounts(platform="grok", search=query, page=1, page_size=50)
+        except Exception:
+            return None
+        for item in listed.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip().lower()
+            creds = item.get("credentials") if isinstance(item.get("credentials"), dict) else {}
+            item_email = str(creds.get("email") or name or "").strip().lower()
+            item_sub = str(creds.get("sub") or "").strip().lower()
+            if email_l and item_email == email_l:
+                return item
+            if sub_l and item_sub == sub_l:
+                return item
+            if email_l and name == email_l:
+                return item
+        return None
+
+    def create_or_update_grok_oauth_account(
+        self,
+        *,
+        name: str,
+        credentials: Dict[str, Any],
+        group_ids: Any = None,
+        concurrency: int = 1,
+        priority: int = 1,
+        update_existing: bool = True,
+        existing_account: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        groups = _parse_group_ids(group_ids)
+        account_name = str(name or "").strip() or str(credentials.get("email") or credentials.get("sub") or "grok-oauth")
+        body_create = {
+            "name": account_name,
+            "platform": "grok",
+            "type": "oauth",
+            "credentials": credentials,
+            "group_ids": groups,
+            "concurrency": max(1, int(concurrency or 1)),
+            "priority": int(priority or 1),
+            "confirm_mixed_channel_risk": True,
+            "auto_pause_on_expired": True,
+        }
+        for attempt in (1, 2):
+            token = self.login(force=(attempt == 2))
+            if existing_account and update_existing:
+                account_id = existing_account.get("id")
+                body_update = {
+                    "name": account_name,
+                    "type": "oauth",
+                    "credentials": credentials,
+                    "group_ids": groups,
+                    "concurrency": max(1, int(concurrency or 1)),
+                    "priority": int(priority or 1),
+                    "status": "active",
+                    "confirm_mixed_channel_risk": True,
+                }
+                response, payload = self._request_json(
+                    "PUT",
+                    f"/api/v1/admin/accounts/{account_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=body_update,
+                )
+                action = "update"
+            else:
+                response, payload = self._request_json(
+                    "POST",
+                    "/api/v1/admin/accounts",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=body_create,
+                )
+                action = "create"
+            if response.status_code == 401 and attempt == 1:
+                self._access_token = ""
+                self._token_expires_at = 0.0
+                continue
+            if response.status_code >= 400 or not self._payload_ok(payload):
+                detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
+                raise RuntimeError(
+                    f"Sub2API OAuth {action} 失败 status={response.status_code} detail={detail}"
+                )
+            data = self._payload_data(payload)
+            account = data if isinstance(data, dict) else {}
+            if isinstance(account.get("account"), dict):
+                account = account["account"]
+            account_id = (
+                account.get("id")
+                or account.get("account_id")
+                or (data.get("id") if isinstance(data, dict) else None)
+                or (payload.get("id") if isinstance(payload, dict) else None)
+                or (existing_account or {}).get("id")
+                or ""
+            )
+            return {
+                "ok": True,
+                "action": action,
+                "account_id": account_id,
+                "account": account,
+                "name": account.get("name") or account_name,
+            }
+        raise RuntimeError("Sub2API OAuth create/update 认证重试失败")
+
+    def import_grok_oauth_credentials(
+        self,
+        credentials: Dict[str, Any],
+        *,
+        email: str = "",
+        name: str = "",
+        group_ids: Any = None,
+        concurrency: int = 1,
+        priority: int = 1,
+        update_existing: bool = True,
+        verify_after_import: bool = True,
+        require_verify_success: bool = False,
+        verify_attempts: int = 2,
+        verify_timeout_sec: float = 105,
+        verify_retry_delay_sec: float = 3,
+    ) -> Dict[str, Any]:
+        if not isinstance(credentials, dict) or not credentials:
+            raise ValueError("Sub2API OAuth 入池缺少 credentials")
+        email_text = str(email or credentials.get("email") or "").strip()
+        sub_text = str(credentials.get("sub") or "").strip()
+        account_name = str(name or email_text or (f"grok-{sub_text[:10]}" if sub_text else "grok-oauth")).strip()
+        existing = None
+        if update_existing:
+            existing = self.find_account_by_email_or_sub(email=email_text, sub=sub_text)
+            if existing:
+                _log(
+                    self.log_callback,
+                    f"[*] Sub2API 发现已存在账号，将更新 credentials "
+                    f"email={email_text or '-'} account_id={existing.get('id') or '-'}",
+                )
+        _log(
+            self.log_callback,
+            f"[*] Sub2API OAuth 入池开始 email={email_text or account_name} "
+            f"endpoint=/api/v1/admin/accounts has_access={int(bool(credentials.get('access_token')))} "
+            f"has_refresh={int(bool(credentials.get('refresh_token')))} "
+            f"has_id={int(bool(credentials.get('id_token')))} "
+            f"client_id={(str(credentials.get('client_id') or '')[:12] + '...') if credentials.get('client_id') else '-'} "
+            f"team_id={(str(credentials.get('team_id') or '')[:12] + '...') if credentials.get('team_id') else '-'}",
+        )
+        created = self.create_or_update_grok_oauth_account(
+            name=account_name,
+            credentials=credentials,
+            group_ids=group_ids,
+            concurrency=concurrency,
+            priority=priority,
+            update_existing=update_existing,
+            existing_account=existing,
+        )
+        account_id = created.get("account_id")
+        _log(
+            self.log_callback,
+            f"[+] Sub2API OAuth 账号已{created.get('action')} account_id={account_id or '-'} "
+            f"name={created.get('name') or account_name}",
+        )
+        verification: Dict[str, Any]
+        if verify_after_import:
+            settle_sec = max(0.0, min(8.0, float(verify_retry_delay_sec or 0) + 2.0))
+            if settle_sec > 0:
+                _log(
+                    self.log_callback,
+                    f"[*] Sub2API OAuth 入池后等待 {settle_sec:.1f}s 再做可用性验证 "
+                    f"account_id={account_id or '-'}",
+                )
+                time.sleep(settle_sec)
+            verification = self.verify_grok_account(
+                account_id,
+                attempts=verify_attempts,
+                timeout_sec=verify_timeout_sec,
+                retry_delay_sec=verify_retry_delay_sec,
+            )
+            if not verification.get("ok"):
+                warn = (
+                    f"[!] Sub2API OAuth 账号已{created.get('action')}但可用性验证失败 "
+                    f"account_id={account_id or '-'} detail={verification.get('error') or 'unknown error'} "
+                    f"(账号保留，不回滚；仅当 require_verify_success=true 时才视为入池失败)"
+                )
+                _log(self.log_callback, warn)
+                if require_verify_success:
+                    raise RuntimeError(
+                        f"Sub2API 已{created.get('action')} account_id={account_id or '-'}，但可用性验证失败: "
+                        f"{verification.get('error') or 'unknown error'}"
+                    )
+        else:
+            verification = {"ok": None, "skipped": True, "account_id": account_id}
+            _log(
+                self.log_callback,
+                f"[!] Sub2API account_id={account_id or '-'} 已{created.get('action')}，但配置为跳过可用性验证",
+            )
+        usable = verification.get("ok")
+        if usable is True:
+            _log(
+                self.log_callback,
+                f"[+] Sub2API OAuth 入池可用 email={email_text or account_name} account_id={account_id or '-'}",
+            )
+        elif usable is False:
+            _log(
+                self.log_callback,
+                f"[+] Sub2API OAuth 入池成功(创建/更新完成/可用性待观察) email={email_text or account_name} "
+                f"account_id={account_id or '-'}",
+            )
+        else:
+            _log(
+                self.log_callback,
+                f"[+] Sub2API OAuth 入池成功(已{created.get('action')}/未验证) email={email_text or account_name} "
+                f"account_id={account_id or '-'}",
+            )
+        return {
+            "ok": True,
+            "usable": usable,
+            "action": created.get("action"),
+            "account_id": account_id,
+            "verification": verification,
+            "email": email_text,
+            "sub": sub_text,
+            "name": created.get("name") or account_name,
+        }
+
+    def import_cpa_file(
+        self,
+        path: str | Path,
+        *,
+        group_ids: Any = None,
+        concurrency: int = 1,
+        priority: int = 1,
+        update_existing: bool = True,
+        allow_sso_fallback: bool = True,
+        verify_after_import: bool = True,
+        require_verify_success: bool = False,
+        verify_attempts: int = 2,
+        verify_timeout_sec: float = 105,
+        verify_retry_delay_sec: float = 3,
+    ) -> Dict[str, Any]:
+        parsed = parse_cpa_auth_file(path)
+        source = parsed.get("source") or str(path)
+        _log(
+            self.log_callback,
+            f"[*] CPA 文件解析完成 file={Path(source).name} email={parsed.get('email') or '-'} "
+            f"sub={(str(parsed.get('sub') or '')[:12] + '...') if parsed.get('sub') else '-'} "
+            f"has_access={int(bool(parsed.get('has_access_token')))} "
+            f"has_refresh={int(bool(parsed.get('has_refresh_token')))} "
+            f"has_sso={int(bool(parsed.get('has_sso')))}",
+        )
+        if parsed.get("has_refresh_token") or parsed.get("has_access_token"):
+            result = self.import_grok_oauth_credentials(
+                parsed["credentials"],
+                email=str(parsed.get("email") or ""),
+                name=str(parsed.get("name") or ""),
+                group_ids=group_ids,
+                concurrency=concurrency,
+                priority=priority,
+                update_existing=update_existing,
+                verify_after_import=verify_after_import,
+                require_verify_success=require_verify_success,
+                verify_attempts=verify_attempts,
+                verify_timeout_sec=verify_timeout_sec,
+                verify_retry_delay_sec=verify_retry_delay_sec,
+            )
+            result["source"] = source
+            result["mode"] = "oauth_credentials"
+            return result
+        if allow_sso_fallback and parsed.get("sso"):
+            result = self.import_grok_sso(
+                str(parsed.get("sso") or ""),
+                email=str(parsed.get("email") or ""),
+                group_ids=group_ids,
+                concurrency=concurrency,
+                priority=priority,
+                verify_after_import=verify_after_import,
+                require_verify_success=require_verify_success,
+                verify_attempts=verify_attempts,
+                verify_timeout_sec=verify_timeout_sec,
+                verify_retry_delay_sec=verify_retry_delay_sec,
+            )
+            result["source"] = source
+            result["mode"] = "sso_fallback"
+            return result
+        raise ValueError(f"CPA 文件无法导入（无 OAuth token 且无 sso）: {Path(source).name}")
+
+    def import_cpa_dir(
+        self,
+        directory: str | Path,
+        *,
+        group_ids: Any = None,
+        concurrency: int = 1,
+        priority: int = 1,
+        update_existing: bool = True,
+        allow_sso_fallback: bool = True,
+        verify_after_import: bool = False,
+        require_verify_success: bool = False,
+        verify_attempts: int = 1,
+        verify_timeout_sec: float = 105,
+        verify_retry_delay_sec: float = 3,
+        limit: int = 0,
+        stop_on_error: bool = False,
+    ) -> Dict[str, Any]:
+        files = iter_cpa_auth_files(directory)
+        if limit and int(limit) > 0:
+            files = files[: int(limit)]
+        summary = {
+            "ok": True,
+            "directory": str(directory),
+            "total": len(files),
+            "imported": 0,
+            "updated": 0,
+            "created": 0,
+            "failed": 0,
+            "skipped": 0,
+            "results": [],
+            "errors": [],
+        }
+        _log(
+            self.log_callback,
+            f"[*] Sub2API CPA 目录导入开始 dir={directory} files={len(files)} "
+            f"verify={int(bool(verify_after_import))} update_existing={int(bool(update_existing))}",
+        )
+        for idx, file_path in enumerate(files, 1):
+            try:
+                result = self.import_cpa_file(
+                    file_path,
+                    group_ids=group_ids,
+                    concurrency=concurrency,
+                    priority=priority,
+                    update_existing=update_existing,
+                    allow_sso_fallback=allow_sso_fallback,
+                    verify_after_import=verify_after_import,
+                    require_verify_success=require_verify_success,
+                    verify_attempts=verify_attempts,
+                    verify_timeout_sec=verify_timeout_sec,
+                    verify_retry_delay_sec=verify_retry_delay_sec,
+                )
+                action = str(result.get("action") or "")
+                if action == "update":
+                    summary["updated"] += 1
+                else:
+                    summary["created"] += 1
+                summary["imported"] += 1
+                summary["results"].append(
+                    {
+                        "file": file_path.name,
+                        "ok": True,
+                        "action": action or result.get("mode"),
+                        "account_id": result.get("account_id"),
+                        "email": result.get("email") or "",
+                        "usable": result.get("usable"),
+                    }
+                )
+                _log(
+                    self.log_callback,
+                    f"[+] CPA 导入进度 {idx}/{len(files)} file={file_path.name} "
+                    f"account_id={result.get('account_id') or '-'} action={action or result.get('mode')}",
+                )
+            except Exception as exc:
+                summary["failed"] += 1
+                err = f"{type(exc).__name__}: {str(exc)[:300]}"
+                summary["errors"].append({"file": file_path.name, "error": err})
+                summary["results"].append({"file": file_path.name, "ok": False, "error": err})
+                _log(
+                    self.log_callback,
+                    f"[!] CPA 导入失败 {idx}/{len(files)} file={file_path.name} detail={err}",
+                )
+                if stop_on_error:
+                    summary["ok"] = False
+                    break
+        _log(
+            self.log_callback,
+            f"[*] Sub2API CPA 目录导入结束 total={summary['total']} imported={summary['imported']} "
+            f"created={summary['created']} updated={summary['updated']} failed={summary['failed']}",
+        )
+        if summary["total"] > 0 and summary["imported"] == 0:
+            summary["ok"] = False
+        elif summary["imported"] > 0:
+            summary["ok"] = True
+        return summary
+
     def import_grok_sso(
         self,
         sso_token: str,
@@ -534,3 +1091,92 @@ def import_grok_sso_to_sub2api(
         verify_timeout_sec=float(cfg.get("sub2api_verify_timeout_sec") or 105),
         verify_retry_delay_sec=float(cfg.get("sub2api_verify_retry_delay_sec") or 3),
     )
+
+
+def import_grok_oauth_to_sub2api(
+    credentials: Dict[str, Any],
+    *,
+    email: str = "",
+    name: str = "",
+    config: Optional[Dict[str, Any]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    update_existing: bool = True,
+) -> Dict[str, Any]:
+    cfg = config or {}
+    client = get_client(cfg, log_callback=log_callback)
+    return client.import_grok_oauth_credentials(
+        credentials,
+        email=email,
+        name=name,
+        group_ids=cfg.get("sub2api_group_ids", [3]),
+        concurrency=int(cfg.get("sub2api_concurrency") or 1),
+        priority=int(cfg.get("sub2api_priority") or 1),
+        update_existing=update_existing,
+        verify_after_import=_truthy(cfg.get("sub2api_verify_after_add"), default=True),
+        require_verify_success=_truthy(cfg.get("sub2api_require_verify_success"), default=False),
+        verify_attempts=int(cfg.get("sub2api_verify_attempts") or 2),
+        verify_timeout_sec=float(cfg.get("sub2api_verify_timeout_sec") or 105),
+        verify_retry_delay_sec=float(cfg.get("sub2api_verify_retry_delay_sec") or 3),
+    )
+
+
+def import_cpa_file_to_sub2api(
+    path: str | Path,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    update_existing: bool = True,
+    allow_sso_fallback: bool = True,
+    verify_after_import: Optional[bool] = None,
+) -> Dict[str, Any]:
+    cfg = config or {}
+    client = get_client(cfg, log_callback=log_callback)
+    verify = (
+        _truthy(cfg.get("sub2api_verify_after_add"), default=True)
+        if verify_after_import is None
+        else bool(verify_after_import)
+    )
+    return client.import_cpa_file(
+        path,
+        group_ids=cfg.get("sub2api_group_ids", [3]),
+        concurrency=int(cfg.get("sub2api_concurrency") or 1),
+        priority=int(cfg.get("sub2api_priority") or 1),
+        update_existing=update_existing,
+        allow_sso_fallback=allow_sso_fallback,
+        verify_after_import=verify,
+        require_verify_success=_truthy(cfg.get("sub2api_require_verify_success"), default=False),
+        verify_attempts=int(cfg.get("sub2api_verify_attempts") or 2),
+        verify_timeout_sec=float(cfg.get("sub2api_verify_timeout_sec") or 105),
+        verify_retry_delay_sec=float(cfg.get("sub2api_verify_retry_delay_sec") or 3),
+    )
+
+
+def import_cpa_dir_to_sub2api(
+    directory: str | Path,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    update_existing: bool = True,
+    allow_sso_fallback: bool = True,
+    verify_after_import: bool = False,
+    limit: int = 0,
+    stop_on_error: bool = False,
+) -> Dict[str, Any]:
+    cfg = config or {}
+    client = get_client(cfg, log_callback=log_callback)
+    return client.import_cpa_dir(
+        directory,
+        group_ids=cfg.get("sub2api_group_ids", [3]),
+        concurrency=int(cfg.get("sub2api_concurrency") or 1),
+        priority=int(cfg.get("sub2api_priority") or 1),
+        update_existing=update_existing,
+        allow_sso_fallback=allow_sso_fallback,
+        verify_after_import=verify_after_import,
+        require_verify_success=_truthy(cfg.get("sub2api_require_verify_success"), default=False),
+        verify_attempts=int(cfg.get("sub2api_verify_attempts") or 1),
+        verify_timeout_sec=float(cfg.get("sub2api_verify_timeout_sec") or 105),
+        verify_retry_delay_sec=float(cfg.get("sub2api_verify_retry_delay_sec") or 3),
+        limit=limit,
+        stop_on_error=stop_on_error,
+    )
+

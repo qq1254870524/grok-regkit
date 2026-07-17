@@ -255,3 +255,21 @@ python sso_to_auth_json.py --sso accounts_xxx.txt \
   --cpa-management-key '明文管理密钥'
 ```
 
+## Sub2API 入池
+
+支持两条路径：
+
+1. **注册成功后的 SSO**：`POST /api/v1/admin/grok/sso-to-oauth`
+2. **存量 CPA / CLIProxy OAuth JSON**（`Desktop/Grok/cpa` 或 `cpa_auths/xai-*.json`）：`POST /api/v1/admin/accounts` 直建 `platform=grok type=oauth`
+
+CLI：
+
+```bash
+python -B scripts/import_cpa_to_sub2api.py --dir "C:\Users\zhang\Desktop\Grok\cpa"
+python -B scripts/import_cpa_to_sub2api.py --file path\to\xai-xxx.json --verify
+python -B scripts/import_cpa_to_sub2api.py --dir ./cpa_auths --dry-parse --limit 5
+```
+
+Web 控制台「号池联动」页可填写 CPA 目录并一键导入。  
+同邮箱 / sub 默认更新已有账号；可用性测试失败默认只告警，不回滚已创建记录。
+

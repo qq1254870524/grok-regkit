@@ -1,4 +1,4 @@
-﻿{
+{
     "duckmail_api_key": "",
     "cloudflare_api_base": "https://temp-mail.example.com",
     "cloudflare_api_key": "",
@@ -23,12 +23,14 @@
     "sub2api_base_url": "http://127.0.0.1:8080",
     "sub2api_admin_email": "",
     "sub2api_admin_password": "",
-    "sub2api_group_ids": [3],
+    "sub2api_group_ids": [
+        3
+    ],
     "sub2api_concurrency": 1,
     "sub2api_priority": 1,
     "sub2api_timeout_sec": 60,
     "sub2api_verify_after_add": true,
-  "sub2api_require_verify_success": false,
+    "sub2api_require_verify_success": false,
     "sub2api_verify_attempts": 2,
     "sub2api_verify_timeout_sec": 105,
     "sub2api_verify_retry_delay_sec": 3,
@@ -84,5 +86,7 @@
     "outlook_accounts": "",
     "outlook_accounts_file": "outlook_accounts.txt",
     "outlook_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
-    "outlook_token_cache": "outlook_token_cache.json"
+    "outlook_token_cache": "outlook_token_cache.json",
+    "sub2api_cpa_import_dir": "./cpa_auths",
+    "sub2api_cpa_update_existing": true
 }

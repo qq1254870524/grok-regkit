@@ -1,0 +1,21 @@
+{
+  "type": "xai",
+  "auth_kind": "oauth",
+  "email": "demo@example.com",
+  "sub": "00000000-0000-0000-0000-000000000000",
+  "access_token": "eyJhbGciOiJub25lIn0.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiLCJjbGllbnRfaWQiOiJiMWEwMDQ5Mi0wNzNhLTQ3ZWEtODE2Zi00YzMyOTI2NGE4MjgiLCJ0ZWFtX2lkIjoiMTExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIiwic2NvcGUiOiJvcGVuaWQgcHJvZmlsZSBlbWFpbCBvZmZsaW5lX2FjY2VzcyIsImV4cCI6MTg5MzQ1NjAwMH0.sig",
+  "refresh_token": "replace-with-real-refresh-token",
+  "id_token": "replace-with-real-id-token",
+  "token_type": "Bearer",
+  "expires_in": null,
+  "expired": "2030-01-01T00:00:00Z",
+  "last_refresh": "2026-07-18T00:00:00Z",
+  "redirect_uri": "",
+  "token_endpoint": "https://auth.x.ai/oauth2/token",
+  "base_url": "https://cli-chat-proxy.grok.com/v1",
+  "disabled": false,
+  "headers": {
+    "User-Agent": "grok-cli",
+    "X-Client-Name": "grok-cli"
+  }
+}

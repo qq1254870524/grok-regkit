@@ -41,3 +41,21 @@ python scripts/backfill_cpa_xai_from_accounts.py
 ```
 
 凭证说明：[docs/sso-cpa/](./docs/sso-cpa/)。
+
+## 存量 CPA 导入 Sub2API
+
+CPA 目录文件是 OAuth 凭证包（`access_token`/`refresh_token`），不是 SSO。
+
+```bash
+# 解析检查（不调用 API）
+python -B scripts/import_cpa_to_sub2api.py --dir "C:\Users\zhang\Desktop\Grok\cpa" --dry-parse --limit 3
+
+# 批量导入（默认不逐个 verify，加快）
+python -B scripts/import_cpa_to_sub2api.py --dir "C:\Users\zhang\Desktop\Grok\cpa"
+
+# 单文件并验证
+python -B scripts/import_cpa_to_sub2api.py --file "C:\Users\zhang\Desktop\Grok\cpa\xai-xxx.json" --verify
+```
+
+Web：保存 Sub2API 管理员配置后，在 CPA 目录框填路径，点「导入 CPA 到 Sub2API」。
+
