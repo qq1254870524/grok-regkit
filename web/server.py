@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
+2026-07-18d: Sub2API pool status in /api/integration (healthy/count/open URL),
+pending-SSO account files in /api/accounts, dedicated /api/sub2api/status.
 2026-07-18b: parse hybrid/browser progress logs and update success/fail in
 _job_state while a job is running, so Web UI metrics refresh in real time.
 2026-07-18c: added CPA OAuth JSON directory import API for Sub2API.
@@ -533,6 +535,80 @@ def _probe_g2a(app_key: str = "") -> Dict[str, Any]:
     return result
 
 
+
+def _probe_sub2api(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Probe Sub2API health and grok account pool size. Never returns secrets."""
+    cfg = cfg or {}
+    base = str(cfg.get("sub2api_base_url") or "http://127.0.0.1:8080").strip().rstrip("/")
+    admin_email = str(cfg.get("sub2api_admin_email") or "").strip()
+    admin_password = str(cfg.get("sub2api_admin_password") or "").strip()
+    auto_add = bool(cfg.get("sub2api_auto_add", True))
+    public_url = base or "http://127.0.0.1:8080"
+    result: Dict[str, Any] = {
+        "ok": False,
+        "healthy": False,
+        "reachable": False,
+        "base_url": public_url,
+        "public_url": public_url,
+        "admin_url": f"{public_url}/",
+        "accounts_url": f"{public_url}/",
+        "account_count": None,
+        "auto_add": auto_add,
+        "has_admin_email": bool(admin_email),
+        "has_admin_password": bool(admin_password),
+        "error": "",
+    }
+    if not base:
+        result["error"] = "sub2api_base_url empty"
+        return result
+
+    import urllib.request
+
+    for path in ("/api/v1/health", "/health", "/"):
+        try:
+            req = urllib.request.Request(f"{base}{path}", method="GET")
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                code = int(getattr(resp, "status", 200) or 200)
+                if 200 <= code < 500:
+                    result["reachable"] = True
+                    break
+        except Exception as exc:
+            result["error"] = f"reach: {type(exc).__name__}: {exc}"
+    if not result["reachable"]:
+        return result
+
+    if not admin_email or not admin_password:
+        result["ok"] = True
+        result["healthy"] = True
+        result["error"] = "online; need admin credentials for account_count"
+        return result
+
+    try:
+        from sub2api_client import get_client
+
+        client = get_client(cfg, log_callback=None)
+        listed = client.list_accounts(platform="grok", page=1, page_size=1)
+        raw = listed.get("raw") if isinstance(listed.get("raw"), dict) else {}
+        total = raw.get("total")
+        if total is None and isinstance(raw.get("pagination"), dict):
+            total = raw.get("pagination", {}).get("total")
+        if total is None:
+            items = listed.get("items") or []
+            total = len(items)
+        try:
+            result["account_count"] = int(total)
+        except Exception:
+            result["account_count"] = None
+        result["ok"] = True
+        result["healthy"] = True
+        result["error"] = ""
+    except Exception as exc:
+        result["ok"] = True
+        result["healthy"] = result["reachable"]
+        result["error"] = f"online; accounts: {type(exc).__name__}: {exc}"
+    return result
+
+
 @app.get("/api/integration")
 async def api_integration(x_access_key: Optional[str] = Header(None)):
     _require_auth(x_access_key)
@@ -541,22 +617,30 @@ async def api_integration(x_access_key: Optional[str] = Header(None)):
     remote_base = str(cfg.get("grok2api_remote_base") or "").strip()
     remote_key = str(cfg.get("grok2api_remote_app_key") or "").strip()
     g2a = _probe_g2a(remote_key)
+    sub2 = _probe_sub2api(cfg)
     linked = bool(cfg.get("grok2api_auto_add_remote")) and bool(remote_base) and bool(remote_key)
     return {
         "ok": True,
         "g2a": g2a,
+        "sub2api": sub2,
         "linked": linked,
         "config": {
             "auto_add_remote": bool(cfg.get("grok2api_auto_add_remote")),
             "remote_base": remote_base or g2a["internal_base"],
             "pool_name": cfg.get("grok2api_pool_name") or "ssoBasic",
             "has_app_key": bool(remote_key),
+            "sub2api_auto_add": bool(cfg.get("sub2api_auto_add", True)),
+            "sub2api_base_url": str(cfg.get("sub2api_base_url") or "http://127.0.0.1:8080").strip().rstrip("/"),
+            "has_sub2api_admin_email": bool(str(cfg.get("sub2api_admin_email") or "").strip()),
+            "has_sub2api_admin_password": bool(str(cfg.get("sub2api_admin_password") or "").strip()),
         },
         "defaults": {
             "remote_base": G2A_INTERNAL_BASE,
             "public_url": G2A_PUBLIC_URL,
             "admin_url": f"{G2A_PUBLIC_URL}/admin/login",
             "pool_name": "ssoBasic",
+            "sub2api_base_url": "http://127.0.0.1:8080",
+            "sub2api_accounts_url": "http://127.0.0.1:8080/",
         },
     }
 
@@ -885,6 +969,16 @@ class CpaImportBody(BaseModel):
     stop_on_error: Optional[bool] = False
 
 
+
+@app.get("/api/sub2api/status")
+async def api_sub2api_status(x_access_key: Optional[str] = Header(None)):
+    """Refresh Sub2API pool status: healthy + grok account_count. No secrets."""
+    _require_auth(x_access_key)
+    engine.load_config()
+    sub2 = _probe_sub2api(engine.config)
+    return {"ok": True, "sub2api": sub2}
+
+
 @app.post("/api/sub2api/import-cpa")
 async def api_sub2api_import_cpa(body: CpaImportBody, x_access_key: Optional[str] = Header(None)):
     """Import CLIProxy/CPA xai-*.json OAuth files into Sub2API admin accounts."""
@@ -972,7 +1066,27 @@ async def api_accounts_list(x_access_key: Optional[str] = Header(None)):
         }
         for f in files[:50]
     ]
-    return {"ok": True, "files": items}
+    pending_fixed = ROOT / "accounts_registered_pending_sso.txt"
+    pending_files = sorted(ROOT.glob("accounts_no_sso_*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    pending_count = 0
+    if pending_fixed.is_file():
+        try:
+            pending_count = sum(
+                1
+                for ln in pending_fixed.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and "----" in ln
+            )
+        except Exception:
+            pending_count = 0
+    pending = {
+        "fixed_file": pending_fixed.name if pending_fixed.is_file() else "",
+        "fixed_count": pending_count,
+        "timestamped": [
+            {"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime}
+            for f in pending_files[:20]
+        ],
+    }
+    return {"ok": True, "files": items, "pending_sso": pending}
 
 
 @app.get("/api/accounts/download")
@@ -985,7 +1099,12 @@ async def api_accounts_download(
         # prevent path traversal
         safe = Path(name).name
         path = ROOT / safe
-        if not safe.startswith("accounts_") or not safe.endswith(".txt") or not path.is_file():
+        allowed = (
+            (safe.startswith("accounts_") and safe.endswith(".txt"))
+            or safe == "accounts_registered_pending_sso.txt"
+            or (safe.startswith("accounts_no_sso_") and safe.endswith(".txt"))
+        )
+        if not allowed or not path.is_file():
             raise HTTPException(status_code=404, detail="file not found")
     else:
         files = sorted(ROOT.glob("accounts_*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)

@@ -43,7 +43,7 @@ class BrowserTokenSession:
         return self
 
     def install_network_hook(self) -> bool:
-        """Capture castleRequestToken from native React fetch/XHR bodies."""
+        """Capture castleRequestToken and next-action from native React fetch/XHR."""
         from grok_register_ttk import _get_page
 
         page = _get_page()
@@ -56,8 +56,47 @@ class BrowserTokenSession:
   window.__hybrid_castles = [];
   window.__hybrid_castle = '';
   window.__hybrid_net = [];
+  window.__hybrid_next_actions = window.__hybrid_next_actions || [];
+  window.__hybrid_next_action = window.__hybrid_next_action || '';
   window.__hybrid_create_email_ok = false;
   window.__hybrid_create_email_status = 0;
+  function pushNextAction(v) {
+    try {
+      const s = String(v || '').trim();
+      if (!/^[a-f0-9]{40,64}$/i.test(s)) return;
+      window.__hybrid_next_action = s;
+      if (window.__hybrid_next_actions.indexOf(s) < 0) {
+        window.__hybrid_next_actions.push(s);
+      }
+    } catch (e) {}
+  }
+  function captureHeaders(headers) {
+    try {
+      if (!headers) return;
+      if (typeof headers.forEach === 'function') {
+        headers.forEach(function(val, key){
+          if (String(key || '').toLowerCase() === 'next-action') pushNextAction(val);
+        });
+        return;
+      }
+      if (typeof headers.get === 'function') {
+        pushNextAction(headers.get('next-action') || headers.get('Next-Action'));
+        return;
+      }
+      if (Array.isArray(headers)) {
+        for (const pair of headers) {
+          if (!pair) continue;
+          const k = pair[0] != null ? pair[0] : (pair.name || '');
+          const v = pair[1] != null ? pair[1] : (pair.value || '');
+          if (String(k).toLowerCase() === 'next-action') pushNextAction(v);
+        }
+        return;
+      }
+      for (const k of Object.keys(headers || {})) {
+        if (String(k).toLowerCase() === 'next-action') pushNextAction(headers[k]);
+      }
+    } catch (e) {}
+  }
   function captureBody(body, url) {
     try {
       if (!body) return;
@@ -92,6 +131,8 @@ class BrowserTokenSession:
         window.__hybrid_castle = m2[0];
         window.__hybrid_castles.push(m2[0]);
       }
+      const m3 = s.match(/["']next-action["']\s*[:=]\s*["']([a-f0-9]{40,64})["']/i);
+      if (m3) pushNextAction(m3[1]);
     } catch (e) {}
   }
   const ofetch = window.fetch;
@@ -100,6 +141,10 @@ class BrowserTokenSession:
     try {
       url = (typeof input === 'string') ? input : (input && input.url) || '';
       captureBody(init && init.body, url);
+      captureHeaders(init && init.headers);
+      if (input && typeof input === 'object') {
+        try { captureHeaders(input.headers); } catch (e) {}
+      }
     } catch (e) {}
     const resp = await ofetch.apply(this, arguments);
     try {
@@ -111,8 +156,15 @@ class BrowserTokenSession:
     return resp;
   };
   const oopen = XMLHttpRequest.prototype.open;
+  const oset = XMLHttpRequest.prototype.setRequestHeader;
   const osend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function(m,u){ this.__u=u; return oopen.apply(this, arguments); };
+  XMLHttpRequest.prototype.setRequestHeader = function(k,v){
+    try {
+      if (String(k || '').toLowerCase() === 'next-action') pushNextAction(v);
+    } catch (e) {}
+    return oset.apply(this, arguments);
+  };
   XMLHttpRequest.prototype.send = function(body){
     captureBody(body, this.__u);
     const xhr = this;
@@ -567,9 +619,47 @@ true;
             self._lg(f"[Debug] export_cookies: {e}")
         return jar
 
-    def scrape_next_action(self) -> str:
-        """Find SignUp server-action hash from page HTML or Next.js chunk scripts."""
+    def read_captured_next_actions(self) -> list[str]:
+        """Return next-action hashes captured by the page network hook."""
         from grok_register_ttk import _get_page
+        import re as _re
+
+        page = _get_page()
+        out: list[str] = []
+        try:
+            raw = page.run_js(
+                """
+const arr = Array.isArray(window.__hybrid_next_actions) ? window.__hybrid_next_actions : [];
+const cur = String(window.__hybrid_next_action || '').trim();
+const all = arr.slice();
+if (cur) all.unshift(cur);
+return all.map(x => String(x || '').trim()).filter(Boolean).slice(0, 20);
+"""
+            )
+            vals = raw if isinstance(raw, list) else ([raw] if raw else [])
+            for v in vals:
+                s = str(v or "").strip()
+                if _re.fullmatch(r"[a-fA-F0-9]{40,64}", s) and s not in out:
+                    out.append(s)
+        except Exception as e:
+            self._lg(f"[Debug] read captured next-actions: {e}")
+        return out
+
+    def scrape_next_action(self) -> str:
+        """Find SignUp server-action hash from network hook, HTML, or Next.js chunks."""
+        from grok_register_ttk import _get_page
+
+        # Prefer live request headers captured by network hook.
+        try:
+            captured = self.read_captured_next_actions()
+            if captured:
+                self._lg(
+                    f"[*] scrape next-action from network hook "
+                    f"count={len(captured)} value={captured[0][:20]}..."
+                )
+                return str(captured[0])
+        except Exception as e:
+            self._lg(f"[Debug] scrape next-action hook: {e}")
 
         page = _get_page()
         try:
@@ -1334,15 +1424,29 @@ return (async function(){
         family_name: str,
         password: str,
         turnstile_token: str = "",
+        email: str = "",
+        code: str = "",
         timeout: int = 90,
         cancel_callback=None,
     ) -> str:
-        """Fill profile form in browser and wait for sso cookie after native SignUp."""
+        """Advance signup UI (email/code/profile) and wait for sso cookie.
+
+        When protocol/browser-fetch next-action fails, the page may still be on
+        email or verification step. Advance those steps first, then fill profile.
+        """
         from grok_register_ttk import _get_page
 
         page = _get_page()
         stop = cancel_callback or (lambda: False)
         self.install_network_hook()
+
+        email_val = (email or "").strip()
+        code_val = (code or "").strip()
+        import re as _re
+
+        code_digits = "".join(_re.findall(r"\d+", code_val))
+        if len(code_digits) >= 4:
+            code_val = code_digits[-6:] if len(code_digits) > 6 else code_digits
 
         # Ensure turnstile token is in the page if we already solved it.
         tok = (turnstile_token or "").strip()
@@ -1367,8 +1471,11 @@ return String(cfInput.value || '').trim().length;
                 self._lg(f"[Debug] UI fallback inject turnstile: {e}")
 
         deadline = time.time() + max(30, int(timeout or 90))
+        email_done = False
+        code_done = False
         filled = False
         submitted = False
+        last_state_sig = ""
         while time.time() < deadline:
             if stop():
                 self._lg("[*] UI fallback cancelled")
@@ -1383,12 +1490,26 @@ function isVisible(node) {
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 }
+function pick(sel) {
+  return Array.from(document.querySelectorAll(sel)).find(n => isVisible(n) && !n.disabled) || null;
+}
+const emailInput = pick('input[type="email"], input[name="email"], input[autocomplete="email"], input[data-testid="email"]');
+const codeInput = pick('input[name="code"], input[name="emailValidationCode"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[data-testid="code"]');
 const given = Array.from(document.querySelectorAll('input[name="givenName"], input[data-testid="givenName"], input[autocomplete="given-name"]')).some(isVisible);
 const family = Array.from(document.querySelectorAll('input[name="familyName"], input[data-testid="familyName"], input[autocomplete="family-name"]')).some(isVisible);
 const pw = Array.from(document.querySelectorAll('input[type="password"], input[name="password"]')).some(isVisible);
 const cf = document.querySelector('input[name="cf-turnstile-response"]');
 const cfLen = cf ? String(cf.value||'').trim().length : 0;
-return {given:!!given, family:!!family, pw:!!pw, cfLen:cfLen, url: location.href};
+return {
+  email: !!emailInput,
+  code: !!codeInput,
+  given: !!given,
+  family: !!family,
+  pw: !!pw,
+  cfLen: cfLen,
+  url: location.href,
+  hasProfile: !!(given && family && pw)
+};
 """
                 )
             except Exception as e:
@@ -1400,7 +1521,14 @@ return {given:!!given, family:!!family, pw:!!pw, cfLen:cfLen, url: location.href
                 time.sleep(0.5)
                 continue
 
-            self._lg(f"[*] UI fallback state={state}")
+            sig = (
+                f"e={state.get('email')} c={state.get('code')} "
+                f"g={state.get('given')} f={state.get('family')} "
+                f"p={state.get('pw')} cf={state.get('cfLen')} url={state.get('url')}"
+            )
+            if sig != last_state_sig:
+                self._lg(f"[*] UI fallback state={state}")
+                last_state_sig = sig
 
             # already left signup? check cookies early
             jar = self.export_cookies() or {}
@@ -1408,6 +1536,127 @@ return {given:!!given, family:!!family, pw:!!pw, cfLen:cfLen, url: location.href
             if sso and len(str(sso)) > 20:
                 self._lg(f"[*] UI fallback sso from cookies early len={len(sso)}")
                 return str(sso)
+
+            has_profile = bool(
+                state.get("hasProfile")
+                or (state.get("given") and state.get("family") and state.get("pw"))
+            )
+
+            # Step 1: still on email page.
+            if email_val and state.get("email") and not has_profile and not email_done:
+                try:
+                    step_r = page.run_js(
+                        """
+const email = String(arguments[0] || '').trim();
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function pick(sel) {
+  return Array.from(document.querySelectorAll(sel)).find(n => isVisible(n) && !n.disabled) || null;
+}
+function setVal(input, value) {
+  if (!input) return false;
+  input.focus();
+  try { input.click(); } catch (e) {}
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  if (nativeSetter) nativeSetter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.blur();
+  return String(input.value||'').trim() === String(value||'').trim();
+}
+function buttonText(node) {
+  return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
+    .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+}
+const input = pick('input[type="email"], input[name="email"], input[autocomplete="email"], input[data-testid="email"]');
+if (!input) return 'no-email-input';
+if (!setVal(input, email)) return 'email-fill-failed';
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'))
+  .filter(n => isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true');
+const btn = buttons.find(n => {
+  const t = buttonText(n).replace(/\\s+/g, '').toLowerCase();
+  return t.includes('继续') || t.includes('下一步') || t.includes('continue') || t.includes('next') || t.includes('发送') || t.includes('send');
+}) || buttons.find(n => String(n.getAttribute('type')||'').toLowerCase() === 'submit') || buttons[0] || null;
+if (!btn) return 'email-filled-no-btn';
+btn.focus();
+btn.click();
+return 'email-submitted:' + buttonText(btn);
+""",
+                        email_val,
+                    )
+                    self._lg(f"[*] UI fallback email step={step_r}")
+                    if str(step_r).startswith("email-submitted") or str(step_r) == "email-filled-no-btn":
+                        email_done = True
+                        time.sleep(1.2)
+                        continue
+                except Exception as e:
+                    self._lg(f"[Debug] UI fallback email step: {e}")
+
+            # Step 2: still on verification code page.
+            if code_val and state.get("code") and not has_profile and not code_done:
+                try:
+                    step_r = page.run_js(
+                        """
+const code = String(arguments[0] || '').trim();
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function pick(sel) {
+  return Array.from(document.querySelectorAll(sel)).find(n => isVisible(n) && !n.disabled) || null;
+}
+function setVal(input, value) {
+  if (!input) return false;
+  input.focus();
+  try { input.click(); } catch (e) {}
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  if (nativeSetter) nativeSetter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.blur();
+  return String(input.value||'').replace(/\\s+/g,'') === String(value||'').replace(/\\s+/g,'');
+}
+function buttonText(node) {
+  return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
+    .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+}
+const input = pick('input[name="code"], input[name="emailValidationCode"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[data-testid="code"], input[type="text"], input[type="tel"]');
+if (!input) return 'no-code-input';
+if (!setVal(input, code)) return 'code-fill-failed';
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'))
+  .filter(n => isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true');
+const btn = buttons.find(n => {
+  const t = buttonText(n).replace(/\\s+/g, '').toLowerCase();
+  return t.includes('继续') || t.includes('下一步') || t.includes('验证') || t.includes('confirm') || t.includes('continue') || t.includes('next') || t.includes('verify');
+}) || buttons.find(n => String(n.getAttribute('type')||'').toLowerCase() === 'submit') || buttons[0] || null;
+if (!btn) return 'code-filled-no-btn';
+btn.focus();
+btn.click();
+return 'code-submitted:' + buttonText(btn);
+""",
+                        code_val,
+                    )
+                    self._lg(f"[*] UI fallback code step={step_r}")
+                    if str(step_r).startswith("code-submitted") or str(step_r) == "code-filled-no-btn":
+                        code_done = True
+                        time.sleep(1.5)
+                        continue
+                except Exception as e:
+                    self._lg(f"[Debug] UI fallback code step: {e}")
 
             if state.get("given") and state.get("family") and state.get("pw") and not filled:
                 try:
@@ -1524,8 +1773,6 @@ return 'submitted:' + buttonText(submitBtn);
                 doc = page.run_js(
                     "return document.cookie || '';"
                 ) or ""
-                import re as _re
-
                 m = _re.search(r"(?:^|;\s*)sso=([^;]+)", str(doc))
                 if m and len(m.group(1)) > 20:
                     self._lg(f"[*] UI fallback sso from document.cookie len={len(m.group(1))}")

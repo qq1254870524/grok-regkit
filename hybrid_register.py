@@ -3,6 +3,9 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-18: 修复 next-action 失效后 UI 卡在注册页：网络 hook 捕获 next-action；
+  browser-fetch 失败后 live re-scrape 再试；UI fallback 接收 email/code 先推进邮箱/验证码页；
+  验证已过但无 SSO 时单独落盘 accounts_registered_pending_sso.txt。
 - 2026-07-17f: 修复 Web 停止竞态：打开注册页时传入 should_stop，浏览器被停止关闭后
   不再继续 new_tab；停止操作不计为注册失败，也不输出误导性的 NoneType 堆栈。
 - 2026-07-17e: 协议 curl 超时(0 bytes)根因修复：跳过已有候选时的 curl chunk discover；
@@ -862,6 +865,82 @@ def register_one_hybrid(
                     except Exception as bf_exc:
                         log(f"[hybrid] browser-fetch try {bidx} error: {bf_exc}")
                 if not sso and not stop():
+                    # Live re-scrape next-action after failed browser-fetch (hook/HTML/chunks).
+                    try:
+                        live_retry_acts: list[str] = []
+                        try:
+                            for a in (browser.read_captured_next_actions() or []):
+                                a = (a or "").strip()
+                                if a and a not in live_retry_acts and a != known:
+                                    live_retry_acts.append(a)
+                        except Exception:
+                            pass
+                        try:
+                            scraped2 = (browser.scrape_next_action() or "").strip()
+                            if scraped2 and scraped2 not in live_retry_acts and scraped2 != known:
+                                live_retry_acts.append(scraped2)
+                        except Exception as scrape2_exc:
+                            log(f"[hybrid] live re-scrape next-action fail: {scrape2_exc}")
+                        for a in list(candidates):
+                            a = (a or "").strip()
+                            if a and a not in live_retry_acts and a != known:
+                                live_retry_acts.append(a)
+                        if live_retry_acts:
+                            log(
+                                f"[hybrid] live re-scrape browser-fetch retry "
+                                f"candidates={len(live_retry_acts)}"
+                            )
+                        for ridx, act in enumerate(live_retry_acts[:2], 1):
+                            if stop() or sso:
+                                break
+                            if act in live_acts[:3]:
+                                # already tried in previous browser-fetch loop
+                                continue
+                            try:
+                                castle_tok = _mint_castle_for_try(ridx + 20)
+                                log(
+                                    f"[hybrid] browser-fetch live-retry {ridx} "
+                                    f"next-action={act[:20]}... castle_len={len(castle_tok)}"
+                                )
+                                br = browser.fetch_signup_server_action(
+                                    email=email,
+                                    code=clean,
+                                    given_name=given,
+                                    family_name=family,
+                                    password=password,
+                                    turnstile_token=turnstile,
+                                    castle_token=castle_tok,
+                                    next_action=act,
+                                    conversion_id=str(uuid.uuid4()),
+                                    router_state_tree=getattr(client, "router_state_tree", "") or "",
+                                    timeout=25,
+                                )
+                                sso = _extract_sso(br) or ""
+                                if not sso:
+                                    try:
+                                        jar_b = browser.export_cookies() or {}
+                                        sso = jar_b.get("sso") or jar_b.get("sso-rw") or ""
+                                    except Exception:
+                                        pass
+                                body_txt = str((br or {}).get("text") or body_txt)
+                                r3 = br or r3
+                                log(
+                                    f"[hybrid] browser-fetch live-retry {ridx} "
+                                    f"status={br.get('status')} sso_len={len(sso)} "
+                                    f"body={str(br.get('text') or '')[:180]!r}"
+                                )
+                                if sso:
+                                    try:
+                                        save_next_action_to_capture(act, log)
+                                    except Exception:
+                                        pass
+                                    break
+                            except Exception as retry_exc:
+                                log(f"[hybrid] browser-fetch live-retry {ridx} error: {retry_exc}")
+                    except Exception as live_exc:
+                        log(f"[hybrid] live re-scrape block error: {live_exc}")
+
+                if not sso and not stop():
                     log(
                         "[hybrid] browser-fetch no sso; UI profile submit fallback "
                         f"email={email} given={given} family={family}"
@@ -872,6 +951,8 @@ def register_one_hybrid(
                             family_name=family,
                             password=password,
                             turnstile_token=turnstile,
+                            email=email,
+                            code=clean,
                             timeout=90,
                             cancel_callback=stop,
                         )
@@ -883,6 +964,24 @@ def register_one_hybrid(
                     except Exception as ui_exc:
                         log(f"[hybrid] browser UI fallback error: {ui_exc}")
             if not sso:
+                # Verification may already have passed; keep email+password for later OOS/SSO.
+                try:
+                    if email and password:
+                        pending_line = f"{email}----{password}----pending_sso"
+                        pending_fixed = ROOT / "accounts_registered_pending_sso.txt"
+                        with pending_fixed.open("a", encoding="utf-8") as pf:
+                            pf.write(pending_line + "\n")
+                        stamp = time.strftime("%Y%m%d_%H%M%S")
+                        pending_stamp = ROOT / f"accounts_no_sso_{stamp}.txt"
+                        with pending_stamp.open("a", encoding="utf-8") as pf:
+                            pf.write(pending_line + "\n")
+                        log(
+                            f"[hybrid] registered without SSO/OOS; saved email+password to "
+                            f"{pending_fixed.name} and {pending_stamp.name} "
+                            f"(email={email}) for later OOS/NSFW recovery"
+                        )
+                except Exception as pending_exc:
+                    log(f"[hybrid] save pending_sso account fail: {pending_exc}")
                 log(
                     f"[hybrid] no sso after protocol+browser-fetch+UI cookies="
                     f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"

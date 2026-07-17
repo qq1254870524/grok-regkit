@@ -772,7 +772,34 @@
             <a id="openG2aBtn" class="btn" href="http://127.0.0.1:8010/admin/account" target="_blank" rel="noopener">打开账号池</a>
           </div>
           <div class="soft-box" style="margin-top:14px">
-            <div class="section-sub" style="margin-bottom:10px"><b>Sub2API Grok OAuth 入池</b>：使用注册成功后的 SSO 调用官方 sso-to-oauth 接口</div>
+            <div class="section-head" style="margin-bottom:10px;padding:0">
+              <div>
+                <div class="section-sub" style="margin:0"><b>Sub2API Grok OAuth 入池</b>：使用注册成功后的 SSO 调用官方 sso-to-oauth 接口；存量 CPA 也可直导入</div>
+              </div>
+              <span class="status-chip">
+                <span id="sub2Dot" class="dot idle"></span>
+                <span id="sub2Label">检测中</span>
+              </span>
+            </div>
+            <div class="form-grid two" style="margin-bottom:10px">
+              <div class="field">
+                <div class="label">联动状态</div>
+                <div id="sub2LinkedText" style="font-weight:650;padding-top:8px;font-size:14px">—</div>
+              </div>
+              <div class="field">
+                <div class="label">号池账号数（Grok）</div>
+                <div id="sub2Count" style="font-weight:650;padding-top:8px;font-size:14px">—</div>
+              </div>
+              <div class="field span-2">
+                <div class="label">pending SSO 落盘</div>
+                <div id="sub2PendingText" style="font-weight:650;padding-top:8px;font-size:13px;color:var(--muted)">—</div>
+              </div>
+            </div>
+            <div class="action-bar" style="margin-bottom:12px">
+              <button id="refreshSub2Btn" class="btn btn-ghost" type="button">刷新 Sub2API 状态</button>
+              <a id="openSub2Btn" class="btn" href="http://127.0.0.1:8080/" target="_blank" rel="noopener">打开号池</a>
+              <button id="dlPendingSsoBtn" class="btn" type="button">下载 pending SSO</button>
+            </div>
             <div class="form-grid two">
               <label class="check-row span-2"><input id="sub2api_auto_add" type="checkbox" checked /> 注册成功后自动加入 Sub2API（默认开启）</label>
               <label class="check-row span-2"><input id="sub2api_verify_after_add" type="checkbox" checked /> 导入后测试可用性（失败仅告警，不撤销已创建账号）</label>
@@ -841,6 +868,7 @@
             <p>· 密钥/密码显示星号表示已保存，不改则保留。</p>
             <p>· Sub2API SSO→OAuth 创建成功即视为入池成功；可用性测试失败默认只告警、不撤销账号，也不影响注册成功结果。</p>
             <p>· 存量 CPA 目录走 <code class="inline">POST /api/v1/admin/accounts</code> 直建 OAuth，不是 sso-to-oauth。也可 CLI：<code class="inline">python -B scripts/import_cpa_to_sub2api.py --dir path</code></p>
+            <p>· Sub2API 号池状态与 SSO 号池对称：可刷新数量、打开后台；无 SSO 账号落在 <code class="inline">accounts_registered_pending_sso.txt</code>。</p>
           </div>
         </div>
       </div>
@@ -1418,8 +1446,90 @@
           $('grok2api_remote_base').value = data.defaults.remote_base;
         }
         if (!$('grok2api_pool_name').value) $('grok2api_pool_name').value = 'ssoBasic';
+
+        const sub2 = data.sub2api || {};
+        const subOk = !!(sub2.ok || sub2.healthy || sub2.reachable);
+        if ($('sub2Dot')) $('sub2Dot').className = 'dot ' + (subOk ? 'run' : 'idle');
+        if ($('sub2Label')) {
+          if (subOk) $('sub2Label').textContent = sub2.account_count == null ? '在线' : '在线';
+          else $('sub2Label').textContent = '离线';
+        }
+        if ($('sub2LinkedText')) {
+          const auto = !!(sub2.auto_add || data.config?.sub2api_auto_add);
+          $('sub2LinkedText').textContent = auto ? '已开启自动入池' : '未开启自动入池';
+          $('sub2LinkedText').style.color = auto ? 'var(--ok)' : 'var(--muted)';
+        }
+        if ($('sub2Count')) {
+          if (sub2.account_count == null) {
+            $('sub2Count').textContent = subOk
+              ? (sub2.has_admin_password === false || sub2.has_admin_email === false
+                  ? '（需管理员账号）'
+                  : (sub2.error ? '（需刷新/凭证）' : '—'))
+              : '—';
+          } else {
+            $('sub2Count').textContent = String(sub2.account_count);
+          }
+        }
+        if ($('openSub2Btn')) {
+          $('openSub2Btn').href = sub2.accounts_url || sub2.public_url || data.defaults?.sub2api_accounts_url || 'http://127.0.0.1:8080/';
+        }
+        if ($('sub2api_base_url') && !$('sub2api_base_url').value && data.defaults?.sub2api_base_url) {
+          $('sub2api_base_url').value = data.defaults.sub2api_base_url;
+        }
       } catch (_) {
         $('g2aLabel').textContent = '检测失败';
+        if ($('sub2Label')) $('sub2Label').textContent = '检测失败';
+      }
+      await refreshPendingSsoInfo();
+    }
+
+    async function refreshPendingSsoInfo() {
+      const el = $('sub2PendingText');
+      if (!el) return;
+      try {
+        const r = await fetch('/api/accounts', { headers: headers() });
+        if (!r.ok) return;
+        const data = await r.json();
+        const p = data.pending_sso || {};
+        const fixed = p.fixed_file || '';
+        const count = p.fixed_count != null ? p.fixed_count : 0;
+        const ts = (p.timestamped || []).length;
+        if (!fixed && !ts) {
+          el.textContent = '暂无 pending SSO 记录';
+          return;
+        }
+        el.textContent = `固定文件 ${fixed || '—'} 共 ${count} 条；时间戳文件 ${ts} 个`;
+      } catch (_) {
+        el.textContent = 'pending 读取失败';
+      }
+    }
+
+    async function downloadPendingSso() {
+      try {
+        const r = await fetch('/api/accounts', { headers: headers() });
+        if (!r.ok) {
+          toast('读取 pending 失败', false);
+          return;
+        }
+        const data = await r.json();
+        const name = (data.pending_sso && data.pending_sso.fixed_file) || 'accounts_registered_pending_sso.txt';
+        const dl = await fetch('/api/accounts/download?name=' + encodeURIComponent(name), { headers: headers() });
+        if (!dl.ok) {
+          toast('没有 pending SSO 文件', false);
+          appendLog('[*] 无 pending SSO 文件可下载');
+          return;
+        }
+        const blob = await dl.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('已下载 ' + name);
+        appendLog('[+] 已下载 pending SSO: ' + name);
+      } catch (e) {
+        toast('下载失败', false);
+        appendLog('[!] pending SSO 下载失败: ' + e);
       }
     }
 
@@ -1521,6 +1631,8 @@
     $('linkG2aBtn').addEventListener('click', () => linkG2a(true));
     $('unlinkG2aBtn').addEventListener('click', () => linkG2a(false));
     $('refreshG2aBtn').addEventListener('click', refreshIntegration);
+    if ($('refreshSub2Btn')) $('refreshSub2Btn').addEventListener('click', refreshIntegration);
+    if ($('dlPendingSsoBtn')) $('dlPendingSsoBtn').addEventListener('click', downloadPendingSso);
     $('clearLogBtn').addEventListener('click', async () => {
       try {
         const r = await fetch('/api/logs/clear', { method: 'POST', headers: headers() });

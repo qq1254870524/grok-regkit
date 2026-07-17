@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Sub2API Grok importer: SSO->OAuth and CPA OAuth JSON direct import.
 
+2026-07-18d: list_accounts returns total; optional native /import/grok-cpa path.
+
 Changelog:
 - 2026-07-18c: add CPA/CLIProxy OAuth JSON import via POST /api/v1/admin/accounts.
   Accepts Desktop/Grok/cpa style xai-*.json (type=xai, auth_kind=oauth) and maps
@@ -504,7 +506,14 @@ class Sub2APIClient:
             raise RuntimeError(f"Sub2API 列表账号失败 status={response.status_code} detail={detail}")
         data = self._payload_data(payload)
         items = data.get("items") if isinstance(data.get("items"), list) else []
-        return {"items": items, "raw": data}
+        total = data.get("total")
+        if total is None and isinstance(data.get("pagination"), dict):
+            total = data.get("pagination", {}).get("total")
+        try:
+            total_i = int(total) if total is not None else len(items)
+        except Exception:
+            total_i = len(items)
+        return {"items": items, "total": total_i, "raw": data}
 
     def find_account_by_email_or_sub(
         self,
