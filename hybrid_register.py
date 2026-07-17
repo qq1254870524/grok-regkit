@@ -43,6 +43,73 @@ def load_next_action_from_capture() -> str:
     return ""
 
 
+
+def save_next_action_to_capture(action: str, log: Callable[[str], None] | None = None) -> None:
+    """Persist a known-good next-action so later runs prefer a live working hash."""
+    act = (action or "").strip()
+    if not act:
+        return
+    try:
+        import json
+
+        rpc = ROOT / "capture_out" / "rpc"
+        rpc.mkdir(parents=True, exist_ok=True)
+        path = rpc / "03_SignUpSubmit.req.headers.json"
+        data = {}
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["next-action"] = act
+        data["Next-Action"] = act
+        data["_saved_by"] = "hybrid_register"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        if log:
+            log(f"[hybrid] saved working next-action hash={act[:20]}... len={len(act)}")
+    except Exception as exc:
+        if log:
+            log(f"[hybrid] save next-action fail: {exc}")
+
+
+def load_registered_emails() -> set[str]:
+    """Emails already saved in local accounts_*.txt (successful Grok registrations)."""
+    out: set[str] = set()
+    for p in ROOT.glob("accounts*.txt"):
+        try:
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                email = (line.split("----")[0] or "").strip().lower()
+                if email and "@" in email:
+                    out.add(email)
+        except Exception:
+            continue
+    return out
+
+
+def mark_outlook_registered(email: str, log: Callable[[str], None] | None = None) -> None:
+    """Prevent reusing an Outlook mailbox that already completed Grok registration."""
+    try:
+        import outlook_mail as om
+
+        pool = getattr(om, "_POOL", None)
+        if pool is None:
+            return
+        with om._POOL_LOCK:
+            for acc in pool.accounts:
+                if acc.identity() == (email or "").lower():
+                    acc.status = "registered"
+                    acc.cooldown_until = time.time() + 86400 * 365
+                    if log:
+                        log(f"[hybrid] Outlook marked registered (skip future): {email}")
+                    break
+    except Exception as exc:
+        if log:
+            log(f"[hybrid] mark outlook registered fail: {exc}")
+
+
+
 def register_one_hybrid(
     *,
     log: Callable[[str], None],
@@ -73,7 +140,26 @@ def register_one_hybrid(
             browser.install_network_hook()
             action = action or browser.scrape_next_action() or action
 
-            email, mail_token = get_email_and_token()
+            registered = load_registered_emails()
+            email, mail_token = "", ""
+            for _try in range(12):
+                email, mail_token = get_email_and_token()
+                if email.lower() not in registered:
+                    break
+                log(f"[hybrid] skip already-registered local email: {email}")
+                try:
+                    import outlook_mail as om
+                    from grok_register_ttk import config as _cfg
+
+                    pool = om.get_pool(_cfg, log_callback=log)
+                    pool.release(email, ok=True)
+                    mark_outlook_registered(email, log)
+                except Exception as rel_exc:
+                    log(f"[hybrid] release/skip email: {rel_exc}")
+                email, mail_token = "", ""
+            if not email:
+                log("[hybrid] no fresh email available (pool exhausted / all registered?)")
+                return False
             log(f"[hybrid] email={email}")
             if stop():
                 return False
@@ -151,7 +237,13 @@ def register_one_hybrid(
             except Exception:
                 pass
 
-            turnstile = browser.get_turnstile_token(timeout=90, inject=True)
+            if stop():
+                log("[hybrid] stop before turnstile")
+                return False
+            turnstile = browser.get_turnstile_token(timeout=90, inject=True, cancel_callback=stop)
+            if stop():
+                log("[hybrid] stop after turnstile")
+                return False
             if len(turnstile) < 80:
                 log(f"[hybrid] turnstile short len={len(turnstile)}")
                 return False
@@ -164,27 +256,45 @@ def register_one_hybrid(
             for stale in ("sso", "sso-rw"):
                 jar2.pop(stale, None)
             sess.set_cookies(jar2)
-            action = (
-                action
-                or browser.scrape_next_action()
-                or load_next_action_from_capture()
-            )
-            if not action:
-                # Force re-discover from signup chunks (not unrelated CSR hashes)
-                client.next_action = ""
-                action = client.discover_next_action(timeout=60)
-            # Prefer known-good capture hash if discovery returned a different short-lived wrong action
-            # Verified CSR from signup bundle (emailValidationCode chunk).
+            # Build next-action candidates. Never prefer stale hardcoded hash over live discovery.
+            # Hardcoded known is last resort only — xAI redeploys invalidate it (404 Server action not found).
             known = "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259"
-            if not action:
-                action = known
-                log(f"[hybrid] next-action fallback={action[:16]}...")
-            elif action != known:
-                # Try known first on failure path later; keep discovered for now but log both
-                log(f"[hybrid] next-action discovered={action[:20]}... known={known[:16]}...")
-            else:
-                log(f"[hybrid] next-action={action[:20]}...")
-            client.next_action = action
+            candidates: list[str] = []
+
+            def _add_action(val: str, src: str):
+                v = (val or "").strip()
+                if not v:
+                    return
+                if v not in candidates:
+                    candidates.append(v)
+                    log(
+                        f"[hybrid] next-action candidate[{len(candidates)}] "
+                        f"src={src} hash={v[:20]}... len={len(v)}"
+                    )
+
+            log("[hybrid] resolving next-action after turnstile…")
+            try:
+                scraped = browser.scrape_next_action() or ""
+                _add_action(scraped, "browser_scrape")
+            except Exception as scrape_exc:
+                log(f"[hybrid] browser scrape next-action fail: {scrape_exc}")
+            _add_action(action, "earlier_or_capture")
+            if stop():
+                return False
+            try:
+                client.next_action = ""
+                # Keep short: stop button cannot interrupt this network scan otherwise.
+                discovered = client.discover_next_action(timeout=20) or ""
+                _add_action(discovered, "chunk_discover")
+            except Exception as disc_exc:
+                log(f"[hybrid] chunk discover next-action fail: {disc_exc}")
+            if stop():
+                return False
+            _add_action(load_next_action_from_capture(), "capture_file")
+            _add_action(known, "hardcoded_fallback")
+            if not candidates:
+                log("[hybrid] no next-action candidates at all")
+                return False
             if stop():
                 return False
 
@@ -199,31 +309,77 @@ def register_one_hybrid(
                     castle_token=castle2,
                     next_action=act,
                     conversion_id=str(uuid.uuid4()),
+                    timeout=40,
                 )
 
-            r3 = _do_signup(action)
-            sso = r3.get("sso") or ""
-            if not sso:
-                sso = (r3.get("cookies") or {}).get("sso") or (r3.get("cookies") or {}).get("sso-rw") or ""
-            # Retry with known capture hash if body looks like wrong/no-op action
-            body_txt = str(r3.get("text") or "")
-            known = "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259"
-            if (not sso) and action != known and (
-                "isLoggedInWithSSO" in body_txt or r3.get("status") == 200
-            ):
-                log(f"[hybrid] retry sign-up with known next-action={known[:16]}...")
-                # refresh cookies again
-                jar3 = dict(browser.export_cookies() or {})
-                for stale in ("sso", "sso-rw"):
-                    jar3.pop(stale, None)
-                sess.set_cookies(jar3)
-                r3 = _do_signup(known)
-                sso = r3.get("sso") or ""
-                if not sso:
-                    sso = (r3.get("cookies") or {}).get("sso") or (r3.get("cookies") or {}).get("sso-rw") or ""
+            def _extract_sso(resp: dict) -> str:
+                s = (resp or {}).get("sso") or ""
+                if not s:
+                    ck = (resp or {}).get("cookies") or {}
+                    s = ck.get("sso") or ck.get("sso-rw") or ""
+                return s or ""
+
+            r3 = {}
+            sso = ""
+            body_txt = ""
+            for idx, act in enumerate(candidates, 1):
+                if stop():
+                    return False
+                try:
+                    jar3 = dict(browser.export_cookies() or {})
+                    for stale in ("sso", "sso-rw"):
+                        jar3.pop(stale, None)
+                    sess.set_cookies(jar3)
+                except Exception:
+                    pass
+                client.next_action = act
+                log(f"[hybrid] sign-up try {idx}/{len(candidates)} next-action={act[:20]}...")
+                t_try = time.time()
+                try:
+                    r3 = _do_signup(act)
+                except Exception as signup_exc:
+                    log(f"[hybrid] sign-up try {idx} exception: {signup_exc}")
+                    r3 = {"status": 0, "text": str(signup_exc), "cookies": {}, "sso": ""}
+                sso = _extract_sso(r3)
                 body_txt = str(r3.get("text") or "")
+                st = r3.get("status")
+                log(
+                    f"[hybrid] sign-up try {idx} status={st} sso_len={len(sso)} "
+                    f"elapsed={time.time() - t_try:.1f}s body={body_txt[:180]!r}"
+                )
+                if sso:
+                    try:
+                        save_next_action_to_capture(act, log)
+                    except Exception:
+                        pass
+                    break
+                low = body_txt.lower()
+                if any(
+                    k in low
+                    for k in (
+                        "already",
+                        "exists",
+                        "taken",
+                        "registered",
+                        "isloggedinwithsso",
+                        "email_already",
+                        "already_exists",
+                    )
+                ):
+                    log(
+                        f"[hybrid] email/account state blocks sign-up, stop candidates: "
+                        f"{body_txt[:240]}"
+                    )
+                    try:
+                        mark_outlook_registered(email, log)
+                    except Exception:
+                        pass
+                    break
+                if st == 404 or "server action not found" in low:
+                    log(f"[hybrid] next-action {act[:16]} invalid (404/not found), try next")
+                    continue
             log(
-                f"[hybrid] sign-up status={r3['status']} sso_len={len(sso)} "
+                f"[hybrid] sign-up final status={r3.get('status')} sso_len={len(sso)} "
                 f"elapsed={time.time() - t0:.1f}s"
             )
             if not sso:
@@ -279,6 +435,10 @@ def register_one_hybrid(
                 log(f"[hybrid] save file fail: {e}")
 
             log(f"[hybrid][+] OK {email}")
+            try:
+                mark_outlook_registered(email, log)
+            except Exception:
+                pass
             if post_success:
                 try:
                     # Export full browser jar (cf_clearance + sso) for CPA protocol mint
@@ -353,6 +513,15 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
         log(f"[*] 代理模式: {mode or 'direct'}（直连）")
 
     next_action = load_next_action_from_capture()
+    try:
+        registered = load_registered_emails()
+        if registered:
+            log(f"[hybrid] local already-registered emails: {len(registered)}")
+            for em in list(registered)[:200]:
+                mark_outlook_registered(em, None)
+            log("[hybrid] pre-marked Outlook pool entries that already appear in accounts*.txt")
+    except Exception as pre_exc:
+        log(f"[hybrid] pre-mark registered outlook fail: {pre_exc}")
     ua = str(engine.config.get("user_agent") or "")
     proxy = str(engine.config.get("proxy") or resolved_proxy or "")
 
@@ -386,8 +555,23 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
     except Exception as exc:
         log(f"[!] 混合任务异常: {exc}")
     finally:
+        # Stop browser immediately so Web「停止」不会留下 Chromium 僵尸进程
+        try:
+            if controller.should_stop():
+                engine.force_stop_registration(log_callback=log, reason="hybrid_job_stopped")
+            else:
+                engine.stop_browser(log_callback=log)
+        except Exception as stop_exc:
+            log(f"[!] hybrid finally stop browser: {stop_exc}")
+            try:
+                engine.force_kill_registration_browsers(log_callback=log)
+            except Exception:
+                pass
         # Don't block job end for long CPA browser mint (SSO already saved).
-        engine.wait_post_success_queue(timeout=45, log_callback=log)
+        try:
+            engine.wait_post_success_queue(timeout=15 if controller.should_stop() else 45, log_callback=log)
+        except Exception:
+            pass
         try:
             engine.cleanup_runtime_memory(log_callback=log, reason="混合任务结束")
         except Exception:

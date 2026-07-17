@@ -611,7 +611,7 @@ true;
             self._lg(f"[Debug] inject turnstile: {e}")
             return False
 
-    def get_turnstile_token(self, timeout: int = 90, inject: bool = True) -> str:
+    def get_turnstile_token(self, timeout: int = 90, inject: bool = True, cancel_callback=None) -> str:
         from grok_register_ttk import _get_page, getTurnstileToken
 
         page = _get_page()
@@ -620,9 +620,17 @@ true;
 
         # try official helper first (uses turnstilePatch click path)
         try:
-            tok = getTurnstileToken(log_callback=self.log)
+            tok = getTurnstileToken(log_callback=self.log, cancel_callback=cancel_callback)
             if tok and len(str(tok)) >= 80:
                 return str(tok)
+        except TypeError:
+            # older signature without cancel_callback
+            try:
+                tok = getTurnstileToken(log_callback=self.log)
+                if tok and len(str(tok)) >= 80:
+                    return str(tok)
+            except Exception as e:
+                self._lg(f"[Debug] getTurnstileToken: {e}")
         except Exception as e:
             self._lg(f"[Debug] getTurnstileToken: {e}")
 
@@ -664,6 +672,9 @@ return {
                         return val
             except Exception:
                 pass
+            if cancel_callback and cancel_callback():
+                self._lg("[!] turnstile cancelled by stop")
+                return ""
             time.sleep(1)
         self._lg("[!] turnstile timeout")
         return ""

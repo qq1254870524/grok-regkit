@@ -3678,16 +3678,80 @@ def stop_browser_proxy_bridge(log_callback=None):
 
 
 def stop_browser(log_callback=None):
+    """Close DrissionPage browser + local proxy bridge. Safe to call from stop button thread."""
     global browser, page, browser_started_with_proxy
-    if browser is not None:
-        try:
-            browser.quit(del_data=True)
-        except Exception:
-            pass
-    stop_browser_proxy_bridge(log_callback=log_callback)
+    _lg = log_callback if callable(log_callback) else None
+    b = browser
     browser = None
     page = None
     browser_started_with_proxy = False
+    if b is not None:
+        try:
+            b.quit(del_data=True)
+            if _lg:
+                _lg("[*] 浏览器已关闭")
+        except Exception as exc:
+            if _lg:
+                _lg(f"[!] browser.quit 失败: {exc}")
+    stop_browser_proxy_bridge(log_callback=log_callback)
+
+
+def force_kill_registration_browsers(log_callback=None):
+    """Kill leftover Chromium/Edge processes from DrissionPage registration sessions."""
+    _lg = log_callback if callable(log_callback) else (lambda m: None)
+    killed = []
+    if sys.platform != "win32":
+        return killed
+    try:
+        import subprocess
+
+        ps = r"""
+$pat = 'DrissionPage|userData|chromedriver|accounts.x.ai|grok-regkit'
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.Name -match '^(chrome|msedge|chromedriver)\.exe$' -and
+    $_.CommandLine -and ($_.CommandLine -match $pat)
+  } |
+  ForEach-Object {
+    try {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+      $_.ProcessId
+    } catch {}
+  }
+"""
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            stderr=subprocess.STDOUT,
+            timeout=20,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line.isdigit():
+                killed.append(int(line))
+        if killed:
+            _lg(f"[*] 已强制结束残留浏览器进程: {killed}")
+        else:
+            _lg("[*] 无匹配的残留浏览器进程")
+    except Exception as exc:
+        _lg(f"[!] 强制结束浏览器失败: {exc}")
+    return killed
+
+
+def force_stop_registration(log_callback=None, reason="user_stop"):
+    """Immediate stop used by Web 停止 button: flag consumers + kill browser now."""
+    _lg = log_callback if callable(log_callback) else (lambda m: None)
+    _lg(f"[!] force_stop_registration: {reason}")
+    try:
+        stop_browser(log_callback=_lg)
+    except Exception as exc:
+        _lg(f"[!] stop_browser in force_stop: {exc}")
+    try:
+        force_kill_registration_browsers(log_callback=_lg)
+    except Exception as exc:
+        _lg(f"[!] force_kill in force_stop: {exc}")
 
 
 def shutdown_browser():
@@ -3766,7 +3830,7 @@ function nodeText(node) {
         node.getAttribute('aria-label'),
         node.getAttribute('title'),
         node.getAttribute('href'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 function scoreEntry(node) {
     const compact = nodeText(node).replace(/\s+/g, '');
@@ -4053,7 +4117,7 @@ function textOf(node) {
         node.getAttribute('name'),
         node.getAttribute('id'),
         node.getAttribute('autocomplete'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 function describeInput(node) {
     return [
@@ -4063,7 +4127,7 @@ function describeInput(node) {
         `placeholder=${node.getAttribute('placeholder') || ''}`,
         `aria=${node.getAttribute('aria-label') || ''}`,
         `testid=${node.getAttribute('data-testid') || ''}`,
-    ].join(' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    ].join(' ').replace(/\\s+/g, ' ').trim().slice(0, 160);
 }
 function describeAction(node) {
     return textOf(node).slice(0, 120);
@@ -4150,7 +4214,7 @@ function nodeText(node) {
         node.getAttribute('aria-label'),
         node.getAttribute('title'),
         node.getAttribute('href'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 function scoreEntry(node) {
     const compact = nodeText(node).replace(/\s+/g, '');
@@ -4209,7 +4273,7 @@ function textOf(node) {
         node.getAttribute('name'),
         node.getAttribute('id'),
         node.getAttribute('autocomplete'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 function emailCandidates() {
     const direct = Array.from(document.querySelectorAll('input[data-testid="email"], input[name="email"], input[type="email"], input[autocomplete="email"], input[placeholder*="mail" i], input[aria-label*="mail" i]'));
@@ -4691,7 +4755,7 @@ function buttonText(node) {
         node.getAttribute('value'),
         node.getAttribute('aria-label'),
         node.getAttribute('title'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
@@ -4813,7 +4877,7 @@ function buttonText(node) {
         node.getAttribute('value'),
         node.getAttribute('aria-label'),
         node.getAttribute('title'),
-    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
 }
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]')).filter((node) => {
     return isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true';
@@ -5338,14 +5402,26 @@ class GrokRegisterGUI:
 
 
 class CliStopController:
-    def __init__(self):
+    def __init__(self, log_callback=None):
         self.stop_requested = False
+        self._log = log_callback
 
     def should_stop(self):
         return self.stop_requested
 
-    def stop(self):
+    def stop(self, force_cleanup=True):
         self.stop_requested = True
+        if force_cleanup:
+            try:
+                force_stop_registration(
+                    log_callback=self._log,
+                    reason="CliStopController.stop",
+                )
+            except Exception:
+                try:
+                    stop_browser(log_callback=self._log)
+                except Exception:
+                    pass
 
 
 def cli_log(message):
@@ -5542,7 +5618,17 @@ def run_registration_job(count, log_callback=None, controller=None):
     finally:
         # 浏览器关掉前先尽量完成后台入池/CPA/NSFW（不依赖 page）
         wait_post_success_queue(timeout=300, log_callback=log)
-        cleanup_runtime_memory(log_callback=log, reason="任务结束")
+        try:
+            if controller.should_stop():
+                force_stop_registration(log_callback=log, reason="browser_job_stopped")
+            else:
+                cleanup_runtime_memory(log_callback=log, reason="任务结束")
+        except Exception as fin_exc:
+            log(f"[!] job finally cleanup: {fin_exc}")
+            try:
+                force_kill_registration_browsers(log_callback=log)
+            except Exception:
+                pass
         log(f"[*] 任务结束。成功 {success_count} | 失败 {fail_count}")
     return {
         "success": success_count,

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Outlook / Microsoft personal mailbox provider (password+TOTP or refresh_token).
 
 Account line formats:
@@ -464,7 +464,7 @@ class OutlookAccountPool:
             last_err = None
             for i in range(n):
                 acc = self.accounts[(self._idx + i) % n]
-                if acc.status in ("bad",) or acc.cooldown_until > _now() or acc.status == "in_use":
+                if acc.status in ("bad", "registered") or acc.cooldown_until > _now() or acc.status == "in_use":
                     continue
                 try:
                     src = "refresh_token" if acc.refresh_token else "password+totp"
@@ -494,6 +494,8 @@ class OutlookAccountPool:
                 if acc.identity() == email.lower():
                     if bad:
                         acc.status = "bad"
+                    elif acc.status == "registered":
+                        pass
                     else:
                         acc.status = "idle"
                         if not ok:

@@ -315,7 +315,10 @@ class ConfigBody(BaseModel):
 
 def _run_job(count: int) -> None:
     global _controller
-    controller = engine.CliStopController()
+    def log_cb_early(msg: str) -> None:
+        _append_log(str(msg))
+
+    controller = engine.CliStopController(log_callback=log_cb_early)
     with _job_lock:
         _controller = controller
         _job_state["running"] = True
@@ -669,12 +672,48 @@ async def api_stop(x_access_key: Optional[str] = Header(None)):
     _require_auth(x_access_key)
     with _job_lock:
         ctrl = _controller
-        running = _job_state["running"]
-    if not running or ctrl is None:
-        return {"ok": True, "stopped": False, "detail": "no running job"}
-    ctrl.stop()
+        running = bool(_job_state.get("running"))
+    # Always try hard cleanup: even if job state is stale, kill browsers.
     _append_log("[!] stop requested from web")
-    return {"ok": True, "stopped": True}
+    try:
+        if ctrl is not None:
+            ctrl.stop(force_cleanup=True)
+        else:
+            engine.force_stop_registration(
+                log_callback=_append_log, reason="web_stop_no_controller"
+            )
+    except TypeError:
+        # older controller without force_cleanup kw
+        try:
+            if ctrl is not None:
+                ctrl.stop()
+        except Exception:
+            pass
+        try:
+            engine.force_stop_registration(
+                log_callback=_append_log, reason="web_stop_fallback"
+            )
+        except Exception as exc:
+            _append_log(f"[!] force_stop after stop failed: {exc}")
+    except Exception as exc:
+        _append_log(f"[!] stop cleanup error: {exc}")
+        try:
+            engine.force_stop_registration(
+                log_callback=_append_log, reason="web_stop_exception"
+            )
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "stopped": bool(running or ctrl is not None),
+        "running_was": running,
+        "had_controller": ctrl is not None,
+        "detail": (
+            "stopped and browser cleanup attempted"
+            if (running or ctrl is not None)
+            else "no running job (browser cleanup attempted)"
+        ),
+    }
 
 
 @app.get("/api/logs")
