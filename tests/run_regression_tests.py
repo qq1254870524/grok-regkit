@@ -139,12 +139,45 @@ class RegressionTests(unittest.TestCase):
                 'data: {"type":"error","error":"upstream unavailable"}',
             ]),
         ], logs)
-        with self.assertRaisesRegex(RuntimeError, '已创建 account_id=22.*可用性验证失败'):
-            client.import_grok_sso(
-                'sso', email='bad@example.com', verify_attempts=1,
-                verify_retry_delay_sec=0,
+        # Default: create success is import success; verify fail only warns.
+        result = client.import_grok_sso(
+            'sso', email='bad@example.com', verify_attempts=1,
+            verify_retry_delay_sec=0,
+        )
+        self.assertTrue(result['ok'])
+        self.assertFalse(result['usable'])
+        self.assertEqual(result['account_id'], 22)
+        joined = '\n'.join(logs)
+        self.assertIn('账号已创建但可用性验证失败', joined)
+        self.assertIn('入池成功(创建完成/可用性待观察)', joined)
+        self.assertNotIn('private-password', joined)
+
+        # Optional hard gate still available.
+        logs2 = []
+        client2 = build_client([
+            FakeResponse(200, {'code': 0, 'data': {'access_token': 'token.value.test'}}),
+            FakeResponse(200, {'code': 0, 'data': {'created': [{'account': {'id': 23}}], 'failed': []}}),
+            FakeResponse(200, {}, lines=[
+                'data: {"type":"test_start","model":"grok-4.5"}',
+                'data: {"type":"error","error":"upstream unavailable"}',
+            ]),
+        ], logs2)
+        with self.assertRaisesRegex(RuntimeError, '已创建 account_id=23.*可用性验证失败'):
+            client2.import_grok_sso(
+                'sso', email='bad2@example.com', verify_attempts=1,
+                verify_retry_delay_sec=0, require_verify_success=True,
             )
-        self.assertFalse(any('入池可用' in line for line in logs))
+
+    def test_sso_prefix_is_stripped(self):
+        client = build_client([
+            FakeResponse(200, {'code': 0, 'data': {'access_token': 'token.value.test'}}),
+            FakeResponse(200, {'code': 0, 'data': {'created': [{'account': {'id': 31}}], 'failed': []}}),
+        ], [])
+        result = client.import_grok_sso(
+            'sso=session.jwt.value', email='prefix@example.com', verify_after_import=False
+        )
+        self.assertTrue(result['ok'])
+        self.assertEqual(client.session.calls[1][2]['json']['sso_tokens'], ['session.jwt.value'])
 
     def test_stop_race_does_not_call_new_tab(self):
         import grok_register_ttk as engine

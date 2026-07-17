@@ -775,7 +775,8 @@
             <div class="section-sub" style="margin-bottom:10px"><b>Sub2API Grok OAuth 入池</b>：使用注册成功后的 SSO 调用官方 sso-to-oauth 接口</div>
             <div class="form-grid two">
               <label class="check-row span-2"><input id="sub2api_auto_add" type="checkbox" checked /> 注册成功后自动加入 Sub2API（默认开启）</label>
-              <label class="check-row span-2"><input id="sub2api_verify_after_add" type="checkbox" checked /> 导入后直接测试账号可用性；只有测试通过才记录“入池可用”</label>
+              <label class="check-row span-2"><input id="sub2api_verify_after_add" type="checkbox" checked /> 导入后测试可用性（失败仅告警，不撤销已创建账号）</label>
+              <label class="check-row span-2"><input id="sub2api_require_verify_success" type="checkbox" /> 强制：可用性测试失败则把入池记为失败（默认关闭，仅诊断）</label>
               <div class="field span-2">
                 <div class="label">Sub2API 地址</div>
                 <input id="sub2api_base_url" type="text" value="http://127.0.0.1:8080" />
@@ -821,7 +822,7 @@
           <div class="tips">
             <p>· grok2api 内网优先：<code class="inline">http://127.0.0.1:8010</code>；Sub2API 默认：<code class="inline">http://127.0.0.1:8080</code></p>
             <p>· 密钥/密码显示星号表示已保存，不改则保留。</p>
-            <p>· Sub2API 入池失败只记录日志并保留注册成功账号，不会回滚成功结果。</p>
+            <p>· Sub2API SSO→OAuth 创建成功即视为入池成功；可用性测试失败默认只告警、不撤销账号，也不影响注册成功结果。</p>
           </div>
         </div>
       </div>
@@ -1248,6 +1249,7 @@
       setVal('sub2api_priority', c.sub2api_priority != null ? c.sub2api_priority : 1);
       setVal('sub2api_timeout_sec', c.sub2api_timeout_sec || 60);
       setVal('sub2api_verify_after_add', c.sub2api_verify_after_add !== false);
+    setVal('sub2api_require_verify_success', c.sub2api_require_verify_success === true);
       setVal('sub2api_verify_attempts', c.sub2api_verify_attempts || 2);
       setVal('sub2api_verify_timeout_sec', c.sub2api_verify_timeout_sec || 105);
       setVal('sub2api_verify_retry_delay_sec', c.sub2api_verify_retry_delay_sec != null ? c.sub2api_verify_retry_delay_sec : 3);

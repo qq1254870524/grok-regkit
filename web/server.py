@@ -344,6 +344,7 @@ class ConfigBody(BaseModel):
     sub2api_priority: Optional[int] = None
     sub2api_timeout_sec: Optional[int] = None
     sub2api_verify_after_add: Optional[bool] = None
+    sub2api_require_verify_success: Optional[bool] = None
     sub2api_verify_attempts: Optional[int] = None
     sub2api_verify_timeout_sec: Optional[int] = None
     sub2api_verify_retry_delay_sec: Optional[int] = None

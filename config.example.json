@@ -28,6 +28,7 @@
     "sub2api_priority": 1,
     "sub2api_timeout_sec": 60,
     "sub2api_verify_after_add": true,
+  "sub2api_require_verify_success": false,
     "sub2api_verify_attempts": 2,
     "sub2api_verify_timeout_sec": 105,
     "sub2api_verify_retry_delay_sec": 3,

@@ -5,6 +5,7 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-18a: Sub2API create-success is import success; verify fail warns only unless require_verify_success.
 - 2026-07-17g: Sub2API import now uses the current sso_tokens array contract and
   performs a direct per-account usability test before reporting the pool entry usable.
 - 2026-07-17f: 修复 AOL 账号池 source_file 构造参数遗漏；修复停止时浏览器已关闭但
@@ -175,6 +176,7 @@ DEFAULT_CONFIG = {
     "sub2api_priority": 1,
     "sub2api_timeout_sec": 60,
     "sub2api_verify_after_add": True,
+    "sub2api_require_verify_success": False,
     "sub2api_verify_attempts": 2,
     "sub2api_verify_timeout_sec": 105,
     "sub2api_verify_retry_delay_sec": 3,
