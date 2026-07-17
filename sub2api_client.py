@@ -3,6 +3,9 @@
 """Sub2API Grok SSO -> OAuth importer.
 
 Changelog:
+- 2026-07-18b: wait briefly before first post-import verify to reduce transient
+  permission-denied/forbidden false negatives on brand-new Grok accounts; keep
+  create-success as import success by default.
 - 2026-07-18a: treat SSO->OAuth account creation as import success. Availability
   testing still runs by default for diagnostics, but verify failure only warns
   and keeps the created account. Optional ``sub2api_require_verify_success``
@@ -315,10 +318,14 @@ class Sub2APIClient:
                     except Exception:
                         pass
 
+            hint = ""
+            low = str(last_error or "").lower()
+            if any(x in low for x in ("forbidden", "permission", "access to the chat endpoint is denied", "denied")):
+                hint = "（常见于新号刚入池时上游瞬时拒绝，不等于导入失败；账号通常已创建）"
             _log(
                 self.log_callback,
                 f"[!] Sub2API 可用性验证未通过 account_id={account_id_text} "
-                f"attempt={attempt}/{max_attempts} detail={last_error}",
+                f"attempt={attempt}/{max_attempts} detail={last_error}{hint}",
             )
             if attempt < max_attempts and retry_delay > 0:
                 time.sleep(retry_delay)
@@ -401,6 +408,17 @@ class Sub2APIClient:
                 )
                 verification: Dict[str, Any]
                 if verify_after_import:
+                    # Newly created Grok OAuth accounts can briefly reject chat
+                    # with permission-denied/forbidden right after SSO convert.
+                    # A short settle delay materially reduces false "unusable".
+                    settle_sec = max(0.0, min(8.0, float(verify_retry_delay_sec or 0) + 2.0))
+                    if settle_sec > 0:
+                        _log(
+                            self.log_callback,
+                            f"[*] Sub2API 入池后等待 {settle_sec:.1f}s 再做可用性验证 "
+                            f"account_id={account_id or '-'}",
+                        )
+                        time.sleep(settle_sec)
                     verification = self.verify_grok_account(
                         account_id,
                         attempts=verify_attempts,

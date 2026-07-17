@@ -140,10 +140,18 @@ class RegressionTests(unittest.TestCase):
             ]),
         ], logs)
         # Default: create success is import success; verify fail only warns.
-        result = client.import_grok_sso(
-            'sso', email='bad@example.com', verify_attempts=1,
-            verify_retry_delay_sec=0,
-        )
+        sleeps = []
+        import sub2api_client as s2
+        old_sleep = s2.time.sleep
+        s2.time.sleep = lambda sec: sleeps.append(sec)
+        try:
+            result = client.import_grok_sso(
+                'sso', email='bad@example.com', verify_attempts=1,
+                verify_retry_delay_sec=0,
+            )
+        finally:
+            s2.time.sleep = old_sleep
+        self.assertTrue(any(sec > 0 for sec in sleeps))
         self.assertTrue(result['ok'])
         self.assertFalse(result['usable'])
         self.assertEqual(result['account_id'], 22)
@@ -162,11 +170,17 @@ class RegressionTests(unittest.TestCase):
                 'data: {"type":"error","error":"upstream unavailable"}',
             ]),
         ], logs2)
-        with self.assertRaisesRegex(RuntimeError, '已创建 account_id=23.*可用性验证失败'):
-            client2.import_grok_sso(
-                'sso', email='bad2@example.com', verify_attempts=1,
-                verify_retry_delay_sec=0, require_verify_success=True,
-            )
+        import sub2api_client as s2
+        old_sleep = s2.time.sleep
+        s2.time.sleep = lambda sec: None
+        try:
+            with self.assertRaisesRegex(RuntimeError, '已创建 account_id=23.*可用性验证失败'):
+                client2.import_grok_sso(
+                    'sso', email='bad2@example.com', verify_attempts=1,
+                    verify_retry_delay_sec=0, require_verify_success=True,
+                )
+        finally:
+            s2.time.sleep = old_sleep
 
     def test_sso_prefix_is_stripped(self):
         client = build_client([
@@ -209,7 +223,26 @@ class RegressionTests(unittest.TestCase):
             engine.browser = old_browser
             engine.browser_started_with_proxy = old_proxy
 
+    def test_web_progress_log_updates_job_state(self):
+        import web.server as server
+
+        original = dict(server._job_state)
+        try:
+            server._job_state["running"] = True
+            server._job_state["success"] = 0
+            server._job_state["fail"] = 0
+            server._update_job_progress_from_log("[*] 当前统计: 成功 2 | 失败 1")
+            self.assertEqual(server._job_state["success"], 2)
+            self.assertEqual(server._job_state["fail"], 1)
+            server._update_job_progress_from_log("[*] 混合任务结束。成功 3 | 失败 2")
+            self.assertEqual(server._job_state["success"], 3)
+            self.assertEqual(server._job_state["fail"], 2)
+        finally:
+            server._job_state.clear()
+            server._job_state.update(original)
+
     def test_web_stop_only_stops_registration_controller(self):
+
         import asyncio
         import web.server as server
 

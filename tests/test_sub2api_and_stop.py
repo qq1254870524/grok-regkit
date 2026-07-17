@@ -176,14 +176,22 @@ def test_created_but_unusable_is_not_reported_as_success():
         ],
         logs,
     )
-    with pytest.raises(RuntimeError, match="已创建 account_id=22.*可用性验证失败"):
-        client.import_grok_sso(
+    import sub2api_client as s2
+    old_sleep = s2.time.sleep
+    s2.time.sleep = lambda sec: None
+    try:
+        result = client.import_grok_sso(
             "sso",
             email="bad@example.com",
             verify_attempts=1,
             verify_retry_delay_sec=0,
         )
-    assert not any("入池可用" in line for line in logs)
+    finally:
+        s2.time.sleep = old_sleep
+    assert result["ok"] is True
+    assert result["usable"] is False
+    joined = "\n".join(logs)
+    assert "账号已创建但可用性验证失败" in joined
 
 
 def test_stop_race_does_not_call_new_tab(monkeypatch):

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
+2026-07-18b: parse hybrid/browser progress logs and update success/fail in
+_job_state while a job is running, so Web UI metrics refresh in real time.
 2026-07-17b: added Sub2API post-import usability verification settings.
 2026-07-17: added Sub2API SSO-to-OAuth settings; password is masked and preserved
 when the Web UI submits the masked placeholder.
@@ -10,6 +12,7 @@ when the Web UI submits the masked placeholder.
 from __future__ import annotations
 
 import asyncio
+import re
 import collections
 import hashlib
 import json
@@ -105,6 +108,25 @@ def _append_log(message: str) -> None:
         _log_buffer.append(line)
         _log_seq += 1
         _log_cond.notify_all()
+
+
+_PROGRESS_RE = re.compile(
+    r"(?:当前统计|混合任务结束|任务结束)[^0-9]{0,12}成功\s*(\d+)\s*\|\s*失败\s*(\d+)"
+)
+
+
+def _update_job_progress_from_log(message: str) -> None:
+    """Keep Web success/fail metrics live while registration is running."""
+    text = str(message or "")
+    match = _PROGRESS_RE.search(text)
+    if not match:
+        return
+    success = int(match.group(1))
+    fail = int(match.group(2))
+    with _job_lock:
+        # Always accept progress while running; also keep final end-of-job lines.
+        _job_state["success"] = success
+        _job_state["fail"] = fail
 
 
 def _mask_value(key: str, value: Any) -> Any:
@@ -382,7 +404,9 @@ def _run_job(count: int) -> None:
         _job_state["finished_at"] = None
 
     def log_cb(msg: str) -> None:
-        _append_log(str(msg))
+        text = str(msg)
+        _append_log(text)
+        _update_job_progress_from_log(text)
 
     try:
         engine.load_config()
