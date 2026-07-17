@@ -10,6 +10,7 @@ create/acquire: rent mailbox from pool, IMAP LOGIN
 poll_code: IMAP INBOX + Junk/Spam/Bulk, extract xAI/Grok code
 
 Changelog:
+- 2026-07-18a: detailed mailbox login failure logs (provider/auth path/exception type/raw error, no masking); classify credential/network/timeout.
 - 2026-07-17e: build_pool 文件优先；登录失败/注册成功删除后实时同步内存+文件+config，避免重载复活。
 - 2026-07-17d: 删除邮箱后同步写回 aol_accounts 文件 + config.aol_accounts 文本；避免 force_reload 把已删邮箱重新加载回来。
 - 2026-07-17c: 登录失败/注册成功后从账号池文件永久删除该行；内存+磁盘同步。
@@ -217,6 +218,43 @@ def extract_code(text: str = "", subject: str = "") -> Optional[str]:
     return None
 
 
+
+
+def classify_aol_login_error(exc: BaseException) -> dict:
+    """Return structured login failure reason for logs. Never masks upstream text."""
+    msg = str(exc or '')
+    msg_l = msg.lower()
+    et = type(exc).__name__
+    category = 'unknown'
+    if any(x in msg for x in ('AUTHENTICATIONFAILED', 'Invalid credentials', 'LOGIN failed')) or 'authentication failed' in msg_l:
+        category = 'credential_invalid'
+    elif any(x in msg_l for x in ('timed out', 'timeout', 'temporarily unavailable', 'connection reset', 'eof occurred', 'ssl', 'network', 'unreachable', 'name or service not known')):
+        category = 'network_or_timeout'
+    elif 'pool empty' in msg_l or 'no available account' in msg_l:
+        category = 'pool_empty'
+    permanent = category == 'credential_invalid'
+    return {
+        'provider': 'aol',
+        'protocol': 'IMAP',
+        'host': 'imap.aol.com',
+        'port': 993,
+        'auth_path': 'IMAP password/app-password',
+        'exception_type': et,
+        'category': category,
+        'permanent': permanent,
+        'raw_error': msg,
+    }
+
+
+def format_aol_login_error(email: str, exc: BaseException, *, stage: str = 'login') -> str:
+    info = classify_aol_login_error(exc)
+    return (
+        f"[!] AOL {stage} FAIL email={email or '-'} provider=aol protocol=IMAP "
+        f"host={info['host']}:{info['port']} auth={info['auth_path']} "
+        f"category={info['category']} permanent={int(bool(info['permanent']))} "
+        f"exc={info['exception_type']} raw={info['raw_error']}"
+    )
+
 class AolImapSession:
     """IMAP SSL session for AOL (imap.aol.com)."""
 
@@ -245,12 +283,19 @@ class AolImapSession:
         _log(self.log_callback, msg)
 
     def connect_login(self) -> None:
-        self._lg(f"[*] AOL IMAP connect {self.HOST}:{self.PORT} email={self.email}")
+        self._lg(
+            f"[*] AOL IMAP connect host={self.HOST} port={self.PORT} timeout={self.timeout}s "
+            f"email={self.email} auth=IMAP password/app-password"
+        )
         ctx = ssl.create_default_context()
-        self.M = imaplib.IMAP4_SSL(self.HOST, self.PORT, ssl_context=ctx, timeout=self.timeout)
-        self.M.sock.settimeout(self.timeout)
-        typ, data = self.M.login(self.email, self.password)
-        self._lg(f"[+] AOL IMAP login OK email={self.email} typ={typ} data={data}")
+        try:
+            self.M = imaplib.IMAP4_SSL(self.HOST, self.PORT, ssl_context=ctx, timeout=self.timeout)
+            self.M.sock.settimeout(self.timeout)
+            typ, data = self.M.login(self.email, self.password)
+            self._lg(f"[+] AOL IMAP login OK email={self.email} typ={typ} data={data}")
+        except Exception as exc:
+            self._lg(format_aol_login_error(self.email, exc, stage='IMAP connect/login'))
+            raise
 
     def logout(self) -> None:
         if not self.M:
@@ -437,6 +482,10 @@ class AolAccountPool:
 
     def ensure_login(self, acc: AolAccount) -> AolAccount:
         """Validate IMAP credentials (login + logout)."""
+        self._lg(
+            f"[*] AOL ensure_login start email={acc.email} protocol=IMAP "
+            f"host=imap.aol.com:993 auth=password/app-password has_totp={int(bool(acc.totp_secret))}"
+        )
         sess = AolImapSession(acc.email, acc.password, log_callback=self.log_callback)
         try:
             sess.connect_login()
@@ -446,6 +495,14 @@ class AolAccountPool:
                 f"[+] AOL preflight login OK email={acc.email} folders={len(folders)} "
                 f"sample={folders[:8]}"
             )
+        except Exception as exc:
+            info = classify_aol_login_error(exc)
+            self._lg(format_aol_login_error(acc.email, exc, stage='ensure_login'))
+            self._lg(
+                f"[*] AOL ensure_login classify email={acc.email} category={info['category']} "
+                f"permanent={int(bool(info['permanent']))} exc={info['exception_type']}"
+            )
+            raise
         finally:
             sess.logout()
         return acc
@@ -491,17 +548,20 @@ class AolAccountPool:
                 except Exception as exc:
                     last_err = exc
                     acc.last_error = str(exc)
+                    info = classify_aol_login_error(exc)
                     msg = str(exc)
-                    auth_fail = (
+                    auth_fail = bool(info.get('permanent')) or (
                         "AUTHENTICATIONFAILED" in msg
                         or "Invalid credentials" in msg
                         or "LOGIN failed" in msg
                         or "authentication failed" in msg.lower()
                     )
+                    self._lg(format_aol_login_error(acc.email, exc, stage='acquire'))
                     if auth_fail:
                         self._lg(
-                            f"[!] AOL IMAP 登录失败，立即从账号池删除(内存+文件+配置)并换下一个 | email={acc.email} | "
-                            f"err={exc}"
+                            f"[!] AOL IMAP 登录失败(凭据类)，立即从账号池删除(内存+文件+配置)并换下一个 | "
+                            f"email={acc.email} category={info.get('category')} "
+                            f"exc={info.get('exception_type')} raw={info.get('raw_error')}"
                         )
                         self.accounts = [a for a in self.accounts if a.identity() != acc.identity()]
                         try:
@@ -515,12 +575,14 @@ class AolAccountPool:
                         acc.status = "idle"
                         acc.cooldown_until = _now() + 120
                         self._lg(
-                            f"[!] AOL 临时失败，冷却 120s 后可再试 | email={acc.email} | err={exc}"
+                            f"[!] AOL 临时失败(非凭据)，冷却 120s 后可再试 | email={acc.email} "
+                            f"category={info.get('category')} exc={info.get('exception_type')} "
+                            f"raw={info.get('raw_error')}"
                         )
                         self._idx = (self._idx + 1) % max(1, len(self.accounts))
                     self._lg(
                         f"[*] AOL 继续尝试池内下一个账号 | tried={acc.email} | "
-                        f"pool={len(self.accounts)}"
+                        f"pool={len(self.accounts)} last_category={info.get('category')}"
                     )
             raise Exception(f"AOL no available account (all login failed): {last_err}")
 
@@ -689,14 +751,20 @@ def get_email_and_token(config: dict, proxies=None, log_callback=None) -> Tuple[
 def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None, top: int = 15) -> dict:
     pool = get_pool(config, log_callback=log_callback)
     em, password = pool.resolve_credentials(email, token_blob)
+    has_pw = bool(str(password or '').strip())
     _log(
         log_callback,
-        f"[*] AOL preflight start email={em} protocol=IMAP host=imap.aol.com "
+        f"[*] AOL preflight start email={em} protocol=IMAP host=imap.aol.com:993 "
+        f"auth=password/app-password has_password={int(has_pw)} password_len={len(str(password or ''))} "
         f"scanned_folders=ALL IMAP folders top={int(top)}",
     )
     sess = AolImapSession(em, password, log_callback=log_callback)
     try:
-        sess.connect_login()
+        try:
+            sess.connect_login()
+        except Exception as exc:
+            _log(log_callback, format_aol_login_error(em, exc, stage='preflight'))
+            raise
         msgs = sess.fetch_recent(top_per_folder=int(top))
         for i, msg in enumerate(msgs[:12]):
             xai = is_xai_related(msg.get("subject") or "", msg.get("body") or "", msg.get("from") or "")

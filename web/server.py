@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
+2026-07-18e: job metrics add pending_sso/skipped; progress regex parses extended
+stats; POST /api/pending-sso/recover starts secondary SSO recovery job.
 2026-07-18d: Sub2API pool status in /api/integration (healthy/count/open URL),
 pending-SSO account files in /api/accounts, dedicated /api/sub2api/status.
 2026-07-18b: parse hybrid/browser progress logs and update success/fail in
 _job_state while a job is running, so Web UI metrics refresh in real time.
 2026-07-18c: added CPA OAuth JSON directory import API for Sub2API.
+2026-07-18f: UI docs for CPA raw vs sub2api-data; mailbox login failure detail logs in providers.
+2026-07-18g: Sub2API probe 401/fingerprint 强制 invalidate + 重登，恢复 account_count 显示。
 2026-07-17b: added Sub2API post-import usability verification settings.
 2026-07-17: added Sub2API SSO-to-OAuth settings; password is masked and preserved
 when the Web UI submits the masked placeholder.
@@ -81,7 +85,10 @@ _job_state: Dict[str, Any] = {
     "running": False,
     "success": 0,
     "fail": 0,
+    "pending_sso": 0,
+    "skipped": 0,
     "target": 0,
+    "job_kind": "",
     "last_accounts_file": "",
     "started_at": None,
     "finished_at": None,
@@ -114,22 +121,30 @@ def _append_log(message: str) -> None:
 
 
 _PROGRESS_RE = re.compile(
-    r"(?:当前统计|混合任务结束|任务结束)[^0-9]{0,12}成功\s*(\d+)\s*\|\s*失败\s*(\d+)"
+    r"(?:当前统计|混合任务结束|任务结束|pending_sso 恢复结束)[^0-9]{0,20}"
+    r"成功\s*(\d+)\s*\|\s*失败\s*(\d+)"
+    r"(?:\s*\|\s*pending_sso\s*(\d+))?"
+    r"(?:\s*\|\s*跳过\(池空\)\s*(\d+))?"
 )
 
 
 def _update_job_progress_from_log(message: str) -> None:
-    """Keep Web success/fail metrics live while registration is running."""
+    """Keep Web success/fail/pending/skipped metrics live while a job is running."""
     text = str(message or "")
     match = _PROGRESS_RE.search(text)
     if not match:
         return
     success = int(match.group(1))
     fail = int(match.group(2))
+    pending = match.group(3)
+    skipped = match.group(4)
     with _job_lock:
-        # Always accept progress while running; also keep final end-of-job lines.
         _job_state["success"] = success
         _job_state["fail"] = fail
+        if pending is not None:
+            _job_state["pending_sso"] = int(pending)
+        if skipped is not None:
+            _job_state["skipped"] = int(skipped)
 
 
 def _mask_value(key: str, value: Any) -> Any:
@@ -392,7 +407,7 @@ class ConfigBody(BaseModel):
     aol_accounts_file: Optional[str] = None
 
 
-def _run_job(count: int) -> None:
+def _run_job(count: int, job_kind: str = "register") -> None:
     global _controller
     def log_cb_early(msg: str) -> None:
         _append_log(str(msg))
@@ -403,7 +418,10 @@ def _run_job(count: int) -> None:
         _job_state["running"] = True
         _job_state["success"] = 0
         _job_state["fail"] = 0
+        _job_state["pending_sso"] = 0
+        _job_state["skipped"] = 0
         _job_state["target"] = count
+        _job_state["job_kind"] = job_kind
         _job_state["error"] = ""
         _job_state["started_at"] = time.time()
         _job_state["finished_at"] = None
@@ -415,12 +433,20 @@ def _run_job(count: int) -> None:
 
     try:
         engine.load_config()
-        result = engine.run_registration_job(
-            count, log_callback=log_cb, controller=controller
-        )
+        if job_kind == "pending_sso_recovery":
+            from pending_sso_recovery import run_pending_sso_recovery_job
+            result = run_pending_sso_recovery_job(
+                count, log_callback=log_cb, controller=controller
+            )
+        else:
+            result = engine.run_registration_job(
+                count, log_callback=log_cb, controller=controller
+            )
         with _job_lock:
             _job_state["success"] = int(result.get("success") or 0)
             _job_state["fail"] = int(result.get("fail") or 0)
+            _job_state["pending_sso"] = int(result.get("pending_sso") or 0)
+            _job_state["skipped"] = int(result.get("skipped") or 0)
             _job_state["last_accounts_file"] = str(result.get("accounts_file") or "")
     except Exception as exc:
         _append_log(f"[!] job error: {exc}")
@@ -584,10 +610,31 @@ def _probe_sub2api(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return result
 
     try:
-        from sub2api_client import get_client
+        from sub2api_client import get_client, invalidate_client_cache
 
         client = get_client(cfg, log_callback=None)
-        listed = client.list_accounts(platform="grok", page=1, page_size=1)
+        try:
+            listed = client.list_accounts(platform="grok", page=1, page_size=1)
+        except Exception as first_exc:
+            msg = str(first_exc)
+            if (
+                "401" in msg
+                or "fingerprint" in msg.lower()
+                or "please login again" in msg.lower()
+                or "unauthorized" in msg.lower()
+            ):
+                try:
+                    invalidate_client_cache(cfg)
+                except Exception:
+                    pass
+                client = get_client(cfg, log_callback=None, force_new=True)
+                try:
+                    client.invalidate_auth(reset_session=True, reason="probe_retry")
+                except Exception:
+                    pass
+                listed = client.list_accounts(platform="grok", page=1, page_size=1)
+            else:
+                raise
         raw = listed.get("raw") if isinstance(listed.get("raw"), dict) else {}
         total = raw.get("total")
         if total is None and isinstance(raw.get("pagination"), dict):
@@ -1052,6 +1099,34 @@ async def api_sub2api_import_cpa(body: CpaImportBody, x_access_key: Optional[str
     except Exception as exc:
         _job_log(f"[!] Sub2API CPA 导入异常: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=str(exc)[:500]) from exc
+
+
+class PendingRecoverBody(BaseModel):
+    count: int = Field(0, ge=0, le=500)
+
+
+@app.post("/api/pending-sso/recover")
+async def api_pending_sso_recover(
+    body: PendingRecoverBody = PendingRecoverBody(),
+    x_access_key: Optional[str] = Header(None),
+):
+    """Start secondary SSO recovery for pending accounts."""
+    global _job_thread
+    _require_auth(x_access_key)
+    with _job_lock:
+        if _job_state["running"]:
+            raise HTTPException(status_code=409, detail="job already running")
+        count = int(body.count or 0)
+        _append_log(f"[*] starting pending_sso recovery count={count or 'all'}")
+        t = threading.Thread(
+            target=_run_job,
+            args=(count,),
+            kwargs={"job_kind": "pending_sso_recovery"},
+            daemon=True,
+        )
+        _job_thread = t
+        t.start()
+    return {"ok": True, "started": True, "count": count, "job_kind": "pending_sso_recovery"}
 
 
 @app.get("/api/accounts")

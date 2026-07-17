@@ -296,6 +296,7 @@ class Sub2APIClient:
         self.log_callback = log_callback
         self._access_token = ""
         self._token_expires_at = 0.0
+        self._ensure_stable_session_headers()
         self._validate_config()
 
     def _validate_config(self) -> None:
@@ -321,6 +322,49 @@ class Sub2APIClient:
             raise RuntimeError(f"Sub2API JSON 结构无效 status={response.status_code}")
         return response, payload
 
+
+    def _ensure_stable_session_headers(self) -> None:
+        """Keep a stable browser-like UA so Sub2API session binding does not thrash."""
+        headers = getattr(self.session, "headers", None)
+        if headers is None:
+            return
+        ua = str(headers.get("User-Agent") or headers.get("user-agent") or "").strip()
+        if not ua or ua.lower().startswith("python-requests"):
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36 grok-regkit-sub2api"
+            )
+        headers.setdefault("Accept", "application/json, text/plain, */*")
+        headers.setdefault("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+
+    def invalidate_auth(self, *, reset_session: bool = False, reason: str = "") -> None:
+        """Drop cached token; optionally rebuild Session after fingerprint mismatch."""
+        self._access_token = ""
+        self._token_expires_at = 0.0
+        if reset_session:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = requests.Session()
+            self._ensure_stable_session_headers()
+        if reason:
+            _log(self.log_callback, f"[*] Sub2API invalidate_auth reason={reason} reset_session={int(bool(reset_session))}")
+
+    @staticmethod
+    def _is_auth_failure(status_code: int, detail: Any = None) -> bool:
+        if int(status_code or 0) == 401:
+            return True
+        text = str(detail or "").lower()
+        return (
+            "fingerprint" in text
+            or "please login again" in text
+            or "unauthorized" in text
+            or "token is invalid" in text
+            or "token expired" in text
+        )
+
     def login(self, *, force: bool = False) -> str:
         now = time.time()
         if not force and self._access_token and self._token_expires_at > now + 30:
@@ -335,6 +379,8 @@ class Sub2APIClient:
         token = str(data.get("access_token") or "").strip()
         if response.status_code >= 400 or int(payload.get("code", -1)) != 0 or not token:
             detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
+            if self._is_auth_failure(response.status_code, detail):
+                self.invalidate_auth(reset_session=True, reason=f"login_fail status={response.status_code}")
             raise RuntimeError(f"Sub2API 登录失败 status={response.status_code} detail={detail}")
         exp = _jwt_exp(token)
         self._access_token = token
@@ -485,7 +531,6 @@ class Sub2APIClient:
         page: int = 1,
         page_size: int = 50,
     ) -> Dict[str, Any]:
-        token = self.login(force=False)
         params: Dict[str, Any] = {
             "page": max(1, int(page or 1)),
             "page_size": max(1, min(200, int(page_size or 50))),
@@ -495,25 +540,36 @@ class Sub2APIClient:
             params["platform"] = platform
         if search:
             params["search"] = str(search).strip()[:100]
-        response, payload = self._request_json(
-            "GET",
-            "/api/v1/admin/accounts",
-            headers={"Authorization": f"Bearer {token}"},
-            params=params,
-        )
-        if response.status_code >= 400 or not self._payload_ok(payload):
-            detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
-            raise RuntimeError(f"Sub2API 列表账号失败 status={response.status_code} detail={detail}")
-        data = self._payload_data(payload)
-        items = data.get("items") if isinstance(data.get("items"), list) else []
-        total = data.get("total")
-        if total is None and isinstance(data.get("pagination"), dict):
-            total = data.get("pagination", {}).get("total")
-        try:
-            total_i = int(total) if total is not None else len(items)
-        except Exception:
-            total_i = len(items)
-        return {"items": items, "total": total_i, "raw": data}
+        last_error = "list_accounts failed"
+        for attempt in (1, 2):
+            token = self.login(force=(attempt == 2))
+            response, payload = self._request_json(
+                "GET",
+                "/api/v1/admin/accounts",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+            )
+            if response.status_code >= 400 or not self._payload_ok(payload):
+                detail = payload.get("message") or payload.get("msg") or payload.get("error") or _body_summary(response)
+                last_error = f"Sub2API 列表账号失败 status={response.status_code} detail={detail}"
+                if attempt == 1 and self._is_auth_failure(response.status_code, detail):
+                    self.invalidate_auth(
+                        reset_session=True,
+                        reason=f"list_accounts 401/fingerprint detail={str(detail)[:160]}",
+                    )
+                    continue
+                raise RuntimeError(last_error)
+            data = self._payload_data(payload)
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            total = data.get("total")
+            if total is None and isinstance(data.get("pagination"), dict):
+                total = data.get("pagination", {}).get("total")
+            try:
+                total_i = int(total) if total is not None else len(items)
+            except Exception:
+                total_i = len(items)
+            return {"items": items, "total": total_i, "raw": data}
+        raise RuntimeError(last_error)
 
     def find_account_by_email_or_sub(
         self,
@@ -1061,10 +1117,15 @@ def _client_cache_key(config: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def get_client(config: Dict[str, Any], log_callback: Optional[Callable[[str], None]] = None) -> Sub2APIClient:
+def get_client(
+    config: Dict[str, Any],
+    log_callback: Optional[Callable[[str], None]] = None,
+    *,
+    force_new: bool = False,
+) -> Sub2APIClient:
     key = _client_cache_key(config)
     with _CLIENTS_LOCK:
-        client = _CLIENTS.get(key)
+        client = None if force_new else _CLIENTS.get(key)
         if client is None:
             client = Sub2APIClient(
                 base_url=str(config.get("sub2api_base_url") or "http://127.0.0.1:8080"),
@@ -1076,7 +1137,31 @@ def get_client(config: Dict[str, Any], log_callback: Optional[Callable[[str], No
             _CLIENTS[key] = client
         else:
             client.log_callback = log_callback
+            try:
+                client._ensure_stable_session_headers()
+            except Exception:
+                pass
     return client
+
+
+def invalidate_client_cache(config: Optional[Dict[str, Any]] = None) -> None:
+    """Drop cached Sub2API client(s). Useful after fingerprint/session revoke."""
+    with _CLIENTS_LOCK:
+        if not config:
+            for c in list(_CLIENTS.values()):
+                try:
+                    c.invalidate_auth(reset_session=True, reason="cache_clear_all")
+                except Exception:
+                    pass
+            _CLIENTS.clear()
+            return
+        key = _client_cache_key(config)
+        client = _CLIENTS.pop(key, None)
+        if client is not None:
+            try:
+                client.invalidate_auth(reset_session=True, reason="cache_clear_one")
+            except Exception:
+                pass
 
 
 def import_grok_sso_to_sub2api(

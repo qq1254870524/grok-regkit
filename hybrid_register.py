@@ -3,6 +3,9 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-18f: mailbox preflight/login failure logs include provider/auth/category/exception/raw (no masking); keep pool delete rules.
+- 2026-07-18e: 池空即停 + 失败分类（success/fail/pending_sso/pool_empty/stopped）；
+  pending_sso 独立统计；二次补 SSO 见 pending_sso_recovery.py。
 - 2026-07-18b: 关闭 UI fallback；协议优先 SignUp；next-action 仅在拿到 SSO 时固化；
   CreateEmail 成功后禁止重复点击/协议重发，避免验证码过多限流；
   protocol 返回 RSC fragment/no-sso 时 live re-scrape 再协议重试；
@@ -22,6 +25,17 @@ Changelog:
   CreateEmail 后等 3s 再查信；AOL/Outlook 扫 ALL 文件夹（非仅 Inbox/Junk）。
   修复缩进损坏导致 IndentationError 无法启动。
 - 2026-07-17b: CreateEmail 发信证据门禁 + since_ts 查信。
+
+2026-07-18g: 隔离死 next-action；坏 capture 不加载；主路径保持 注册→即时SSO→入池，pending 仅兜底。
+2026-07-18h: 修复 _is_protocol_network_dead 误返回 SUCCESS；恢复原始 next-action 候选顺序（hook→scrape→capture）。
+2026-07-18i: 明确主流程不变：协议/browser-fetch 拿到 SSO 后立刻 schedule_post_registration 入池；
+              pending_sso 只在协议+browser-fetch 都无 SSO 时兜底；不启用 UI fallback。
+              scrape 回退恢复见 token_harvester（createUserAndSession + legacy markers）。
+2026-07-18j: 实跑修复：early/scrape 丢弃已知死 next-action；支持 scrape 多候选，避免 7f7f6cee 独占主路径。
+2026-07-18k: 修复误杀 live SignUp hash 7f7f6cee：协议 200 仅 RSC shell/业务错误不再 quarantine；
+              browser-fetch run_js 改为闭包传参（DrissionPage 不注入 arguments 给 async IIFE）；
+              识别 turnstile/业务错误，避免把唯一 live next-action 标死导致 no candidates。
+              主流程仍是 注册→即时SSO→入池；pending 仅兜底。
 """
 from __future__ import annotations
 
@@ -37,7 +51,69 @@ ROOT = Path(__file__).resolve().parent
 from browser.token_harvester import BrowserTokenSession  # noqa: E402
 from protocol.grpc_client import AuthManagementClient  # noqa: E402
 from protocol.session import ProtocolSession  # noqa: E402
+from pending_sso_recovery import (  # noqa: E402
+    STATUS_FAIL,
+    STATUS_PENDING_SSO,
+    STATUS_POOL_EMPTY,
+    STATUS_STOPPED,
+    STATUS_SUCCESS,
+    is_pool_empty_error,
+    normalize_result,
+    result as _result,
+    run_pending_sso_recovery_job,
+)
 
+
+
+# Known-dead SignUp next-action hashes (404 / RSC shell only). Never prefer these.
+DEAD_NEXT_ACTIONS = {
+    # NOTE: 7f7f6cee... is CURRENT live SignUp createServerReference (2026-07-18).
+    # Only quarantine on true 404 / "Server action not found", never on RSC shell.
+    "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259",
+    "7f0a91ba5242676db585f47da85cf4b6088e8920ae",
+}
+
+
+def _norm_action(val: str) -> str:
+    return str(val or "").strip().lower()
+
+
+def is_dead_next_action(val: str) -> bool:
+    v = _norm_action(val)
+    if not v:
+        return True
+    if v in DEAD_NEXT_ACTIONS:
+        return True
+    for bad in DEAD_NEXT_ACTIONS:
+        if len(bad) >= 40 and v == bad:
+            return True
+    return False
+
+
+def quarantine_dead_capture(action: str = "", log: Callable[[str], None] | None = None) -> None:
+    """Rename capture file if it stores a known-dead next-action."""
+    try:
+        import json
+        rpc = ROOT / "capture_out" / "rpc"
+        path = rpc / "03_SignUpSubmit.req.headers.json"
+        if not path.is_file():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cur = str((data or {}).get("next-action") or (data or {}).get("Next-Action") or "").strip()
+        target = (action or cur).strip()
+        if not target:
+            return
+        if not is_dead_next_action(target) and not is_dead_next_action(cur):
+            return
+        if not is_dead_next_action(target):
+            target = cur
+        bak = rpc / f"03_SignUpSubmit.req.headers.json.bak_dead_{target[:16]}_{int(time.time())}"
+        path.replace(bak)
+        if log:
+            log(f"[hybrid] quarantined dead capture next-action={target[:20]}... -> {bak.name}")
+    except Exception as exc:
+        if log:
+            log(f"[hybrid] quarantine capture fail: {exc}")
 
 def load_next_action_from_capture() -> str:
     rpc = ROOT / "capture_out" / "rpc"
@@ -48,7 +124,11 @@ def load_next_action_from_capture() -> str:
                 import json
 
                 h = json.loads(p.read_text(encoding="utf-8"))
-                return h.get("next-action") or h.get("Next-Action") or ""
+                act = (h.get("next-action") or h.get("Next-Action") or "").strip()
+                if act and not is_dead_next_action(act):
+                    return act
+                if act and is_dead_next_action(act):
+                    quarantine_dead_capture(act)
             except Exception:
                 pass
     if rpc.is_dir():
@@ -57,8 +137,9 @@ def load_next_action_from_capture() -> str:
         for f in rpc.glob("*.req.headers.json"):
             try:
                 h = json.loads(f.read_text(encoding="utf-8"))
-                if h.get("next-action"):
-                    return h["next-action"]
+                act = (h.get("next-action") or "").strip()
+                if act and not is_dead_next_action(act):
+                    return act
             except Exception:
                 pass
     return ""
@@ -68,7 +149,9 @@ def load_next_action_from_capture() -> str:
 def save_next_action_to_capture(action: str, log: Callable[[str], None] | None = None) -> None:
     """Persist a known-good next-action so later runs prefer a live working hash."""
     act = (action or "").strip()
-    if not act:
+    if not act or is_dead_next_action(act):
+        if log and act:
+            log(f"[hybrid] refuse saving dead next-action hash={act[:20]}...")
         return
     try:
         import json
@@ -254,9 +337,10 @@ def register_one_hybrid(
     accounts_file: Path,
     should_stop: Optional[Callable[[], bool]] = None,
     post_success: bool = True,
-) -> bool:
-    """Register one account via hybrid path. Returns True on SSO success.
+) -> dict:
+    """Register one account via hybrid path.
 
+    Returns dict status: success|fail|pending_sso|pool_empty|stopped
     Each account uses its own browser session (open at start, close at end).
     """
     from grok_register_ttk import (
@@ -273,26 +357,45 @@ def register_one_hybrid(
     try:
         with BrowserTokenSession(log=log) as browser:
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
             log("[browser] open signup page for this account")
             browser.open_signup(cancel_callback=stop)
             browser.install_network_hook()
-            action = action or browser.scrape_next_action() or action
+            # Early scrape is advisory only. Never keep a known-dead hash into main SignUp path.
+            if action and is_dead_next_action(action):
+                log(f"[hybrid] drop dead early next-action hash={action[:20]}...")
+                quarantine_dead_capture(action, log)
+                action = ""
+            scraped_early = ""
+            try:
+                scraped_early = (browser.scrape_next_action() or "").strip()
+            except Exception as early_scrape_exc:
+                log(f"[hybrid] early scrape next-action fail: {early_scrape_exc}")
+            if scraped_early and is_dead_next_action(scraped_early):
+                log(f"[hybrid] drop dead scraped next-action hash={scraped_early[:20]}...")
+                scraped_early = ""
+            action = action or scraped_early or action
+            if action and is_dead_next_action(action):
+                log(f"[hybrid] early next-action still dead; clear for post-turnstile live resolve")
+                action = ""
             log(f"[hybrid] next-action ready len={len(action or '')} value={action or ''}")
 
             registered = load_registered_emails()
             email, mail_token = "", ""
             for _try in range(20):
                 if stop():
-                    return False
+                    return _result(STATUS_STOPPED)
                 try:
                     email, mail_token = get_email_and_token()
                 except Exception as get_exc:
                     log(f"[hybrid] 获取邮箱失败(池内可能都登录失败): {get_exc}")
-                    return False
+                    if is_pool_empty_error(get_exc):
+                        return _result(STATUS_POOL_EMPTY, detail=str(get_exc))
+                    email, mail_token = "", ""
+                    continue
                 if not email:
                     log("[hybrid] no fresh email available (pool exhausted / all registered?)")
-                    return False
+                    return _result(STATUS_POOL_EMPTY, detail="no fresh email")
                 if email.lower() in registered:
                     log(f"[hybrid] skip already-registered local email: {email}")
                     try:
@@ -352,15 +455,47 @@ def register_one_hybrid(
                         )
                     break
                 except Exception as pre_exc:
+                    em_l2 = (email or "").lower()
+                    is_aol_fail = em_l2.endswith(("@aol.com", "@aim.com"))
+                    category = 'unknown'
+                    auth_path = 'unknown'
+                    permanent = False
+                    try:
+                        if is_aol_fail:
+                            import aol_mail as am_cls
+                            info = am_cls.classify_aol_login_error(pre_exc)
+                            category = str(info.get('category') or 'unknown')
+                            auth_path = str(info.get('auth_path') or 'IMAP password/app-password')
+                            permanent = bool(info.get('permanent'))
+                            log(am_cls.format_aol_login_error(email, pre_exc, stage='hybrid-preflight'))
+                        else:
+                            import outlook_mail as om_cls
+                            # best-effort auth path from token blob
+                            try:
+                                data_tb = json.loads(mail_token) if mail_token else {}
+                                if data_tb.get('refresh_token'):
+                                    auth_path = 'refresh_token'
+                                elif data_tb.get('password') and data_tb.get('totp_secret'):
+                                    auth_path = 'password+TOTP'
+                                elif data_tb.get('access_token'):
+                                    auth_path = 'access_token'
+                            except Exception:
+                                auth_path = 'outlook'
+                            info = om_cls.classify_outlook_login_error(pre_exc, auth_path=auth_path)
+                            category = str(info.get('category') or 'unknown')
+                            permanent = bool(info.get('permanent'))
+                            log(om_cls.format_outlook_login_error(email, pre_exc, stage='hybrid-preflight', auth_path=auth_path))
+                    except Exception as cls_exc:
+                        log(f"[hybrid] login-error classify fail: {type(cls_exc).__name__}: {cls_exc}")
                     log(
-                        f"[hybrid] mailbox pre-login FAIL email={email}: {pre_exc} | "
-                        f"换下一个邮箱 continue try={_try + 1}/20"
+                        f"[hybrid] mailbox pre-login FAIL email={email} provider={'aol' if is_aol_fail else 'outlook'} "
+                        f"auth={auth_path} category={category} permanent={int(permanent)} "
+                        f"exc={type(pre_exc).__name__} raw={pre_exc} | 换下一个邮箱 continue try={_try + 1}/20"
                     )
                     try:
-                        em_l2 = (email or "").lower()
                         msg = str(pre_exc)
                         msg_l = msg.lower()
-                        bad = any(
+                        bad = permanent or any(
                             x in msg
                             for x in (
                                 "AUTHENTICATIONFAILED",
@@ -384,12 +519,12 @@ def register_one_hybrid(
                             remove_mailbox_from_pool(email, reason="login_fail", log=log)
                             log(
                                 f"[hybrid] 已从邮箱池实时删除登录失败邮箱: {email} "
-                                f"(reason=login_fail)"
+                                f"(reason=login_fail category={category} auth={auth_path})"
                             )
                         else:
                             # temporary: release back to idle/cooldown without permanent delete
                             from grok_register_ttk import config as _cfg_pre2
-                            if em_l2.endswith(("@aol.com", "@aim.com")):
+                            if is_aol_fail:
                                 import aol_mail as am2
                                 am2.get_pool(_cfg_pre2, log_callback=log).release(
                                     email, ok=False, bad=False
@@ -399,19 +534,23 @@ def register_one_hybrid(
                                 om2.get_pool(_cfg_pre2, log_callback=log).release(
                                     email, ok=False, bad=False
                                 )
+                            log(
+                                f"[hybrid] mailbox temporary fail kept in pool with cooldown email={email} "
+                                f"category={category} auth={auth_path}"
+                            )
                     except Exception as rel_pre:
                         log(f"[hybrid] pre-login release email: {rel_pre}")
                     email, mail_token = "", ""
                     continue
             else:
                 log("[hybrid] 连续尝试邮箱均失败（登录/预检），放弃本号")
-                return False
+                return _result(STATUS_FAIL, detail="mailbox preflight exhausted")
 
             if not email:
                 log("[hybrid] no fresh email available after retries")
-                return False
+                return _result(STATUS_POOL_EMPTY, detail="no fresh email after retries")
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
 
             # Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
             castle = browser.harvest_castle_via_email_submit(email, timeout=45)
@@ -421,8 +560,7 @@ def register_one_hybrid(
                 log(
                     f"[hybrid] bad castle len={len(castle or '')} head={(castle or '')[:24]}"
                 )
-                return False
-
+                return _result(STATUS_FAIL)
             ua = browser.browser_user_agent() or user_agent or ""
             sess = ProtocolSession(
                 proxy=(proxy or "").strip(),
@@ -493,7 +631,7 @@ def register_one_hybrid(
                         remove_mailbox_from_pool(email, reason="create_email_rate_limited", log=log)
                     except Exception as rm_exc:
                         log(f"[hybrid] remove rate-limited mailbox fail: {rm_exc}")
-                    return False
+                    return _result(STATUS_FAIL)
                 if r1["status"] >= 400:
                     body_hint = ""
                     try:
@@ -507,15 +645,15 @@ def register_one_hybrid(
                         "[hybrid] CreateEmail 未真正发信（UI 无 seen/ok 且协议失败），"
                         "跳过 180s 空等验证码"
                     )
-                    return False
+                    return _result(STATUS_FAIL)
                 protocol_sent = True
                 log(f"[hybrid] CreateEmail via protocol OK status={r1['status']}")
 
             if not browser_sent and not protocol_sent:
                 log("[hybrid] CreateEmail 无发信迹象，禁止空等验证码")
-                return False
+                return _result(STATUS_FAIL)
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
 
             send_ts = time.time()
             log(
@@ -527,7 +665,7 @@ def register_one_hybrid(
             for _w in range(30):
                 if stop():
                     log("[hybrid] stop during post-CreateEmail 3s wait")
-                    return False
+                    return _result(STATUS_FAIL)
                 if time.time() - send_ts >= 3.0:
                     break
                 time.sleep(0.1)
@@ -546,16 +684,16 @@ def register_one_hybrid(
             clean = str(code or "").replace("-", "").strip()
             if not clean:
                 log("[hybrid] no mail code")
-                return False
+                return _result(STATUS_FAIL)
             log(f"[hybrid] code={clean}")
 
             r2 = client.verify_email_validation_code(email, clean)
             log(f"[hybrid] VerifyEmail status={r2['status']}")
             if r2["status"] >= 400:
                 log(f"[hybrid] VerifyEmail fail {r2.get('strings')[:5]}")
-                return False
+                return _result(STATUS_FAIL)
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
 
             given, family, password = build_profile()
             try:
@@ -565,15 +703,14 @@ def register_one_hybrid(
 
             if stop():
                 log("[hybrid] stop before turnstile")
-                return False
+                return _result(STATUS_FAIL)
             turnstile = browser.get_turnstile_token(timeout=90, inject=True, cancel_callback=stop)
             if stop():
                 log("[hybrid] stop after turnstile")
-                return False
+                return _result(STATUS_FAIL)
             if len(turnstile) < 80:
                 log(f"[hybrid] turnstile short len={len(turnstile)}")
-                return False
-
+                return _result(STATUS_FAIL)
             # CRITICAL: frontend mints a NEW castle via createRequestToken() on every SignUp.
             # Reusing CreateEmail castle often yields HTTP 200 RSC fragment with no sso cookie.
             castle2 = browser.read_captured_castle() or castle
@@ -610,12 +747,20 @@ def register_one_hybrid(
             sess.set_cookies(jar2)
             # Build next-action candidates. Prefer browser (CF/proxy already working).
             # Hardcoded known is last resort only — xAI redeploys invalidate it (404).
-            known = "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259"
+            known = "7f7f6cee188bd9cc17a3fb9dbde4abe224f21af0e3"  # live SignUp hash as of 2026-07-18k
             candidates: list[str] = []
 
             def _add_action(val: str, src: str):
                 v = (val or "").strip()
                 if not v:
+                    return
+                if is_dead_next_action(v):
+                    log(
+                        f"[hybrid] skip dead next-action src={src} "
+                        f"hash={v[:20]}... len={len(v)}"
+                    )
+                    if src in {"capture_file", "earlier_or_capture", "hardcoded_fallback"}:
+                        quarantine_dead_capture(v, log)
                     return
                 if v not in candidates:
                     candidates.append(v)
@@ -625,19 +770,29 @@ def register_one_hybrid(
                     )
 
             log("[hybrid] resolving next-action after turnstile…")
+            # Main path unchanged: protocol SignUp with live candidates, then immediate SSO + pool.
+            # pending_sso is fallback only after protocol/browser-fetch both fail.
             try:
                 for a in (browser.read_captured_next_actions() or []):
                     _add_action(a, "network_hook")
             except Exception as hook_exc:
                 log(f"[hybrid] network hook next-action fail: {hook_exc}")
             try:
-                scraped = browser.scrape_next_action() or ""
-                _add_action(scraped, "browser_scrape")
+                # Prefer multi-candidate scrape so one dead hash does not kill the main path.
+                multi = []
+                if hasattr(browser, "scrape_next_action_candidates"):
+                    multi = list(browser.scrape_next_action_candidates() or [])
+                if multi:
+                    for i, act_i in enumerate(multi, 1):
+                        _add_action(act_i, f"browser_scrape_multi_{i}")
+                else:
+                    scraped = browser.scrape_next_action() or ""
+                    _add_action(scraped, "browser_scrape")
             except Exception as scrape_exc:
                 log(f"[hybrid] browser scrape next-action fail: {scrape_exc}")
             _add_action(action, "earlier_or_capture")
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
             _add_action(load_next_action_from_capture(), "capture_file")
             # curl chunk discover often hangs 20s with 0 bytes when SOCKS/proxy path is dead
             # for accounts.x.ai static chunks. Skip if we already have live candidates.
@@ -654,15 +809,18 @@ def register_one_hybrid(
                 except Exception as disc_exc:
                     log(f"[hybrid] chunk discover next-action fail: {disc_exc}")
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
             if not candidates:
                 # Dead hash only when nothing else — expected 404 after redeploy.
-                _add_action(known, "hardcoded_fallback")
+                if not is_dead_next_action(known):
+                    _add_action(known, "hardcoded_fallback")
+                else:
+                    log("[hybrid] hardcoded fallback is dead; skip")
             if not candidates:
                 log("[hybrid] no next-action candidates at all")
-                return False
+                return _result(STATUS_FAIL)
             if stop():
-                return False
+                return _result(STATUS_STOPPED)
 
             def _mint_castle_for_try(try_idx: int) -> str:
                 nonlocal castle2
@@ -748,7 +906,7 @@ def register_one_hybrid(
             protocol_network_dead = False
             for idx, act in enumerate(candidates, 1):
                 if stop():
-                    return False
+                    return _result(STATUS_STOPPED)
                 try:
                     jar3 = dict(browser.export_cookies() or {})
                     for stale in ("sso", "sso-rw"):
@@ -821,15 +979,42 @@ def register_one_hybrid(
                         "stop further protocol candidates; switch to browser same-origin path"
                     )
                     break
-                if (
-                    st == 404
-                    or "server action not found" in low
-                    or "$sreact.fragment" in low
-                    or "react.fragment" in low
+                # Only hard-404 means dead hash. RSC shell / business error means action is ALIVE.
+                if st == 404 or "server action not found" in low:
+                    DEAD_NEXT_ACTIONS.add(_norm_action(act))
+                    quarantine_dead_capture(act, log)
+                    log(
+                        f"[hybrid] next-action {act[:16]} hard-404 invalid "
+                        f"(status={st}, no sso); quarantine and try next"
+                    )
+                    continue
+                # Business / token failures: keep hash alive, stop wasting candidates.
+                if any(
+                    k in low
+                    for k in (
+                        "failed to verify cloudflare turnstile",
+                        "turnstile token",
+                        "castle",
+                        "invalid email",
+                        "email validation",
+                        "rate limit",
+                        "too many",
+                    )
+                ) or (
+                    '"error"' in low and "traceid" in low
                 ):
                     log(
-                        f"[hybrid] next-action {act[:16]} invalid/shell "
-                        f"(status={st}, no sso); try next"
+                        f"[hybrid] sign-up business/token error on live next-action "
+                        f"{act[:16]}... status={st}; stop protocol candidates "
+                        f"(action hash kept alive)"
+                    )
+                    break
+                # Large RSC shell with fragment usually means action accepted but rejected
+                # server-side (missing/invalid tokens). Do NOT quarantine.
+                if "$sreact.fragment" in low or "react.fragment" in low:
+                    log(
+                        f"[hybrid] next-action {act[:16]} returned RSC shell "
+                        f"(status={st}, no sso); hash stays live, try next path"
                     )
                     continue
                 log(
@@ -925,16 +1110,16 @@ def register_one_hybrid(
                     f"body={body_txt[:240]}"
                 )
                 if stop():
-                    return False
+                    return _result(STATUS_STOPPED)
                 # Prefer browser same-origin fetch: browser already passed CF/proxy to accounts.x.ai
-                live_acts = [c for c in candidates if c != known] or list(candidates)
+                live_acts = list(candidates)  # include known live hash; do not drop it
                 log(
                     f"[hybrid] browser same-origin fetch SignUp "
                     f"candidates={len(live_acts)} email={email}"
                 )
                 for bidx, act in enumerate(live_acts[:3], 1):
                     if stop():
-                        return False
+                        return _result(STATUS_FAIL)
                     try:
                         castle_tok = _mint_castle_for_try(bidx + 10)
                         log(
@@ -980,7 +1165,7 @@ def register_one_hybrid(
                         st_b = br.get("status")
                         low_b = str(br.get("text") or "").lower()
                         if st_b == 404 or "server action not found" in low_b:
-                            log(f"[hybrid] browser-fetch next-action {act[:16]} invalid, try next")
+                            DEAD_NEXT_ACTIONS.add(_norm_action(act)); quarantine_dead_capture(act, log); log(f"[hybrid] browser-fetch next-action {act[:16]} invalid, quarantine, try next")
                             continue
                     except Exception as bf_exc:
                         log(f"[hybrid] browser-fetch try {bidx} error: {bf_exc}")
@@ -1095,7 +1280,7 @@ def register_one_hybrid(
                     f"[hybrid] no sso after protocol+browser-fetch cookies="
                     f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"
                 )
-                return False
+                return _result(STATUS_PENDING_SSO, email=email, detail="verified_no_sso")
 
             # Hybrid often gets set-cookie *wrapper* JWT (~2k). CPA needs real session sso (~150).
             try:
@@ -1160,6 +1345,7 @@ def register_one_hybrid(
                         if k and v is not None
                     ]
                     log(f"[hybrid] post cookies={len(cookie_list)} for CPA/g2a")
+                    # Main path: immediate post-success on SSO (CPA/Sub2API/g2a). pending is NOT used here.
                     schedule_post_registration(
                         email,
                         password,
@@ -1170,18 +1356,23 @@ def register_one_hybrid(
                     )
                 except Exception as e:
                     log(f"[hybrid] post_success: {e}")
-            log(f"[hybrid] account success elapsed={time.time()-t0:.1f}s email={email}")
-            return True
+            log(
+                f"[hybrid][+] OK immediate SSO+pool path elapsed={time.time()-t0:.1f}s "
+                f"email={email} sso_len={len(sso or '')}"
+            )
+            return _result(STATUS_SUCCESS, email=email)
     except Exception as e:
         if stop():
             log("[hybrid] 已按停止请求中断当前账号，不计为注册失败")
-            return False
+            return _result(STATUS_STOPPED)
         log(f"[hybrid] exception: {e}")
         try:
             log(traceback.format_exc())
         except Exception:
             pass
-        return False
+        if is_pool_empty_error(e):
+            return _result(STATUS_POOL_EMPTY, detail=str(e))
+        return _result(STATUS_FAIL, detail=str(e))
 
 
 def run_hybrid_registration_job(count, log_callback=None, controller=None):
@@ -1194,6 +1385,9 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
 
     success_count = 0
     fail_count = 0
+    pending_sso_count = 0
+    skipped_count = 0
+    pool_empty = False
     accounts_output_file = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         f"accounts_hybrid_{engine.now_beijing('%Y%m%d_%H%M%S')}.txt",
@@ -1238,7 +1432,7 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
             if controller.should_stop():
                 break
             log(f"--- [hybrid] 开始第 {i + 1}/{count} 个账号 ---")
-            ok = register_one_hybrid(
+            raw = register_one_hybrid(
                 log=log,
                 proxy=proxy,
                 user_agent=ua,
@@ -1247,15 +1441,31 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
                 should_stop=controller.should_stop,
                 post_success=True,
             )
-            if controller.should_stop():
+            res = normalize_result(raw)
+            status = str(res.get("status") or STATUS_FAIL)
+            if controller.should_stop() or status == STATUS_STOPPED:
                 log("[*] 当前账号因停止请求中断，统计保持不变")
                 break
-            if ok:
+            if status == STATUS_SUCCESS:
                 success_count += 1
+            elif status == STATUS_PENDING_SSO:
+                pending_sso_count += 1
+            elif status == STATUS_POOL_EMPTY:
+                pool_empty = True
+                skipped_count += 1
+                log("[*] 邮箱池已空，停止后续注册（不计为失败）")
+                log(
+                    f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count} | "
+                    f"pending_sso {pending_sso_count} | 跳过(池空) {skipped_count}"
+                )
+                break
             else:
                 fail_count += 1
             i += 1
-            log(f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count}")
+            log(
+                f"[*] 当前统计: 成功 {success_count} | 失败 {fail_count} | "
+                f"pending_sso {pending_sso_count} | 跳过(池空) {skipped_count}"
+            )
             engine.sleep_with_cancel(1, controller.should_stop)
     except KeyboardInterrupt:
         controller.stop()
@@ -1288,11 +1498,17 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
             engine.cleanup_runtime_memory(log_callback=log, reason="混合任务结束")
         except Exception:
             pass
-        log(f"[*] 混合任务结束。成功 {success_count} | 失败 {fail_count}")
+        log(
+            f"[*] 混合任务结束。成功 {success_count} | 失败 {fail_count} | "
+            f"pending_sso {pending_sso_count} | 跳过(池空) {skipped_count}"
+        )
 
     return {
         "success": success_count,
         "fail": fail_count,
+        "pending_sso": pending_sso_count,
+        "skipped": skipped_count,
+        "pool_empty": bool(pool_empty),
         "accounts_file": accounts_output_file,
         "stopped": bool(controller.should_stop()),
     }

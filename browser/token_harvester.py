@@ -1,4 +1,11 @@
-"""Browser-only token harvest for Castle / Turnstile (hybrid mode)."""
+"""Browser-only token harvest for Castle / Turnstile (hybrid mode).
+2026-07-18g: scrape_next_action 优先 createUserAndSession 邻域，避免抓到 CreateEmail。
+2026-07-18i: 恢复主路径 scrape 回退：createUserAndSession → emailValidationCode+castleRequestToken → hook；
+              不改变 hybrid 主流程（注册当时即时 SSO + schedule_post_registration；pending 仅兜底）。
+2026-07-18j: 新增 scrape_next_action_candidates 多候选；单候选自动拒绝 hybrid 已知死 hash。
+2026-07-18k: browser-fetch 用闭包绑定参数（修复 async IIFE arguments 全空导致 next-action 空串 404）；
+              解析 Set-Cookie/sso；不再把当前 live SignUp hash 当死 hash 过滤。
+"""
 from __future__ import annotations
 
 import os
@@ -652,9 +659,134 @@ return all.map(x => String(x || '').trim()).filter(Boolean).slice(0, 20);
             self._lg(f"[Debug] read captured next-actions: {e}")
         return out
 
-    def scrape_next_action(self) -> str:
-        """Find SignUp server-action hash from network hook, HTML, or Next.js chunks."""
+
+    def scrape_next_action_candidates(self) -> list[str]:
+        """Return ordered SignUp next-action candidates (deduped).
+
+        Main registration path uses these for immediate SSO. Dead hashes are filtered
+        when hybrid_register.is_dead_next_action is importable.
+        """
         from grok_register_ttk import _get_page
+
+        def _is_dead(v: str) -> bool:
+            try:
+                from hybrid_register import is_dead_next_action
+                return bool(is_dead_next_action(v))
+            except Exception:
+                return False
+
+        out: list[str] = []
+
+        def _add(v: str, src: str = "") -> None:
+            a = str(v or "").strip()
+            if not a or len(a) < 40:
+                return
+            if _is_dead(a):
+                self._lg(f"[*] scrape candidates skip dead src={src or '-'} hash={a[:20]}...")
+                return
+            if a not in out:
+                out.append(a)
+                self._lg(
+                    f"[*] scrape candidate[{len(out)}] src={src or '-'} "
+                    f"hash={a[:20]}... len={len(a)}"
+                )
+
+        try:
+            for a in (self.read_captured_next_actions() or []):
+                _add(a, "network_hook")
+        except Exception as e:
+            self._lg(f"[Debug] scrape candidates hook: {e}")
+
+        page = _get_page()
+        try:
+            found = page.run_js(
+                r"""
+return (async function(){
+  function collectFromText(t, bag) {
+    if (!t) return;
+    function pushNear(idx, radius) {
+      if (idx < 0) return;
+      const slice = t.slice(Math.max(0, idx - radius), idx + radius);
+      const re = /createServerReference\)?\(['"]([a-f0-9]{40,})['"]/g;
+      let m;
+      while ((m = re.exec(slice)) !== null) bag.push(m[1]);
+      const re2 = /['"]([a-f0-9]{40,64})['"]/g;
+      while ((m = re2.exec(slice)) !== null) bag.push(m[1]);
+    }
+    pushNear(t.indexOf('createUserAndSession'), 1400);
+    pushNear(t.indexOf('createUserAndSessionRequest'), 1400);
+    pushNear(t.indexOf('emailValidationCode'), 1200);
+    pushNear(t.indexOf('castleRequestToken'), 1200);
+  }
+  const bag = [];
+  for (const s of Array.from(document.scripts || [])) {
+    collectFromText(s.textContent || '', bag);
+  }
+  collectFromText(document.documentElement.innerHTML || '', bag);
+  const scripts = Array.from(document.querySelectorAll('script[src*="/_next/static/chunks/"]'));
+  const urls = scripts.map(s => s.src).filter(Boolean).slice(0, 100);
+  for (const url of urls) {
+    try {
+      const t = await fetch(url, {credentials:'same-origin'}).then(r => r.text());
+      if (!t) continue;
+      if (!(
+        t.includes('createUserAndSession') ||
+        t.includes('emailValidationCode') ||
+        t.includes('castleRequestToken')
+      )) continue;
+      collectFromText(t, bag);
+    } catch (e) {}
+  }
+  const seen = new Set();
+  const out = [];
+  for (const h of bag) {
+    if (!h || seen.has(h)) continue;
+    seen.add(h);
+    out.push(h);
+  }
+  return out.slice(0, 12);
+})();
+"""
+            )
+            if isinstance(found, list):
+                for a in found:
+                    _add(a, "browser_multi")
+            elif found:
+                _add(str(found), "browser_multi")
+        except Exception as e:
+            self._lg(f"[Debug] scrape candidates multi: {e}")
+
+        if not out:
+            try:
+                one = (self.scrape_next_action() or "").strip()
+                _add(one, "browser_scrape_single")
+            except Exception as e:
+                self._lg(f"[Debug] scrape candidates single fallback: {e}")
+        return out
+
+    def scrape_next_action(self) -> str:
+        """Find SignUp server-action hash from network hook, HTML, or Next.js chunks.
+
+        Priority (main registration path, not pending recovery):
+        1) createUserAndSession neighborhood (true SignUp)
+        2) legacy signup markers: emailValidationCode + castleRequestToken
+        3) network-hook captured next-action (last resort; may be CreateEmail)
+        """
+        from grok_register_ttk import _get_page
+
+        def _reject_dead_action(val: str) -> str:
+            a = str(val or "").strip()
+            if not a:
+                return ""
+            try:
+                from hybrid_register import is_dead_next_action
+                if is_dead_next_action(a):
+                    self._lg(f"[*] scrape next-action reject dead hash={a[:20]}...")
+                    return ""
+            except Exception:
+                pass
+            return a
+
 
         # Network hook may capture CreateEmail/other actions. Prefer SignUp-marked
         # chunk/HTML hashes first; use hook only as a secondary candidate source.
@@ -676,21 +808,28 @@ return all.map(x => String(x || '').trim()).filter(Boolean).slice(0, 20);
                 r"""
 function pickSignupAction(t) {
   if (!t) return '';
-  const hasSignup =
-    t.includes('emailValidationCode') &&
-    (t.includes('castleRequestToken') || t.includes('createUserAndSession'));
-  if (!hasSignup) return '';
-  let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-  if (m) return m[1];
-  const keys = ['createUserAndSession', 'emailValidationCode', 'castleRequestToken'];
-  for (const key of keys) {
-    const idx = t.indexOf(key);
-    if (idx < 0) continue;
-    const slice = t.slice(Math.max(0, idx - 500), idx + 800);
-    m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+  // 1) Strict: hashes near createUserAndSession (true SignUp).
+  const idxCu = t.indexOf('createUserAndSession');
+  if (idxCu >= 0) {
+    const sliceCu = t.slice(Math.max(0, idxCu - 800), idxCu + 1200);
+    let m = sliceCu.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
     if (m) return m[1];
-    m = slice.match(/['\"]([a-f0-9]{40,64})['\"]/);
+    m = sliceCu.match(/['\"]([a-f0-9]{40,64})['\"]/);
     if (m) return m[1];
+  }
+  // 2) Legacy working markers used before strict-only scrape:
+  //    SignUp payload fields emailValidationCode + castleRequestToken.
+  if (t.includes('emailValidationCode') && t.includes('castleRequestToken')) {
+    let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+    if (m) return m[1];
+    const idx = t.indexOf('emailValidationCode');
+    if (idx >= 0) {
+      const slice = t.slice(Math.max(0, idx - 600), idx + 900);
+      m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+      if (m) return m[1];
+      m = slice.match(/[a-f0-9]{40,64}/);
+      if (m) return m[0];
+    }
   }
   return '';
 }
@@ -700,12 +839,21 @@ for (const s of Array.from(document.scripts || [])) {
   if (hit) return hit;
 }
 const html = document.documentElement.innerHTML || '';
-return pickSignupAction(html);
+// Prefer marker-based pick; last inline fallback is explicit next-action attr near signup form.
+let hit = pickSignupAction(html);
+if (hit) return hit;
+const mAttr = html.match(/next-action["'\s:=]+([a-f0-9]{40,})/i);
+return mAttr ? mAttr[1] : '';
 """
             )
             if action:
-                self._lg(f"[*] scrape next-action from inline signup markers len={len(str(action))}")
-                return str(action)
+                action = _reject_dead_action(str(action))
+                if action:
+                    self._lg(
+                        f"[*] scrape next-action from inline signup markers "
+                        f"len={len(action)} value={action[:20]}..."
+                    )
+                    return action
         except Exception as e:
             self._lg(f"[Debug] scrape next-action inline: {e}")
 
@@ -714,36 +862,51 @@ return pickSignupAction(html);
             action = page.run_js(
                 r"""
 return (async function(){
+  function pickFromText(t) {
+    if (!t) return '';
+    // 1) createUserAndSession neighborhood
+    const idxCu = t.indexOf('createUserAndSession');
+    if (idxCu >= 0) {
+      const sliceCu = t.slice(Math.max(0, idxCu - 800), idxCu + 1200);
+      let m = sliceCu.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+      if (m) return m[1];
+      m = sliceCu.match(/['\"]([a-f0-9]{40,64})['\"]/);
+      if (m) return m[1];
+    }
+    // 2) legacy signup markers
+    if (t.includes('emailValidationCode') && t.includes('castleRequestToken')) {
+      let m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+      if (m) return m[1];
+      const idx = t.indexOf('emailValidationCode');
+      if (idx >= 0) {
+        const slice = t.slice(Math.max(0, idx - 600), idx + 900);
+        m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
+        if (m) return m[1];
+        m = slice.match(/[a-f0-9]{40,64}/);
+        if (m) return m[0];
+      }
+    }
+    return '';
+  }
   const scripts = Array.from(document.querySelectorAll('script[src*="/_next/static/chunks/"]'));
-  const urls = scripts.map(s => s.src).filter(Boolean).slice(0, 80);
+  const urls = scripts.map(s => s.src).filter(Boolean).slice(0, 100);
+  // Pass 1: only chunks that mention createUserAndSession
+  for (const url of urls) {
+    try {
+      const t = await fetch(url, {credentials:'same-origin'}).then(r => r.text());
+      if (!t || !t.includes('createUserAndSession')) continue;
+      const hit = pickFromText(t);
+      if (hit) return hit;
+    } catch (e) {}
+  }
+  // Pass 2: legacy emailValidationCode + castleRequestToken chunks
   for (const url of urls) {
     try {
       const t = await fetch(url, {credentials:'same-origin'}).then(r => r.text());
       if (!t) continue;
-      if (!(
-        t.includes('emailValidationCode') &&
-        (t.includes('castleRequestToken') || t.includes('createUserAndSession'))
-      )) continue;
-      // Prefer createUserAndSession neighborhood first (true SignUp action).
-      let m = null;
-      const idxCu = t.indexOf('createUserAndSession');
-      if (idxCu >= 0) {
-        const sliceCu = t.slice(Math.max(0, idxCu - 500), idxCu + 800);
-        m = sliceCu.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-        if (m) return m[1];
-        m = sliceCu.match(/['\"]([a-f0-9]{40,64})['\"]/);
-        if (m) return m[1];
-      }
-      m = t.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-      if (m) return m[1];
-      const idx = t.indexOf('emailValidationCode');
-      if (idx >= 0) {
-        const slice = t.slice(Math.max(0, idx - 500), idx + 800);
-        m = slice.match(/createServerReference\)?\(['\"]([a-f0-9]{40,})['\"]/);
-        if (m) return m[1];
-        m = slice.match(/['\"]([a-f0-9]{40,64})['\"]/);
-        if (m) return m[1];
-      }
+      if (!(t.includes('emailValidationCode') && t.includes('castleRequestToken'))) continue;
+      const hit = pickFromText(t);
+      if (hit) return hit;
     } catch (e) {}
   }
   return '';
@@ -752,8 +915,13 @@ return (async function(){
             )
             # DrissionPage may return promise result already resolved
             if action and not str(action).startswith("<"):
-                self._lg(f"[*] scrape next-action from chunks len={len(str(action))}")
-                return str(action)
+                action = _reject_dead_action(str(action))
+                if action:
+                    self._lg(
+                        f"[*] scrape next-action from chunks "
+                        f"len={len(action)} value={action[:20]}..."
+                    )
+                    return action
         except Exception as e:
             self._lg(f"[Debug] scrape next-action chunks: {e}")
         # Fallback to network-hook captured action only after SignUp-marked scrape fails.
@@ -762,7 +930,9 @@ return (async function(){
                 f"[*] scrape next-action fallback network hook "
                 f"value={str(hook_actions[0])[:20]}..."
             )
-            return str(hook_actions[0])
+            alive = _reject_dead_action(str(hook_actions[0]))
+            if alive:
+                return alive
         return ""
 
     def _extract_castle_pk(self) -> str:
@@ -1285,90 +1455,106 @@ return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: locati
             "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C16%5D"
         )
         timeout_ms = int(max(5, float(timeout or 25)) * 1000)
+        # Bind args via JS closure. DrissionPage does NOT inject *args into
+        # async IIFE as `arguments` when script is `return (async function(){...})();`.
+        # Passing empty next-action produced hard 404 "Server action not found".
         self._lg(
             f"[*] browser-fetch SignUp next-action={act[:20]}... "
             f"email={email} code_len={len(clean_code)} castle_len={len(castle_token or '')} "
             f"turnstile_len={len(turnstile_token or '')} timeout_ms={timeout_ms}"
         )
-        try:
-            raw = page.run_js(
-                r"""
-return (async function(){
-  const email = String(arguments[0] || '');
-  const code = String(arguments[1] || '');
-  const givenName = String(arguments[2] || '');
-  const familyName = String(arguments[3] || '');
-  const password = String(arguments[4] || '');
-  const turnstile = String(arguments[5] || '');
-  const castle = String(arguments[6] || '');
-  const nextAction = String(arguments[7] || '');
-  const conversionId = String(arguments[8] || '');
-  const tree = String(arguments[9] || '');
-  const timeoutMs = Number(arguments[10] || 25000);
-  const payload = [{
+        email_js = _json.dumps(str(email or ""))
+        code_js = _json.dumps(str(clean_code or ""))
+        given_js = _json.dumps(str(given_name or ""))
+        family_js = _json.dumps(str(family_name or ""))
+        password_js = _json.dumps(str(password or ""))
+        turnstile_js = _json.dumps(str(turnstile_token or ""))
+        castle_js = _json.dumps(str(castle_token or ""))
+        action_js = _json.dumps(str(act or ""))
+        conv_js = _json.dumps(str(cid or ""))
+        tree_js = _json.dumps(str(tree or ""))
+        script = f"""
+return (async function(){{
+  const email = {email_js};
+  const code = {code_js};
+  const givenName = {given_js};
+  const familyName = {family_js};
+  const password = {password_js};
+  const turnstile = {turnstile_js};
+  const castle = {castle_js};
+  const nextAction = {action_js};
+  const conversionId = {conv_js};
+  const tree = {tree_js};
+  const timeoutMs = {int(timeout_ms)};
+  if (!nextAction) {{
+    return {{status:0, ok:false, text:'next-action empty in browser-fetch', cookie:String(document.cookie||''), url:String(location.href||''), setCookie:''}};
+  }}
+  const payload = [{{
     emailValidationCode: code,
-    createUserAndSessionRequest: {
+    createUserAndSessionRequest: {{
       email: email,
       givenName: givenName,
       familyName: familyName,
       clearTextPassword: password,
       tosAcceptedVersion: 1
-    },
+    }},
     turnstileToken: turnstile,
     conversionId: conversionId,
     castleRequestToken: castle
-  }];
+  }}];
   const body = JSON.stringify(payload);
-  const headers = {
+  const headers = {{
     'content-type': 'text/plain;charset=UTF-8',
     'accept': 'text/x-component',
     'next-action': nextAction,
     'next-router-state-tree': tree
-  };
+  }};
   const ctrl = new AbortController();
-  const timer = setTimeout(function(){ try { ctrl.abort(); } catch(e){} }, timeoutMs);
-  try {
-    const r = await fetch('https://accounts.x.ai/sign-up?redirect=grok-com', {
+  const timer = setTimeout(function(){{ try {{ ctrl.abort(); }} catch(e){{}} }}, timeoutMs);
+  try {{
+    const r = await fetch(location.href.split('#')[0] || 'https://accounts.x.ai/sign-up?redirect=grok-com', {{
       method: 'POST',
       credentials: 'include',
       headers: headers,
       body: body,
       signal: ctrl.signal
-    });
+    }});
     clearTimeout(timer);
     let text = '';
-    try { text = await r.text(); } catch (e) { text = String(e); }
-    return {
+    try {{ text = await r.text(); }} catch (e) {{ text = String(e); }}
+    let setCookie = '';
+    try {{
+      if (typeof r.headers.getSetCookie === 'function') {{
+        setCookie = (r.headers.getSetCookie() || []).join('\\n');
+      }} else {{
+        setCookie = r.headers.get('set-cookie') || '';
+      }}
+    }} catch (e) {{ setCookie = ''; }}
+    return {{
       status: r.status,
       ok: !!r.ok,
       text: String(text || '').slice(0, 8000),
       cookie: String(document.cookie || ''),
-      url: String(location.href || '')
-    };
-  } catch (e) {
+      setCookie: String(setCookie || ''),
+      url: String(location.href || ''),
+      nextAction: nextAction
+    }};
+  }} catch (e) {{
     clearTimeout(timer);
-    return {
+    return {{
       status: 0,
       ok: false,
       text: String(e && (e.message || e) || e),
       cookie: String(document.cookie || ''),
-      url: String(location.href || '')
-    };
-  }
-})();
-""",
-                email,
-                clean_code,
-                given_name,
-                family_name,
-                password,
-                turnstile_token or "",
-                castle_token or "",
-                act,
-                cid,
-                tree,
-                timeout_ms,
-            )
+      setCookie: '',
+      url: String(location.href || ''),
+      nextAction: nextAction
+    }};
+  }}
+}})();
+"""
+        try:
+            raw = page.run_js(script)
         except Exception as e:
             self._lg(f"[!] browser-fetch SignUp exception: {e}")
             return {
@@ -1389,23 +1575,37 @@ return (async function(){
 
         text = str(raw.get("text") or "")
         cookie_str = str(raw.get("cookie") or "")
+        set_cookie_str = str(raw.get("setCookie") or raw.get("set_cookie") or "")
         status = raw.get("status")
         try:
             status = int(status)
         except Exception:
             status = 0
 
+        # Guard: if JS still got empty next-action, surface clearly.
+        try:
+            used_act = str(raw.get("nextAction") or "").strip()
+            if used_act:
+                self._lg(f"[*] browser-fetch used next-action={used_act[:20]}... status={status}")
+            else:
+                self._lg(f"[!] browser-fetch JS reports empty nextAction; status={status}")
+        except Exception:
+            pass
+
         sso = ""
-        m = _re.search(r"(?:^|;\s*)sso=([^;]+)", cookie_str)
-        if m and len(m.group(1)) > 20:
-            sso = m.group(1)
-        if not sso:
-            m = _re.search(r"(?:^|;\s*)sso-rw=([^;]+)", cookie_str)
+        for blob in (cookie_str, set_cookie_str, text):
+            if sso:
+                break
+            m = _re.search(r"(?:^|\n|;\s*)sso=([^;\s]+)", blob or "")
             if m and len(m.group(1)) > 20:
                 sso = m.group(1)
-        if not sso and text:
-            m = _re.search(r"\bsso[\"']?\s*[:=]\s*[\"']([^\"']{20,})[\"']", text)
-            if m:
+                continue
+            m = _re.search(r"(?:^|\n|;\s*)sso-rw=([^;\s]+)", blob or "")
+            if m and len(m.group(1)) > 20:
+                sso = m.group(1)
+                continue
+            m = _re.search(r"\bsso[\"']?\s*[:=]\s*[\"']([^\"']{20,})[\"']", blob or "")
+            if m and len(m.group(1)) > 20:
                 sso = m.group(1)
 
         jar = {}

@@ -136,7 +136,7 @@
     /* metric strip */
     .metrics {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 12px;
       margin-bottom: 16px;
     }
@@ -331,6 +331,8 @@
     <div class="metrics">
       <div class="metric"><div class="label">成功</div><div id="mSuccess" class="value ok">0</div></div>
       <div class="metric"><div class="label">失败</div><div id="mFail" class="value bad">0</div></div>
+      <div class="metric"><div class="label">pending_sso</div><div id="mPendingSso" class="value">0</div></div>
+      <div class="metric"><div class="label">跳过(池空)</div><div id="mSkipped" class="value">0</div></div>
       <div class="metric"><div class="label">目标数量</div><div id="mTarget" class="value">0</div></div>
       <div class="metric"><div class="label">状态</div><div id="mState" class="value sm">空闲</div></div>
     </div>
@@ -799,6 +801,7 @@
               <button id="refreshSub2Btn" class="btn btn-ghost" type="button">刷新 Sub2API 状态</button>
               <a id="openSub2Btn" class="btn" href="http://127.0.0.1:8080/" target="_blank" rel="noopener">打开号池</a>
               <button id="dlPendingSsoBtn" class="btn" type="button">下载 pending SSO</button>
+              <button id="recoverPendingSsoBtn" class="btn btn-primary" type="button">二次补 SSO</button>
             </div>
             <div class="form-grid two">
               <label class="check-row span-2"><input id="sub2api_auto_add" type="checkbox" checked /> 注册成功后自动加入 Sub2API（默认开启）</label>
@@ -868,6 +871,8 @@
             <p>· 密钥/密码显示星号表示已保存，不改则保留。</p>
             <p>· Sub2API SSO→OAuth 创建成功即视为入池成功；可用性测试失败默认只告警、不撤销账号，也不影响注册成功结果。</p>
             <p>· 存量 CPA 目录走 <code class="inline">POST /api/v1/admin/accounts</code> 直建 OAuth，不是 sso-to-oauth。也可 CLI：<code class="inline">python -B scripts/import_cpa_to_sub2api.py --dir path</code></p>
+            <p>· <b>CPA 文件怎么用</b>：推荐在本页填 <code class="inline">C:\Users\zhang\Desktop\Grok\cpa</code> 点「导入 CPA 到 Sub2API」，或 CLI 直导 raw <code class="inline">xai-*.json</code>。Sub2API 网页「导入数据」若仍是官方镜像，只认 <code class="inline">type=sub2api-data</code>；当前本机已切 <code class="inline">local/sub2api:cpa-import</code> 后网页也可直接丢 raw CPA。已转换文件示例：<code class="inline">sub2api_data_xai-*.json</code>。</p>
+            <p>· <b>导入成功 ≠ 可用</b>：若 Sub2API 报 <code class="inline">invalid_grant / Refresh token has been revoked</code>，是该号 refresh 已吊销，需要重新 mint OAuth，不是格式问题。</p>
             <p>· Sub2API 号池状态与 SSO 号池对称：可刷新数量、打开后台；无 SSO 账号落在 <code class="inline">accounts_registered_pending_sso.txt</code>。</p>
           </div>
         </div>
@@ -1333,8 +1338,13 @@
         running = !!s.running;
         $('mSuccess').textContent = s.success ?? 0;
         $('mFail').textContent = s.fail ?? 0;
+        if ($('mPendingSso')) $('mPendingSso').textContent = s.pending_sso ?? 0;
+        if ($('mSkipped')) $('mSkipped').textContent = s.skipped ?? 0;
         $('mTarget').textContent = s.target ?? 0;
-        $('mState').textContent = running ? '运行中' : '空闲';
+        const kind = s.job_kind || '';
+        $('mState').textContent = running
+          ? (kind === 'pending_sso_recovery' ? '补SSO中' : '运行中')
+          : '空闲';
         $('runDot').className = 'dot ' + (running ? 'run' : 'idle');
         $('runLabel').textContent = running ? '运行中' : '已停止';
         $('startBtn').disabled = running;
@@ -1504,6 +1514,25 @@
       }
     }
 
+    async function recoverPendingSso() {
+      if (!confirm('确认对 pending SSO 账号启动二次补 SSO？将按邮箱+密码浏览器登录获取 SSO。')) return;
+      const r = await fetch('/api/pending-sso/recover', {
+        method: 'POST',
+        headers: headers(true),
+        body: JSON.stringify({ count: 0 }),
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        appendLog('[!] pending_sso 二次补 SSO 启动失败: ' + text);
+        toast('二次补 SSO 启动失败', false);
+        return;
+      }
+      appendLog('[*] 已启动 pending_sso 二次补 SSO');
+      toast('二次补 SSO 已启动');
+      refreshStatus();
+      refreshPendingSsoInfo();
+    }
+
     async function downloadPendingSso() {
       try {
         const r = await fetch('/api/accounts', { headers: headers() });
@@ -1633,6 +1662,7 @@
     $('refreshG2aBtn').addEventListener('click', refreshIntegration);
     if ($('refreshSub2Btn')) $('refreshSub2Btn').addEventListener('click', refreshIntegration);
     if ($('dlPendingSsoBtn')) $('dlPendingSsoBtn').addEventListener('click', downloadPendingSso);
+    if ($('recoverPendingSsoBtn')) $('recoverPendingSsoBtn').addEventListener('click', recoverPendingSso);
     $('clearLogBtn').addEventListener('click', async () => {
       try {
         const r = await fetch('/api/logs/clear', { method: 'POST', headers: headers() });

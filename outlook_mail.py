@@ -13,6 +13,7 @@ poll_code: Microsoft Graph inbox, extract xAI/Grok code
 token cache: outlook_token_cache.json (local, gitignored)
 
 Changelog:
+- 2026-07-18a: detailed mailbox login failure logs (provider/auth path/exception type/raw error, no masking); classify credential/MFA/network.
 - 2026-07-17e: build_pool 文件优先；登录失败删除同步内存+文件+config；acquire 删除后继续 while 循环。
 - 2026-07-17d: 登录失败/注册成功删除邮箱后同步写回 outlook_accounts 文件 + config 文本，避免重载复活。
 - 2026-07-17c: login fail mark bad + next; Graph scan ALL mailFolders (not only inbox/junk).
@@ -188,6 +189,45 @@ def _is_proxy_error(exc: BaseException) -> bool:
     )
     return any(k in msg for k in keys)
 
+
+
+
+def classify_outlook_login_error(exc: BaseException, *, auth_path: str = '') -> dict:
+    """Return structured Outlook login failure reason. Never masks upstream text."""
+    msg = str(exc or '')
+    msg_l = msg.lower()
+    et = type(exc).__name__
+    category = 'unknown'
+    if any(x in msg for x in ('password login failed', 'MFA/TOTP failed', 'refresh_token invalid', 'AADSTS', 'invalid_grant')) or 'authentication failed' in msg_l:
+        if 'MFA/TOTP' in msg or 'totp' in msg_l:
+            category = 'mfa_totp_failed'
+        elif 'refresh_token' in msg_l or 'invalid_grant' in msg_l:
+            category = 'refresh_token_invalid'
+        else:
+            category = 'credential_invalid'
+    elif any(x in msg_l for x in ('proxy', 'timed out', 'timeout', 'connection', 'ssl', 'network', 'unreachable', 'name or service not known', 'max retries')):
+        category = 'network_proxy_or_timeout'
+    elif 'pool empty' in msg_l or 'no available account' in msg_l:
+        category = 'pool_empty'
+    permanent = category in ('credential_invalid', 'mfa_totp_failed', 'refresh_token_invalid')
+    return {
+        'provider': 'outlook',
+        'protocol': 'Microsoft Graph / OAuth',
+        'auth_path': auth_path or 'unknown',
+        'exception_type': et,
+        'category': category,
+        'permanent': permanent,
+        'raw_error': msg,
+    }
+
+
+def format_outlook_login_error(email: str, exc: BaseException, *, stage: str = 'login', auth_path: str = '') -> str:
+    info = classify_outlook_login_error(exc, auth_path=auth_path)
+    return (
+        f"[!] Outlook {stage} FAIL email={email or '-'} provider=outlook "
+        f"auth={info['auth_path']} category={info['category']} permanent={int(bool(info['permanent']))} "
+        f"exc={info['exception_type']} raw={info['raw_error']}"
+    )
 
 class OutlookSession:
     def __init__(self, client_id=DEFAULT_CLIENT_ID, redirect_uri=DEFAULT_REDIRECT, scope=DEFAULT_SCOPE,
@@ -717,8 +757,10 @@ class OutlookAccountPool:
                 except Exception as exc:
                     last_err = exc
                     acc.last_error = str(exc)
+                    auth_path = "refresh_token" if acc.refresh_token else "password+totp"
+                    info = classify_outlook_login_error(exc, auth_path=auth_path)
                     msg = str(exc)
-                    auth_fail = any(
+                    auth_fail = bool(info.get('permanent')) or any(
                         x in msg
                         for x in (
                             "password login failed",
@@ -730,9 +772,12 @@ class OutlookAccountPool:
                             "account has no refresh_token",
                         )
                     ) or "login failed" in msg.lower()
+                    self._lg(format_outlook_login_error(acc.email, exc, stage='acquire', auth_path=auth_path))
                     if auth_fail:
                         self._lg(
-                            f"[!] Outlook 登录失败，立即从账号池删除(内存+文件+配置)并换下一个 | email={acc.email} | err={exc}"
+                            f"[!] Outlook 登录失败(凭据/MFA类)，立即从账号池删除(内存+文件+配置)并换下一个 | "
+                            f"email={acc.email} category={info.get('category')} "
+                            f"auth={auth_path} exc={info.get('exception_type')} raw={info.get('raw_error')}"
                         )
                         self.accounts = [a for a in self.accounts if a.identity() != acc.identity()]
                         try:
@@ -745,11 +790,14 @@ class OutlookAccountPool:
                     else:
                         acc.cooldown_until = _now() + 120
                         self._lg(
-                            f"[!] Outlook 临时失败，冷却 120s | email={acc.email} | err={exc}"
+                            f"[!] Outlook 临时失败(非凭据)，冷却 120s | email={acc.email} "
+                            f"category={info.get('category')} auth={auth_path} "
+                            f"exc={info.get('exception_type')} raw={info.get('raw_error')}"
                         )
                         self._idx = (self._idx + 1) % max(1, len(self.accounts))
                     self._lg(
-                        f"[*] Outlook 继续尝试池内下一个账号 | tried={acc.email} | pool={len(self.accounts)}"
+                        f"[*] Outlook 继续尝试池内下一个账号 | tried={acc.email} | "
+                        f"pool={len(self.accounts)} last_category={info.get('category')}"
                     )
             raise Exception(f"Outlook no available account (all login failed): {last_err}")
 
@@ -1044,10 +1092,25 @@ def preflight_mailbox(
     pool = get_pool(config, proxies=proxies, log_callback=log_callback)
     _log(
         log_callback,
-        f"[*] Outlook preflight start email={email} "
-        f"scanned_folders=ALL mailFolders top={int(top)}",
+        f"[*] Outlook preflight start email={email} provider=outlook "
+        f"protocol=Graph scanned_folders=ALL mailFolders top={int(top)}",
     )
-    access = pool.resolve_access_token(email, token_blob)
+    try:
+        access = pool.resolve_access_token(email, token_blob)
+    except Exception as token_exc:
+        auth_hint_tmp = 'token_resolve'
+        try:
+            data0 = json.loads(token_blob) if token_blob else {}
+            if data0.get('refresh_token'):
+                auth_hint_tmp = 'refresh_token'
+            elif data0.get('password') and data0.get('totp_secret'):
+                auth_hint_tmp = 'password+TOTP'
+            elif data0.get('access_token'):
+                auth_hint_tmp = 'access_token'
+        except Exception:
+            pass
+        _log(log_callback, format_outlook_login_error(email, token_exc, stage='preflight-token', auth_path=auth_hint_tmp))
+        raise
     if not access:
         raise Exception(f"Outlook preflight: empty access_token email={email}")
     auth_hint = "token_blob"
@@ -1075,6 +1138,7 @@ def preflight_mailbox(
             sess = OutlookSession(client_id=cid, proxies=None, log_callback=log_callback)
             msgs = sess.list_inbox(access, top=int(top))
         else:
+            _log(log_callback, format_outlook_login_error(email, graph_exc, stage='preflight-graph', auth_path=auth_hint))
             raise
     folder_counts: dict[str, int] = {}
     for msg in msgs:
