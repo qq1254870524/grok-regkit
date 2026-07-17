@@ -159,6 +159,23 @@ def _sync_proxy_list_file(text: str, cfg: Optional[Dict[str, Any]] = None) -> st
     return body
 
 
+def _outlook_accounts_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Return editable multi-line Outlook account pool text for the web UI."""
+    c = cfg if isinstance(cfg, dict) else dict(engine.config)
+    inline = str(c.get("outlook_accounts") or "").strip()
+    if inline:
+        return inline.replace('\r\n', '\n').strip() + '\n'
+    name = str(c.get("outlook_accounts_file") or "outlook_accounts.txt").strip() or "outlook_accounts.txt"
+    path = Path(name) if os.path.isabs(name) else (ROOT / name)
+    try:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            return text.replace('\r\n', '\n').strip() + ('\n' if text.strip() else "")
+    except Exception:
+        pass
+    return ""
+
+
 def _public_config() -> Dict[str, Any]:
     engine.load_config()
     cfg = dict(engine.config)
@@ -166,6 +183,7 @@ def _public_config() -> Dict[str, Any]:
         cfg["cpa_management_key"] = "***"
     # Always expose full editable proxy pool text in the web panel
     cfg["proxy_list"] = _proxy_list_raw_text(cfg).rstrip("\n")
+    cfg["outlook_accounts"] = _outlook_accounts_raw_text(cfg).rstrip('\n')
     masked = {k: _mask_value(k, v) for k, v in cfg.items()}
     for key in SECRET_FIELDS:
         raw = cfg.get(key, "")
@@ -177,6 +195,15 @@ def _public_config() -> Dict[str, Any]:
             ln
             for ln in str(masked["proxy_list"]).splitlines()
             if ln.strip() and not ln.strip().startswith("#")
+        ]
+    )
+    # outlook_accounts fully editable in web (email----password----totp)
+    masked["outlook_accounts"] = cfg.get("outlook_accounts") or ""
+    masked["outlook_accounts_count"] = len(
+        [
+            ln
+            for ln in str(masked["outlook_accounts"]).splitlines()
+            if ln.strip() and not ln.strip().startswith("#") and "@" in ln
         ]
     )
     return masked
@@ -280,6 +307,10 @@ class ConfigBody(BaseModel):
     proxy_no_direct_fallback: Optional[bool] = None
     yyds_api_key: Optional[str] = None
     yyds_jwt: Optional[str] = None
+    outlook_accounts: Optional[str] = None
+    outlook_accounts_file: Optional[str] = None
+    outlook_client_id: Optional[str] = None
+    outlook_token_cache: Optional[str] = None
 
 
 def _run_job(count: int) -> None:
@@ -535,6 +566,23 @@ async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(
         "socks5",
     ):
         _sync_proxy_list_file(str(engine.config.get("proxy_list") or ""), engine.config)
+    # Outlook account pool: keep textarea + outlook_accounts.txt in sync
+    if "outlook_accounts" in updates:
+        raw = str(engine.config.get("outlook_accounts") or "")
+        name = str(engine.config.get("outlook_accounts_file") or "outlook_accounts.txt").strip() or "outlook_accounts.txt"
+        path = Path(name) if os.path.isabs(name) else (ROOT / name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            body = raw.rstrip('\n')
+            path.write_text((body + '\n') if body else "", encoding="utf-8")
+            engine.config["outlook_accounts_file"] = name
+        except Exception as exc:
+            _append_log(f"[!] write outlook_accounts file failed: {exc}")
+        try:
+            import outlook_mail as _om
+            _om.get_pool(engine.config, force_reload=True)
+        except Exception:
+            pass
     engine.save_config()
     return {"ok": True, "config": _public_config()}
 

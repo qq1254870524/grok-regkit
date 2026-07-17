@@ -563,6 +563,7 @@
             <button type="button" class="provider-tab active" data-p="cloudflare">Cloudflare</button>
             <button type="button" class="provider-tab" data-p="duckmail">DuckMail</button>
             <button type="button" class="provider-tab" data-p="yyds">YYDS</button>
+            <button type="button" class="provider-tab" data-p="outlook">Outlook</button>
             <button type="button" class="provider-tab" data-p="tempmail_io">TempMail.io</button>
             <button type="button" class="provider-tab" data-p="linshiyouxiang">临时邮箱.net</button>
             <button type="button" class="provider-tab" data-p="boomlify">Boomlify</button>
@@ -616,6 +617,29 @@
               <div class="field">
                 <div class="label">YYDS JWT（可选）</div>
                 <input id="yyds_jwt" type="password" autocomplete="off" />
+              </div>
+            </div>
+          </div>
+
+          <div id="panel-outlook" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>微软 Outlook / Hotmail</b>：用自有账号池收 Grok 验证码（不创建临时邮箱）。</p>
+              <p>· 每行格式：<code>邮箱----密码----TOTP密钥</code> 或 <code>邮箱----client_id----refresh_token</code></p>
+              <p>· 登录：密码两步 + Authenticator TOTP → Graph Mail.Read；token 缓存本地 <code>outlook_token_cache.json</code>。</p>
+              <p>· 点「保存配置」会同步写入 <code>outlook_accounts.txt</code>（本地文件，不入库）。</p>
+            </div>
+            <div class="field">
+              <div class="label">Outlook 账号池（每行一个）</div>
+              <textarea id="outlook_accounts" rows="8" placeholder="user@outlook.com----password----BASE32TOTP" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px;"></textarea>
+            </div>
+            <div class="form-grid two">
+              <div class="field">
+                <div class="label">账号文件名</div>
+                <input id="outlook_accounts_file" type="text" placeholder="outlook_accounts.txt" />
+              </div>
+              <div class="field">
+                <div class="label">Client ID（可选）</div>
+                <input id="outlook_client_id" type="text" placeholder="9e5f94bc-e8a4-4e73-b8be-63364c29d753" />
               </div>
             </div>
           </div>
@@ -807,7 +831,7 @@
         btn.classList.toggle('active', btn.dataset.p === p);
       });
       const panels = [
-        'cloudflare', 'duckmail', 'yyds',
+        'cloudflare', 'duckmail', 'yyds', 'outlook',
         'tempmail_io', 'linshiyouxiang', 'boomlify', 'tempmail_org', 'mailtm', 'tempmail_lol', 'tempmail_plus'
       ];
       panels.forEach((name) => {
@@ -1004,6 +1028,9 @@
         duckmail_api_key: $('duckmail_api_key').value,
         yyds_api_key: $('yyds_api_key').value,
         yyds_jwt: $('yyds_jwt').value,
+        outlook_accounts: ($('outlook_accounts')?.value || '').replace(/\r\n/g, '\n'),
+        outlook_accounts_file: ($('outlook_accounts_file')?.value || 'outlook_accounts.txt').trim() || 'outlook_accounts.txt',
+        outlook_client_id: ($('outlook_client_id')?.value || '').trim(),
         proxy_mode: mode,
         proxy,
         proxy_airport_url: airportUrl,
@@ -1064,6 +1091,9 @@
       setVal('duckmail_api_key', c.duckmail_api_key || '');
       setVal('yyds_api_key', c.yyds_api_key || '');
       setVal('yyds_jwt', c.yyds_jwt || '');
+      setVal('outlook_accounts', c.outlook_accounts || '');
+      setVal('outlook_accounts_file', c.outlook_accounts_file || 'outlook_accounts.txt');
+      setVal('outlook_client_id', c.outlook_client_id || '9e5f94bc-e8a4-4e73-b8be-63364c29d753');
       setVal('proxy', c.proxy || '');
       setVal('proxy_airport_url', c.proxy_airport_url || c.proxy || 'http://127.0.0.1:7893');
       setVal('proxy_api_url', c.proxy_api_url || 'https://api.cliproxy.io/white/api');

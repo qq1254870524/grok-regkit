@@ -46,3 +46,7 @@ web/__pycache__/
 # auth exports
 cpa_xai/
 browser/
+
+# Outlook / mail secrets
+outlook_token_cache.json
+outlook_accounts.txt

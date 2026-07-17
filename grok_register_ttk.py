@@ -5,6 +5,9 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-17d: 接入微软 Outlook/Hotmail 邮箱 provider（password+TOTP 或 refresh_token），
+  Graph Mail.Read 收验证码；配置 outlook_accounts / outlook_accounts_file / outlook_token_cache；
+  Web/桌面 GUI 可选 outlook；依赖 pyotp。
 - 2026-07-17c: SOCKS5 代理池改为通用 proxy_mode=socks5_list（注册/HTTP/YYDS/浏览器共用），
   socks5_proxies.txt；失败轮询；Chromium 本地 SOCKS5 认证桥；需 PySocks。
 - 2026-07-17b: 原 email_proxy_* 专用池已并入通用代理池。
@@ -63,6 +66,11 @@ try:
     import temp_email_public_providers as public_email
 except Exception:
     public_email = None  # type: ignore
+
+try:
+    import outlook_mail
+except Exception:
+    outlook_mail = None  # type: ignore
 
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -185,6 +193,16 @@ DEFAULT_CONFIG = {
     # 后台入池：浏览器松了再多试几次，比注册高峰硬等 502 更划算
     "grok2api_bg_max_http_tries": 6,
     "grok2api_bg_http_timeout_sec": 15,
+    # ===== Email providers =====
+    "email_provider": "duckmail",
+    "defaultDomains": "",
+    "yyds_api_key": "",
+    "yyds_jwt": "",
+    # Outlook / Microsoft personal mailbox (password+TOTP or refresh_token)
+    "outlook_accounts": "",
+    "outlook_accounts_file": "outlook_accounts.txt",
+    "outlook_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+    "outlook_token_cache": "outlook_token_cache.json",
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -2869,6 +2887,27 @@ def get_email_and_token(api_key=None, log_callback=None):
                 )
             raise
 
+    if outlook_mail is not None and outlook_mail.is_outlook_provider(provider_key):
+        proxies = get_proxies() or None
+        _lg("[*] 邮箱来源: 微软 Outlook / Hotmail / Microsoft 账号池")
+        _lg("[*] 获取方式: password+TOTP 登录或 refresh_token 刷新 → Microsoft Graph Mail.Read")
+        _lg(f"[*] 账号池文件: {config.get('outlook_accounts_file') or 'outlook_accounts.txt'}")
+        try:
+            email, token = outlook_mail.get_email_and_token(
+                config, proxies=proxies, log_callback=log_callback
+            )
+            _lg(f"[+] Outlook 邮箱获取成功: {email}")
+            return email, token
+        except Exception as exc:
+            if proxies and is_proxy_connection_error(exc):
+                _lg(f"[!] Outlook 经代理失败，改直连重试: {exc}")
+                email, token = outlook_mail.get_email_and_token(
+                    config, proxies=None, log_callback=log_callback
+                )
+                _lg(f"[+] Outlook 邮箱获取成功(直连): {email}")
+                return email, token
+            raise
+
     if provider_key == "yyds":
         _lg("[*] 邮箱来源: YYDS 付费邮箱 API")
         _lg("[*] 获取方式: 调用 YYDS 接口创建临时地址")
@@ -2958,6 +2997,34 @@ def get_oai_code(
             if proxies and is_proxy_connection_error(exc):
                 return public_email.get_public_code(
                     provider,
+                    dev_token,
+                    email,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                    log_callback=log_callback,
+                    cancel_callback=cancel_callback,
+                    extract_fn=extract_verification_code,
+                    proxies=None,
+                )
+            raise
+    if outlook_mail is not None and outlook_mail.is_outlook_provider(provider):
+        proxies = get_proxies() or None
+        try:
+            return outlook_mail.get_oai_code(
+                config,
+                dev_token,
+                email,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+                extract_fn=extract_verification_code,
+                proxies=proxies,
+            )
+        except Exception as exc:
+            if proxies and is_proxy_connection_error(exc):
+                return outlook_mail.get_oai_code(
+                    config,
                     dev_token,
                     email,
                     timeout=timeout,
@@ -4833,7 +4900,7 @@ class GrokRegisterGUI:
 
         add_label(0, 0, "邮箱服务商:")
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org", "mailtm", "tempmail_lol", "tempmail_plus"], width=16)
+        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "outlook", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org", "mailtm", "tempmail_lol", "tempmail_plus"], width=16)
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
         add_label(0, 2, "注册数量:")
@@ -5031,6 +5098,17 @@ class GrokRegisterGUI:
         if config["email_provider"] == "cloudflare" and not config["cloudflare_api_base"]:
             self.log("[!] Cloudflare 模式需要先填写 Cloudflare API Base")
             return
+        if str(config.get("email_provider") or "").strip().lower() in ("outlook", "microsoft", "hotmail", "ms_outlook"):
+            has_text = bool(str(config.get("outlook_accounts") or "").strip())
+            acc_file = str(config.get("outlook_accounts_file") or "outlook_accounts.txt").strip()
+            if acc_file and not os.path.isabs(acc_file):
+                acc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), acc_file)
+            else:
+                acc_path = acc_file
+            has_file = bool(acc_path and os.path.isfile(acc_path) and os.path.getsize(acc_path) > 0)
+            if not has_text and not has_file:
+                self.log("[!] Outlook 模式需要配置 outlook_accounts 或 outlook_accounts.txt（email----password----totp）")
+                return
         try:
             count = int(self.count_var.get())
         except Exception:

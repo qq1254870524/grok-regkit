@@ -12,8 +12,9 @@
 | `cloudflare` | `cloudflare_api_base`，可选 `cloudflare_api_key` / `cloudflare_auth_mode` | [Cloudflare Temp Email](https://github.com/dreamhunter2333/cloudflare_temp_email) 兼容 Worker（路径可配） |
 | `duckmail` | `duckmail_api_key` | DuckMail（`https://api.duckmail.sbs`） |
 | `yyds` | `yyds_api_key`，可选 `yyds_jwt` | [YYDS Mail](https://vip.215.im/docs)：拉域名 → 建地址 → 轮询邮件取码 |
+| `outlook` | `outlook_accounts` / `outlook_accounts_file` | 微软邮箱 password+TOTP 或 refresh_token；Graph 收信 |
 
-Web 控制台页签：Cloudflare / DuckMail / YYDS。
+Web 控制台页签：Cloudflare / DuckMail / YYDS / Outlook / 公共临时邮箱。
 
 ### YYDS 示例
 
@@ -36,6 +37,58 @@ Web 控制台页签：Cloudflare / DuckMail / YYDS。
 
 ---
 
+---
+
+## Outlook / Microsoft（本项目已实现）
+
+| `email_provider` | 配置项 | 说明 |
+|------------------|--------|------|
+| `outlook`（别名 `microsoft` / `hotmail` / `ms_outlook`） | `outlook_accounts` 或 `outlook_accounts_file`，可选 `outlook_client_id` / `outlook_token_cache` | 自有微软邮箱池；密码+TOTP 或 refresh_token；Microsoft Graph `Mail.Read` 收信 |
+
+### 账号行格式
+
+```text
+# 推荐：密码 + Authenticator TOTP
+user@outlook.com----password----BASE32TOTPSECRET
+
+# 可选带 client_id
+user@outlook.com----password----BASE32TOTPSECRET----9e5f94bc-e8a4-4e73-b8be-63364c29d753
+
+# 已有 refresh_token
+user@outlook.com----9e5f94bc-e8a4-4e73-b8be-63364c29d753----0.AXoA...refresh...
+user@outlook.com----0.AXoA...refresh...
+```
+
+分隔符支持 `----` / `|` / 制表符 / 逗号。
+
+### 登录与收信流程
+
+1. OAuth authorize（native client redirect）
+2. 两步密码：先提交邮箱，再提交密码
+3. MFA：`type=19` + TOTP `otc` + Authenticator proof
+4. Consent 跟随后换 `access_token` / `refresh_token`
+5. `GET https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages` 轮询验证码
+6. `refresh_token` 写入本地 `outlook_token_cache.json`（**勿提交 Git**）
+
+### 配置示例
+
+```json
+"email_provider": "outlook",
+"outlook_accounts_file": "outlook_accounts.txt",
+"outlook_accounts": "",
+"outlook_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+"outlook_token_cache": "outlook_token_cache.json"
+```
+
+Web：邮箱来源 Tab 选 **Outlook**，在文本框粘贴账号池后点保存。
+
+### 限制
+
+- 个人微软账号需开启 Authenticator / 可用 TOTP；纯短信可能无法自动过 MFA
+- 不使用 IMAP basic（个人号常失败）；不使用 ROPC password grant
+- 账号池并发时同一邮箱会标记 `in_use`，避免抢号
+- 密钥文件 `outlook_accounts.txt` / `outlook_token_cache.json` 默认 gitignore
+
 ## 适配参考（chatgpt2api 注册邮箱栈）
 
 本仓库**当前未全部实现**下列类型；下列来自本地维护的 ChatGPT 注册机  
@@ -54,7 +107,7 @@ Web 控制台页签：Cloudflare / DuckMail / YYDS。
 | `tempmail_lol` | Tempmail.lol | 未接入 |
 | `ddg_mail` | DuckDuckGo 别名邮 | 未接入 |
 | `inbucket` | 自建 Inbucket | 未接入 |
-| `outlook_token` | Outlook/Hotmail **OAuth refresh_token** 读信 | 未接入；可参考独立模块 |
+| `outlook_token` | Outlook/Hotmail **OAuth refresh_token** 读信 | 已由本项目 `outlook` provider 覆盖（见下节） |
 
 ### 可借鉴的运维点（实现新 provider 时）
 

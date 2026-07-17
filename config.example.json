@@ -38,6 +38,7 @@
         "cloudflare",
         "duckmail",
         "yyds",
+        "outlook",
         "tempmail_io",
         "linshiyouxiang",
         "boomlify",
@@ -46,7 +47,7 @@
         "tempmail_lol",
         "tempmail_plus"
     ],
-    "_email_provider_note": "公共临时邮箱 tempmail_io/linshiyouxiang/boomlify/tempmail_org 无需 API Key；推荐 tempmail_io 另含公共无 key：mailtm / tempmail_lol / tempmail_plus。",
+    "_email_provider_note": "公共临时邮箱 tempmail_io/linshiyouxiang/boomlify/tempmail_org 无需 API Key；推荐 tempmail_io 另含公共无 key：mailtm / tempmail_lol / tempmail_plus。 outlook=微软邮箱 password+TOTP/refresh_token，见 docs/mail-providers.md。",
     "cpa_auto_add": true,
     "cpa_remote_url": "http://127.0.0.1:8317",
     "cpa_management_key": "",
@@ -66,5 +67,9 @@
         "airport",
         "socks5_list"
     ],
-    "_proxy_mode_note": "socks5_list=通用SOCKS5池(socks5_proxies.txt)，注册/HTTP/YYDS/浏览器共用"
+    "_proxy_mode_note": "socks5_list=通用SOCKS5池(socks5_proxies.txt)，注册/HTTP/YYDS/浏览器共用",
+    "outlook_accounts": "",
+    "outlook_accounts_file": "outlook_accounts.txt",
+    "outlook_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+    "outlook_token_cache": "outlook_token_cache.json"
 }
