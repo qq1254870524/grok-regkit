@@ -10,6 +10,7 @@ create/acquire: rent mailbox from pool, IMAP LOGIN
 poll_code: IMAP INBOX + Junk/Spam/Bulk, extract xAI/Grok code
 
 Changelog:
+- 2026-07-17b: login fail -> mark bad + next account; scan ALL IMAP folders.
 - 2026-07-17: initial AOL IMAP provider (imap.aol.com:993).
 """
 from __future__ import annotations
@@ -294,48 +295,49 @@ class AolImapSession:
         return False
 
     def fetch_recent(self, top_per_folder: int = 30) -> List[dict]:
-        """Return recent messages from INBOX + junk-like folders."""
+        """Return recent messages from ALL IMAP folders (LIST), newest first per folder."""
         assert self.M
-        available = set(self.list_folders())
-        self._lg(f"[*] AOL IMAP folders available count={len(available)} sample={list(available)[:12]}")
-        targets: List[str] = []
-        for f in self.FOLDERS:
-            # match case-insensitive against LIST
-            if f in available or f.upper() in {a.upper() for a in available}:
-                targets.append(f)
-            else:
-                # try fuzzy
-                for a in available:
-                    if a.lower() == f.lower() or a.lower().endswith(f.lower()):
-                        targets.append(a)
-                        break
-        if "INBOX" not in targets and not any(t.upper() == "INBOX" for t in targets):
-            targets.insert(0, "INBOX")
-        # dedupe preserve order
-        seen_f, ordered = set(), []
-        for t in targets:
-            k = t.lower()
+        available = self.list_folders()
+        self._lg(
+            f"[*] AOL IMAP LIST folders count={len(available)} all={available}"
+        )
+        # Prefer INBOX first, then rest alphabetically for stable logs
+        ordered: List[str] = []
+        seen_f: set[str] = set()
+        for preferred in ("INBOX", "Inbox", "inbox"):
+            for a in available:
+                if a == preferred or a.upper() == "INBOX":
+                    if a.lower() not in seen_f:
+                        ordered.append(a)
+                        seen_f.add(a.lower())
+        for a in available:
+            k = a.lower()
             if k in seen_f:
                 continue
+            # skip non-selectable / noselect if flagged in name quirks later
+            ordered.append(a)
             seen_f.add(k)
-            ordered.append(t)
+        if not ordered:
+            ordered = ["INBOX"]
 
         out: List[dict] = []
         folder_counts: Dict[str, int] = {}
+        folder_errors: Dict[str, str] = {}
         for folder in ordered:
             if not self._select_folder(folder):
+                folder_errors[folder] = "select_fail"
                 self._lg(f"[!] AOL skip folder select fail: {folder}")
                 continue
             try:
                 typ, data = self.M.search(None, "ALL")
             except Exception as exc:
+                folder_errors[folder] = str(exc)
                 self._lg(f"[!] AOL search fail folder={folder}: {exc}")
                 continue
             if typ != "OK" or not data or not data[0]:
                 folder_counts[folder] = 0
                 continue
             ids = data[0].split()
-            # most recent last in IMAP usually
             recent = ids[-int(top_per_folder) :]
             recent = list(reversed(recent))  # newest first
             folder_counts[folder] = len(recent)
@@ -356,7 +358,6 @@ class AolImapSession:
                     frm = _decode_mime_header(msg.get("From") or "")
                     date_hdr = msg.get("Date") or ""
                     body = _message_text_from_email(msg)
-                    # received epoch
                     recv_ts = 0.0
                     try:
                         recv_ts = parsedate_to_datetime(date_hdr).timestamp()
@@ -377,11 +378,15 @@ class AolImapSession:
                 except Exception as exc:
                     self._lg(f"[!] AOL fetch fail folder={folder} mid={mid}: {exc}")
                     continue
-            self._lg(f"[*] AOL IMAP folder={folder} fetched={folder_counts.get(folder, 0)}")
+            self._lg(
+                f"[*] AOL IMAP folder={folder} fetched={folder_counts.get(folder, 0)} "
+                f"top={top_per_folder}"
+            )
         out.sort(key=lambda m: float(m.get("received_ts") or 0), reverse=True)
         self._lg(
-            f"[*] AOL folders merged counts={folder_counts} total={len(out)} "
-            f"scanned_folders={list(folder_counts.keys())} 非全量(每夹 top≈{top_per_folder})"
+            f"[*] AOL ALL-folders merged counts={folder_counts} total={len(out)} "
+            f"scanned_folders={list(folder_counts.keys())} "
+            f"errors={folder_errors or {}} 每夹 top≈{top_per_folder}"
         )
         return out
 
@@ -442,17 +447,32 @@ class AolAccountPool:
                 except Exception as exc:
                     last_err = exc
                     acc.last_error = str(exc)
-                    acc.cooldown_until = _now() + 120
                     msg = str(exc)
-                    if "AUTHENTICATIONFAILED" in msg or "Invalid credentials" in msg:
+                    auth_fail = (
+                        "AUTHENTICATIONFAILED" in msg
+                        or "Invalid credentials" in msg
+                        or "LOGIN failed" in msg
+                        or "authentication failed" in msg.lower()
+                    )
+                    if auth_fail:
+                        acc.status = "bad"
+                        acc.cooldown_until = _now() + 86400 * 365
                         self._lg(
-                            f"[!] AOL IMAP 认证失败 email={acc.email} | "
-                            f"第二段应按「邮箱密码或 AOL 应用专用密码(Secure Mail Key)」使用；"
-                            f"纯 Authenticator TOTP 密钥无法单独 IMAP 登录 | raw={exc}"
+                            f"[!] AOL IMAP 登录失败，标记坏号并换下一个 | email={acc.email} | "
+                            f"err={exc}"
                         )
                     else:
-                        self._lg(f"[!] AOL account failed {acc.email}: {exc}")
-            raise Exception(f"AOL no available account: {last_err}")
+                        # temporary: cooldown then retry later
+                        acc.status = "idle"
+                        acc.cooldown_until = _now() + 120
+                        self._lg(
+                            f"[!] AOL 临时失败，冷却 120s 后可再试 | email={acc.email} | err={exc}"
+                        )
+                    self._lg(
+                        f"[*] AOL 继续尝试池内下一个账号 | tried={acc.email} | "
+                        f"pool={n} | remaining_scan={n - i - 1}"
+                    )
+            raise Exception(f"AOL no available account (all login failed): {last_err}")
 
     def release(self, email: str, ok: bool = True, bad: bool = False) -> None:
         with _POOL_LOCK:
@@ -532,7 +552,7 @@ def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None,
     _log(
         log_callback,
         f"[*] AOL preflight start email={em} protocol=IMAP host=imap.aol.com "
-        f"scanned_folders=INBOX+Junk/Spam top={int(top)} 非全量",
+        f"scanned_folders=ALL IMAP folders top={int(top)}",
     )
     sess = AolImapSession(em, password, log_callback=log_callback)
     try:
@@ -556,14 +576,14 @@ def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None,
             "ok": True,
             "total": len(msgs),
             "folder_counts": folder_counts,
-            "scanned_folders": "INBOX+Junk/Spam/Bulk",
+            "scanned_folders": "ALL",
             "top": int(top),
             "full_mailbox": False,
             "protocol": "imap",
         }
         _log(
             log_callback,
-            f"[+] AOL preflight OK email={em} total={len(msgs)} counts={folder_counts} 非全量",
+            f"[+] AOL preflight OK email={em} total={len(msgs)} counts={folder_counts} all_folders=True",
         )
         return summary
     finally:
@@ -598,7 +618,7 @@ def get_oai_code(
     _log(
         log_callback,
         f"[*] AOL poll code | email={email} | protocol=IMAP imap.aol.com "
-        f"scanned_folders=INBOX+Junk/Spam top={TOP} 非全量"
+        f"scanned_folders=ALL IMAP folders top={TOP}"
         f" | ignore_existing={ignore_existing} | since_ts={baseline_ts:.3f}",
     )
     deadline = poll_started + timeout
@@ -699,7 +719,7 @@ def get_oai_code(
     pool.release(email, ok=False)
     raise Exception(
         f"AOL code timeout email={email} last_error={last_err} rounds={poll_round} "
-        f"protocol=IMAP top={TOP} 非全量"
+        f"protocol=IMAP top={TOP} all_folders=True"
     )
 
 

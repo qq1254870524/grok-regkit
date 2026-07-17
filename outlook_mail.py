@@ -13,6 +13,7 @@ poll_code: Microsoft Graph inbox, extract xAI/Grok code
 token cache: outlook_token_cache.json (local, gitignored)
 
 Changelog:
+- 2026-07-17c: login fail mark bad + next; Graph scan ALL mailFolders (not only inbox/junk).
 - 2026-07-17b: preflight Graph login helper; poll top=50; each-round mail dump
   (folder/subject/from/received/id); explicit non-full-mailbox scan note;
   hybrid waits 3s after CreateEmail (caller side).
@@ -447,38 +448,144 @@ class OutlookSession:
             raise last_exc
         return []
 
+    def _graph_list_all_folder_ids(self, access_token: str) -> List[tuple[str, str]]:
+        """Return [(folder_key_or_id, display_name), ...] for all mailFolders incl. children."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        attempts = [(None, "direct")]
+        if self.proxies:
+            attempts.append((self.proxies, "proxy"))
+        last_exc: Exception | None = None
+        value: list = []
+        for px, label in attempts:
+            try:
+                sess = requests.Session()
+                sess.headers.update(self.s.headers)
+                if px:
+                    sess.proxies.update(px)
+                url = (
+                    "https://graph.microsoft.com/v1.0/me/mailFolders"
+                    "?includeHiddenFolders=true&$top=100"
+                    "&$select=id,displayName,parentFolderId,childFolderCount,totalItemCount"
+                )
+                r = sess.get(url, headers=headers, timeout=self.timeout)
+                if r.status_code == 401:
+                    raise Exception("Graph 401: access_token expired")
+                r.raise_for_status()
+                value = list((r.json() or {}).get("value") or [])
+                self._lg(f"[*] Outlook Graph list mailFolders via {label} count={len(value)}")
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                self._lg(f"[!] Outlook list mailFolders via {label} fail: {exc}")
+                if "401" in str(exc):
+                    raise
+                continue
+        if last_exc and not value:
+            raise last_exc
+
+        out: List[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def _add(fid: str, name: str) -> None:
+            fid = str(fid or "").strip()
+            name = str(name or fid or "").strip()
+            if not fid or fid in seen:
+                return
+            seen.add(fid)
+            out.append((fid, name))
+
+        # well-known first
+        for well in ("inbox", "junkemail", "deleteditems", "archive", "drafts", "sentitems"):
+            _add(well, well)
+
+        # BFS child folders
+        queue = list(value)
+        depth_guard = 0
+        while queue and depth_guard < 500:
+            depth_guard += 1
+            folder = queue.pop(0) or {}
+            fid = str(folder.get("id") or "")
+            name = str(folder.get("displayName") or fid)
+            _add(fid, name)
+            child_n = int(folder.get("childFolderCount") or 0)
+            if child_n <= 0 or not fid:
+                continue
+            # fetch children
+            for px, label in attempts:
+                try:
+                    sess = requests.Session()
+                    sess.headers.update(self.s.headers)
+                    if px:
+                        sess.proxies.update(px)
+                    curl = (
+                        f"https://graph.microsoft.com/v1.0/me/mailFolders/{fid}/childFolders"
+                        f"?$top=100&$select=id,displayName,childFolderCount,totalItemCount"
+                    )
+                    cr = sess.get(curl, headers=headers, timeout=self.timeout)
+                    if cr.status_code == 401:
+                        raise Exception("Graph 401: access_token expired")
+                    if cr.status_code >= 400:
+                        continue
+                    kids = list((cr.json() or {}).get("value") or [])
+                    queue.extend(kids)
+                    break
+                except Exception as exc:
+                    if "401" in str(exc):
+                        raise
+                    continue
+        self._lg(
+            f"[*] Outlook Graph ALL folders resolved count={len(out)} "
+            f"names={[n for _, n in out[:20]]}{'...' if len(out) > 20 else ''}"
+        )
+        return out
+
     def list_inbox(self, access_token: str, top: int = 15) -> List[dict]:
-        """List recent mail from Inbox + Junk/Spam (deduped by id)."""
-        folders = ("inbox", "junkemail")
+        """List recent mail from ALL Graph mail folders (deduped by id)."""
         merged: List[dict] = []
         seen_ids: set[str] = set()
         last_exc: Exception | None = None
         folder_counts: dict[str, int] = {}
-        for folder in folders:
+        try:
+            folders = self._graph_list_all_folder_ids(access_token)
+        except Exception as exc:
+            # fallback to classic well-known set
+            self._lg(f"[!] Outlook list all folders failed, fallback inbox+junk: {exc}")
+            folders = [("inbox", "inbox"), ("junkemail", "junkemail"), ("deleteditems", "deleteditems")]
+
+        for folder_key, display_name in folders:
             try:
-                items = self._graph_get_messages(access_token, folder, top=top)
+                items = self._graph_get_messages(access_token, folder_key, top=top)
             except Exception as exc:
                 last_exc = exc
-                if folder == "inbox":
-                    raise
-                self._lg(f"[!] Outlook skip folder={folder}: {exc}")
+                # well-known inbox failure is fatal only if nothing else worked
+                self._lg(
+                    f"[!] Outlook skip folder={display_name} key={folder_key[:24]}: {exc}"
+                )
                 continue
-            folder_counts[folder] = len(items)
+            label = display_name or folder_key
+            folder_counts[label] = len(items)
             for msg in items:
                 mid = str((msg or {}).get("id") or "")
                 if mid and mid in seen_ids:
                     continue
                 if mid:
                     seen_ids.add(mid)
+                if isinstance(msg, dict):
+                    msg["_folder"] = label
+                    msg["_folder_key"] = folder_key
                 merged.append(msg)
 
         def _recv_key(msg: dict) -> str:
             return str((msg or {}).get("receivedDateTime") or "")
 
         merged.sort(key=_recv_key, reverse=True)
+        if not merged and last_exc:
+            raise last_exc
         self._lg(
-            f"[*] Outlook folders merged counts={folder_counts} total={len(merged)}"
-            + (f" last_err={last_exc}" if last_exc and "inbox" not in folder_counts else "")
+            f"[*] Outlook ALL-folders merged counts={folder_counts} total={len(merged)} "
+            f"folder_n={len(folder_counts)}"
+            + (f" last_err={last_exc}" if last_exc else "")
         )
         return merged
 
@@ -568,9 +675,34 @@ class OutlookAccountPool:
                 except Exception as exc:
                     last_err = exc
                     acc.last_error = str(exc)
-                    acc.cooldown_until = _now() + 120
-                    self._lg(f"[!] Outlook account failed {acc.email}: {exc}")
-            raise Exception(f"Outlook no available account: {last_err}")
+                    msg = str(exc)
+                    auth_fail = any(
+                        x in msg
+                        for x in (
+                            "password login failed",
+                            "MFA/TOTP failed",
+                            "refresh_token invalid",
+                            "401",
+                            "AADSTS",
+                            "invalid_grant",
+                            "account has no refresh_token",
+                        )
+                    ) or "login failed" in msg.lower()
+                    if auth_fail:
+                        acc.status = "bad"
+                        acc.cooldown_until = _now() + 86400 * 365
+                        self._lg(
+                            f"[!] Outlook 登录失败，标记坏号并换下一个 | email={acc.email} | err={exc}"
+                        )
+                    else:
+                        acc.cooldown_until = _now() + 120
+                        self._lg(
+                            f"[!] Outlook 临时失败，冷却 120s | email={acc.email} | err={exc}"
+                        )
+                    self._lg(
+                        f"[*] Outlook 继续尝试池内下一个账号 | tried={acc.email} | pool={n}"
+                    )
+            raise Exception(f"Outlook no available account (all login failed): {last_err}")
 
     def release(self, email: str, ok: bool = True, bad: bool = False) -> None:
         with _POOL_LOCK:
@@ -768,7 +900,7 @@ def preflight_mailbox(
     _log(
         log_callback,
         f"[*] Outlook preflight start email={email} "
-        f"scanned_folders=inbox+junkemail top={int(top)} (非全量邮箱)",
+        f"scanned_folders=ALL mailFolders top={int(top)}",
     )
     access = pool.resolve_access_token(email, token_blob)
     if not access:
@@ -823,7 +955,7 @@ def preflight_mailbox(
         "ok": True,
         "total": len(msgs),
         "folder_counts": folder_counts,
-        "scanned_folders": "inbox+junkemail",
+        "scanned_folders": "ALL",
         "top": int(top),
         "full_mailbox": False,
     }
@@ -831,7 +963,7 @@ def preflight_mailbox(
         log_callback,
         f"[+] Outlook preflight OK email={email} auth={auth_hint} "
         f"inbox={folder_counts.get('inbox', 0)} junkemail={folder_counts.get('junkemail', 0)} "
-        f"total={len(msgs)} scanned_folders=inbox+junkemail top={int(top)} 非全量",
+        f"total={len(msgs)} scanned_folders=ALL top={int(top)}",
     )
     return summary
 
@@ -855,7 +987,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
     _log(
         log_callback,
         f"[*] Outlook poll code | email={email} | API=Microsoft Graph "
-        f"scanned_folders=inbox+junkemail top={GRAPH_TOP} 非全量邮箱"
+        f"scanned_folders=ALL mailFolders top={GRAPH_TOP}"
         f" | ignore_existing={ignore_existing} | since_ts={baseline_ts:.3f} "
         f"cutoff={baseline_ts - 120:.3f}",
     )
@@ -919,7 +1051,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
             _log(
                 log_callback,
                 f"[*] Outlook Graph messages count={len(msgs)} email={email} "
-                f"folders=inbox+junkemail top={GRAPH_TOP} 非全量 "
+                f"folders=ALL top={GRAPH_TOP} "
                 f"counts={folder_counts} login={login_method}",
             )
             # Always dump recent mails each round for diagnosis (no redaction)
@@ -1036,7 +1168,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
     raise Exception(
         f"Outlook code timeout email={email} last_error={last_err} "
         f"rounds={poll_round} login={login_method} "
-        f"scanned_folders=inbox+junkemail top={GRAPH_TOP} 非全量"
+        f"scanned_folders=ALL mailFolders top={GRAPH_TOP}"
     )
 
 

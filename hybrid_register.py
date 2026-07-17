@@ -1,6 +1,12 @@
 """Hybrid Grok registration: protocol RPC + browser tokens.
 
 Used by Web/CLI when config register_mode == "hybrid".
+
+Changelog:
+- 2026-07-17c: 邮箱登录失败自动换下一个（最多 20 次）；preflight 预登录；
+  CreateEmail 后等 3s 再查信；AOL/Outlook 扫 ALL 文件夹（非仅 Inbox/Junk）。
+  修复缩进损坏导致 IndentationError 无法启动。
+- 2026-07-17b: CreateEmail 发信证据门禁 + since_ts 查信。
 """
 from __future__ import annotations
 
@@ -222,81 +228,128 @@ def register_one_hybrid(
 
             registered = load_registered_emails()
             email, mail_token = "", ""
-            for _try in range(12):
-                email, mail_token = get_email_and_token()
-                if email.lower() not in registered:
-                    break
-                log(f"[hybrid] skip already-registered local email: {email}")
+            for _try in range(20):
+                if stop():
+                    return False
                 try:
-                    import outlook_mail as om
-                    from grok_register_ttk import config as _cfg
+                    email, mail_token = get_email_and_token()
+                except Exception as get_exc:
+                    log(f"[hybrid] 获取邮箱失败(池内可能都登录失败): {get_exc}")
+                    return False
+                if not email:
+                    log("[hybrid] no fresh email available (pool exhausted / all registered?)")
+                    return False
+                if email.lower() in registered:
+                    log(f"[hybrid] skip already-registered local email: {email}")
+                    try:
+                        em_l = email.lower()
+                        from grok_register_ttk import config as _cfg_skip
+                        if em_l.endswith(("@aol.com", "@aim.com")):
+                            import aol_mail as om_skip
+                            om_skip.get_pool(_cfg_skip, log_callback=log).release(email, ok=True)
+                        else:
+                            import outlook_mail as om_skip
+                            pool = om_skip.get_pool(_cfg_skip, log_callback=log)
+                            pool.release(email, ok=True)
+                            mark_outlook_registered(email, log)
+                    except Exception as rel_exc:
+                        log(f"[hybrid] release/skip email: {rel_exc}")
+                    email, mail_token = "", ""
+                    continue
 
-                    pool = om.get_pool(_cfg, log_callback=log)
-                    pool.release(email, ok=True)
-                    mark_outlook_registered(email, log)
-                except Exception as rel_exc:
-                    log(f"[hybrid] release/skip email: {rel_exc}")
-                email, mail_token = "", ""
-            if not email:
-                log("[hybrid] no fresh email available (pool exhausted / all registered?)")
+                log(
+                    f"[hybrid] email={email} mail_token_len={len(str(mail_token or ''))} "
+                    f"mail_token={mail_token}"
+                )
+
+                # Pre-login mailbox BEFORE CreateEmail; fail -> next email
+                try:
+                    from grok_register_ttk import config as _cfg_pre, get_email_provider as _gep
+
+                    prov = str(_gep() or "").strip().lower()
+                    em_l = (email or "").lower()
+                    is_aol = False
+                    try:
+                        import aol_mail as _am
+                        is_aol = _am.is_aol_provider(prov) or em_l.endswith(("@aol.com", "@aim.com"))
+                    except Exception:
+                        is_aol = em_l.endswith(("@aol.com", "@aim.com"))
+                    if is_aol:
+                        import aol_mail as am
+                        pre = am.preflight_mailbox(
+                            _cfg_pre, mail_token, email, log_callback=log, top=15
+                        )
+                        log(
+                            f"[hybrid] AOL pre-login OK email={email} "
+                            f"auth={pre.get('auth')} total={pre.get('total')} "
+                            f"counts={pre.get('folder_counts')} "
+                            f"scanned_folders={pre.get('scanned_folders')} top={pre.get('top')}"
+                        )
+                    else:
+                        import outlook_mail as om
+                        pre = om.preflight_mailbox(
+                            _cfg_pre, mail_token, email, log_callback=log, top=25
+                        )
+                        log(
+                            f"[hybrid] Outlook pre-login OK email={email} "
+                            f"auth={pre.get('auth')} "
+                            f"counts={pre.get('folder_counts')} total={pre.get('total')} "
+                            f"scanned_folders={pre.get('scanned_folders')} top={pre.get('top')}"
+                        )
+                    break
+                except Exception as pre_exc:
+                    log(
+                        f"[hybrid] mailbox pre-login FAIL email={email}: {pre_exc} | "
+                        f"换下一个邮箱 continue try={_try + 1}/20"
+                    )
+                    try:
+                        from grok_register_ttk import config as _cfg_pre2
+                        em_l2 = (email or "").lower()
+                        if em_l2.endswith(("@aol.com", "@aim.com")):
+                            import aol_mail as am2
+                            pool2 = am2.get_pool(_cfg_pre2, log_callback=log)
+                            bad = any(
+                                x in str(pre_exc)
+                                for x in ("AUTHENTICATIONFAILED", "Invalid credentials", "LOGIN")
+                            )
+                            pool2.release(email, ok=False, bad=bad)
+                            if bad:
+                                for acc in pool2.accounts:
+                                    if acc.identity() == em_l2:
+                                        acc.status = "bad"
+                                        acc.cooldown_until = __import__("time").time() + 86400 * 365
+                                        break
+                        else:
+                            import outlook_mail as om2
+                            pool2 = om2.get_pool(_cfg_pre2, log_callback=log)
+                            bad = any(
+                                x in str(pre_exc)
+                                for x in (
+                                    "password login failed",
+                                    "MFA/TOTP",
+                                    "401",
+                                    "invalid_grant",
+                                    "AADSTS",
+                                )
+                            )
+                            pool2.release(email, ok=False, bad=bad)
+                    except Exception as rel_pre:
+                        log(f"[hybrid] pre-login release email: {rel_pre}")
+                    email, mail_token = "", ""
+                    continue
+            else:
+                log("[hybrid] 连续尝试邮箱均失败（登录/预检），放弃本号")
                 return False
-            log(f"[hybrid] email={email} mail_token_len={len(str(mail_token or ""))} mail_token={mail_token}")
+
+            if not email:
+                log("[hybrid] no fresh email available after retries")
+                return False
             if stop():
                 return False
 
-
-                        # Pre-login mailbox BEFORE CreateEmail so we never empty-run signup.
-            try:
-                from grok_register_ttk import config as _cfg_pre, get_email_provider as _gep
-
-                prov = str(_gep() or "").strip().lower()
-                em_l = (email or "").lower()
-                is_aol = False
-                try:
-                    import aol_mail as _am
-                    is_aol = _am.is_aol_provider(prov) or em_l.endswith(("@aol.com", "@aim.com"))
-                except Exception:
-                    is_aol = em_l.endswith(("@aol.com", "@aim.com"))
-                if is_aol:
-                    import aol_mail as am
-                    pre = am.preflight_mailbox(
-                        _cfg_pre, mail_token, email, log_callback=log, top=15
-                    )
-                    log(
-                        f"[hybrid] AOL pre-login OK email={email} "
-                        f"auth={pre.get('auth')} total={pre.get('total')} "
-                        f"counts={pre.get('folder_counts')} "
-                        f"scanned_folders={pre.get('scanned_folders')} top={pre.get('top')}"
-                    )
-                else:
-                    import outlook_mail as om
-                    pre = om.preflight_mailbox(
-                        _cfg_pre, mail_token, email, log_callback=log, top=25
-                    )
-                    log(
-                        f"[hybrid] Outlook pre-login OK email={email} "
-                        f"auth={pre.get('auth')} inbox={pre.get('folder_counts', {}).get('inbox', 0)} "
-                        f"junk={pre.get('folder_counts', {}).get('junkemail', 0)} "
-                        f"total={pre.get('total')} scanned_folders={pre.get('scanned_folders')} "
-                        f"top={pre.get('top')} full_mailbox={pre.get('full_mailbox')}"
-                    )
-            except Exception as pre_exc:
-                log(f"[hybrid] mailbox pre-login FAIL email={email}: {pre_exc}")
-                try:
-                    from grok_register_ttk import config as _cfg_pre2
-                    em_l2 = (email or "").lower()
-                    if em_l2.endswith(("@aol.com", "@aim.com")):
-                        import aol_mail as am2
-                        am2.get_pool(_cfg_pre2, log_callback=log).release(email, ok=False)
-                    else:
-                        import outlook_mail as om2
-                        om2.get_pool(_cfg_pre2, log_callback=log).release(email, ok=False)
-                except Exception as rel_pre:
-                    log(f"[hybrid] pre-login release email: {rel_pre}")
-                return False
-
-# Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
+            # Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
             castle = browser.harvest_castle_via_email_submit(email, timeout=45)
+
             browser_cookies = browser.export_cookies()
             if not castle or len(castle) < 1000 or not str(castle).startswith("IBYIll"):
                 log(
@@ -378,7 +431,7 @@ def register_one_hybrid(
             log(
                 f"[hybrid] CreateEmail done send_ts={send_ts:.3f} email={email} "
                 f"browser_sent={browser_sent} protocol_sent={protocol_sent}; "
-                f"wait 3s before poll mail (Graph inbox+junkemail only, 非全量)"
+                f"wait 3s before poll mail (AOL/Outlook ALL folders)"
             )
             # Wait 3s after send so Graph has time to receive; support cancel.
             for _w in range(30):
@@ -391,7 +444,7 @@ def register_one_hybrid(
             log(
                 f"[hybrid] 开始查邮件 email={email} timeout=180s since_ts={send_ts:.3f} "
                 f"elapsed_since_send={time.time() - send_ts:.2f}s "
-                f"(scan Inbox+Junk top=50; 非全量; cancel 支持已启用)"
+                f"(scan ALL mail folders; cancel 支持已启用)"
             )
             code = get_oai_code(
                 mail_token,
