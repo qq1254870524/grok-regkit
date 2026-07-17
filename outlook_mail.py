@@ -11,6 +11,11 @@ Separators also accept | , or tab.
 create/acquire: rent mailbox from pool, ensure access_token
 poll_code: Microsoft Graph inbox, extract xAI/Grok code
 token cache: outlook_token_cache.json (local, gitignored)
+
+Changelog:
+- 2026-07-17: fix false OTP from inbox noise (e.g. bank "855-730").
+  Only xAI/Grok related mails; baseline-skip existing inbox on poll start;
+  reject bare XXX-XXX without xAI context.
 """
 from __future__ import annotations
 
@@ -591,28 +596,77 @@ def message_text(msg: dict) -> str:
     return "\n".join(parts)
 
 
+# xAI / Grok verification mail markers (sender + subject/body)
+_XAI_FROM_HINTS = (
+    "x.ai",
+    "xai.com",
+    "mail.x.ai",
+    "grok",
+)
+_XAI_TEXT_HINTS = re.compile(
+    r"\b(xai|x\.ai|grok|verify(?:\s+your)?\s+email|email\s+verification|"
+    r"confirmation\s+code|verification\s+code)\b",
+    re.I,
+)
+_XAI_SUBJECT_CODE = re.compile(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI\b", re.I)
+_DASH_CODE = re.compile(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", re.I)
+
+
+def message_from_address(msg: dict) -> str:
+    try:
+        return str(((msg.get("from") or {}).get("emailAddress") or {}).get("address") or "").strip()
+    except Exception:
+        return ""
+
+
+def is_xai_related_message(msg: dict, text: str = "", subject: str = "") -> bool:
+    """Only accept mails that look like xAI/Grok verification, never bank/statement noise."""
+    subject = subject or (msg.get("subject") or "")
+    text = text or ""
+    frm = message_from_address(msg).lower()
+    if frm:
+        for hint in _XAI_FROM_HINTS:
+            if hint in frm:
+                return True
+    if _XAI_SUBJECT_CODE.search(subject or ""):
+        return True
+    blob = f"{subject}\n{text}"
+    if _XAI_TEXT_HINTS.search(blob):
+        return True
+    return False
+
+
 def _default_extract(text: str, subject: str = ""):
-    if subject:
-        m = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.I)
-        if m:
-            return m.group(1)
-    m = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text or "", re.I)
+    """Extract verification code only with xAI/Grok context.
+
+    Bare XXX-XXX (e.g. bank '855-730') is rejected so Outlook inbox noise
+    cannot fake a successful email confirmation step.
+    """
+    subject = subject or ""
+    text = text or ""
+    m = _XAI_SUBJECT_CODE.search(subject)
     if m:
         return m.group(1)
+    blob = f"{subject}\n{text}"
+    has_xai = bool(_XAI_TEXT_HINTS.search(blob))
+    if has_xai:
+        m = _DASH_CODE.search(blob)
+        if m:
+            return m.group(1)
     for pattern in (
         r"verification\s+code[:\s]+(\d{4,8})",
         r"your\s+code[:\s]+(\d{4,8})",
         r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
-        r"\b(\d{6})\b",
     ):
-        m = re.search(pattern, text or "", re.I)
-        if m:
+        m = re.search(pattern, blob, re.I)
+        if m and has_xai:
             return m.group(1)
     return None
 
 
 def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
-                 log_callback=None, cancel_callback=None, extract_fn=None, proxies=None) -> str:
+                 log_callback=None, cancel_callback=None, extract_fn=None, proxies=None,
+                 ignore_existing: bool = True, since_ts: Optional[float] = None) -> str:
     def cancelled():
         if not cancel_callback:
             return False
@@ -622,9 +676,17 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
             return False
 
     pool = get_pool(config, proxies=proxies, log_callback=log_callback)
-    _log(log_callback, f"[*] Outlook poll code | email={email} | API=Microsoft Graph inbox")
-    deadline = _now() + timeout
+    poll_started = _now()
+    # Prefer caller-provided since_ts (email submit time); else poll start.
+    baseline_ts = float(since_ts) if since_ts else poll_started
+    _log(
+        log_callback,
+        f"[*] Outlook poll code | email={email} | API=Microsoft Graph inbox"
+        f" | ignore_existing={ignore_existing} | since={baseline_ts:.0f}",
+    )
+    deadline = poll_started + timeout
     seen = set()
+    baseline_done = not ignore_existing
     last_err = None
     while _now() < deadline:
         if cancelled():
@@ -637,24 +699,89 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
             except Exception:
                 pass
             sess = OutlookSession(client_id=cid, proxies=proxies, log_callback=log_callback)
-            msgs = sess.list_inbox(access, top=15)
+            msgs = sess.list_inbox(access, top=25)
             _log(log_callback, f"[*] Outlook Graph inbox count={len(msgs)} email={email}")
+
+            # First poll: baseline-skip non-xAI noise only. Keep recent/xAI mails
+            # evaluable so a fast verification letter is not dropped.
+            if not baseline_done:
+                skipped = 0
+                for msg in msgs:
+                    mid = msg.get("id") or ""
+                    if not mid:
+                        continue
+                    subj0 = msg.get("subject") or ""
+                    body0 = message_text(msg)
+                    if is_xai_related_message(msg, text=body0, subject=subj0):
+                        continue
+                    seen.add(mid)
+                    skipped += 1
+                _log(
+                    log_callback,
+                    f"[*] Outlook baseline skip non-xAI existing={skipped} "
+                    f"(xAI candidates still checked; bare XXX-XXX rejected)",
+                )
+                baseline_done = True
+
             for msg in msgs:
                 mid = msg.get("id") or ""
-                if mid in seen:
+                if mid and mid in seen:
                     continue
-                seen.add(mid)
+                if mid:
+                    seen.add(mid)
+
                 subject = msg.get("subject") or ""
-                text = message_text(msg)
-                frm = ((msg.get("from") or {}).get("emailAddress") or {}).get("address", "")
-                _log(log_callback, f"[*] Outlook check mail subject={subject[:80]} from={frm}")
-                code = extract_fn(text, subject) if extract_fn else None
+                text_body = message_text(msg)
+                frm = message_from_address(msg)
+                received = str(msg.get("receivedDateTime") or "")
+
+                # Soft time filter: skip clearly older mails when timestamp parseable
+                # Allow 120s skew before poll start for clock / mail delay.
+                cutoff = (float(since_ts) if since_ts else float(baseline_ts)) - 120
+                if received:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(received.replace("Z", "+00:00"))
+                        if dt.timestamp() < cutoff:
+                            _log(
+                                log_callback,
+                                f"[*] Outlook skip old mail received={received} subject={subject[:60]}",
+                            )
+                            continue
+                    except Exception:
+                        pass
+
+                if not is_xai_related_message(msg, text=text_body, subject=subject):
+                    _log(
+                        log_callback,
+                        f"[*] Outlook skip non-xAI mail subject={subject[:80]} from={frm}",
+                    )
+                    continue
+
+                _log(
+                    log_callback,
+                    f"[*] Outlook check xAI mail subject={subject[:80]} from={frm} received={received}",
+                )
+                code = None
+                if extract_fn:
+                    try:
+                        code = extract_fn(text_body, subject)
+                    except TypeError:
+                        code = extract_fn(text_body)
                 if not code:
-                    code = _default_extract(text, subject)
+                    code = _default_extract(text_body, subject)
                 if code:
-                    _log(log_callback, f"[+] Outlook code ok email={email} code={code} subject={subject[:60]}")
+                    _log(
+                        log_callback,
+                        f"[+] Outlook code ok email={email} code={code} "
+                        f"subject={subject[:60]} from={frm} source=Graph/inbox",
+                    )
                     pool.release(email, ok=True)
                     return code
+                _log(
+                    log_callback,
+                    f"[*] Outlook xAI mail has no parseable code yet subject={subject[:60]}",
+                )
         except Exception as exc:
             last_err = exc
             _log(log_callback, f"[!] Outlook poll error: {exc}")

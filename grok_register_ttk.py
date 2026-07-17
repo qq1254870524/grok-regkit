@@ -3066,21 +3066,35 @@ def get_oai_code(
 
 
 def extract_verification_code(text, subject=""):
-    if subject:
-        match = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text, re.IGNORECASE)
+    """Extract xAI/Grok verification code; never accept bare XXX-XXX from unrelated mail."""
+    subject = subject or ""
+    text = text or ""
+    # Official subject style: "ABC-123 xAI"
+    match = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI\b", subject, re.IGNORECASE)
     if match:
         return match.group(1)
+    blob = f"{subject}\n{text}"
+    has_xai = bool(
+        re.search(
+            r"\b(xai|x\.ai|grok|verify(?:\s+your)?\s+email|email\s+verification|"
+            r"confirmation\s+code|verification\s+code)\b",
+            blob,
+            re.IGNORECASE,
+        )
+    )
+    # Dash code only when xAI/Grok context is present (blocks bank "855-730")
+    if has_xai:
+        match = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", blob, re.IGNORECASE)
+        if match:
+            return match.group(1)
     patterns = [
         r"verification\s+code[:\s]+(\d{4,8})",
         r"your\s+code[:\s]+(\d{4,8})",
         r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
+        match = re.search(pattern, blob, re.IGNORECASE)
+        if match and has_xai:
             return match.group(1)
     return None
 
@@ -3614,14 +3628,30 @@ def start_browser(log_callback=None, use_proxy=True):
     raise Exception(f"浏览器启动失败，已重试4次: {last_exc}")
 
 
-def stop_browser():
+def stop_browser_proxy_bridge(log_callback=None):
+    """Stop local Chromium auth proxy bridge if running."""
+    global browser_proxy_bridge
+    bridge = browser_proxy_bridge
+    browser_proxy_bridge = None
+    if bridge is None:
+        return
+    try:
+        bridge.stop()
+        if log_callback:
+            log_callback("[*] 本地认证代理桥已关闭")
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] 关闭本地认证代理桥失败: {exc}")
+
+
+def stop_browser(log_callback=None):
     global browser, page, browser_started_with_proxy
     if browser is not None:
         try:
             browser.quit(del_data=True)
         except Exception:
             pass
-    stop_browser_proxy_bridge()
+    stop_browser_proxy_bridge(log_callback=log_callback)
     browser = None
     page = None
     browser_started_with_proxy = False

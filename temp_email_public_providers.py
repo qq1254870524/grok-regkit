@@ -181,21 +181,31 @@ def _extract_code(text: str, subject: str = "", extract_fn=None) -> Optional[str
         code = extract_fn(text, subject)
         if code:
             return code
-    if subject:
-        m = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI", subject, re.I)
-        if m:
-            return m.group(1)
-    m = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", text or "", re.I)
+    subject = subject or ""
+    text = text or ""
+    m = re.search(r"^([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI\b", subject, re.I)
     if m:
         return m.group(1)
+    blob = f"{subject}\n{text}"
+    has_xai = bool(
+        re.search(
+            r"\b(xai|x\.ai|grok|verify(?:\s+your)?\s+email|email\s+verification|"
+            r"confirmation\s+code|verification\s+code)\b",
+            blob,
+            re.I,
+        )
+    )
+    if has_xai:
+        m = re.search(r"\b([A-Z0-9]{3}-[A-Z0-9]{3})\b", blob, re.I)
+        if m:
+            return m.group(1)
     for pat in (
         r"verification\s+code[:\s]+(\d{4,8})",
         r"your\s+code[:\s]+(\d{4,8})",
         r"confirm(?:ation)?\s+code[:\s]+(\d{4,8})",
-        r"\b(\d{6})\b",
     ):
-        m = re.search(pat, text or "", re.I)
-        if m:
+        m = re.search(pat, blob, re.I)
+        if m and has_xai:
             return m.group(1)
     return None
 
