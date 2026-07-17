@@ -171,6 +171,18 @@ class TokenCache:
         self.save()
 
 
+
+def _is_proxy_error(exc: BaseException) -> bool:
+    msg = str(exc or "").lower()
+    keys = (
+        "socks", "proxy", "0x01", "0x03", "0x04", "0x05", "0x06",
+        "network unreachable", "general socks", "connection refused",
+        "timed out", "timeout", "max retries exceeded",
+        "failed to establish a new connection",
+    )
+    return any(k in msg for k in keys)
+
+
 class OutlookSession:
     def __init__(self, client_id=DEFAULT_CLIENT_ID, redirect_uri=DEFAULT_REDIRECT, scope=DEFAULT_SCOPE,
                  proxies=None, timeout=30, log_callback=None):
@@ -392,11 +404,32 @@ class OutlookSession:
             f"?$top={int(top)}&$orderby=receivedDateTime desc"
             "&$select=id,subject,bodyPreview,body,from,receivedDateTime,isRead"
         )
-        r = self.s.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=self.timeout)
-        if r.status_code == 401:
-            raise Exception("Graph 401: access_token expired")
-        r.raise_for_status()
-        return list((r.json() or {}).get("value") or [])
+        headers = {"Authorization": f"Bearer {access_token}"}
+        attempts = [(None, "direct")]
+        if self.proxies:
+            attempts.append((self.proxies, "proxy"))
+        last_exc: Exception | None = None
+        for px, label in attempts:
+            try:
+                sess = requests.Session()
+                sess.headers.update(self.s.headers)
+                if px:
+                    sess.proxies.update(px)
+                r = sess.get(url, headers=headers, timeout=self.timeout)
+                if r.status_code == 401:
+                    raise Exception("Graph 401: access_token expired")
+                r.raise_for_status()
+                self._lg(f"[*] Outlook Graph via {label} ok")
+                return list((r.json() or {}).get("value") or [])
+            except Exception as exc:
+                last_exc = exc
+                self._lg(f"[!] Outlook Graph via {label} fail: {exc}")
+                if "401" in str(exc):
+                    raise
+                continue
+        if last_exc:
+            raise last_exc
+        return []
 
 
 class OutlookAccountPool:
@@ -701,7 +734,15 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
             except Exception:
                 pass
             sess = OutlookSession(client_id=cid, proxies=proxies, log_callback=log_callback)
-            msgs = sess.list_inbox(access, top=25)
+            try:
+                msgs = sess.list_inbox(access, top=25)
+            except Exception as graph_exc:
+                if proxies and _is_proxy_error(graph_exc):
+                    _log(log_callback, f"[!] Outlook Graph all-proxy failed, force direct: {graph_exc}")
+                    sess_direct = OutlookSession(client_id=cid, proxies=None, log_callback=log_callback)
+                    msgs = sess_direct.list_inbox(access, top=25)
+                else:
+                    raise
             _log(log_callback, f"[*] Outlook Graph inbox count={len(msgs)} email={email}")
 
             # First poll: baseline-skip non-xAI noise only. Keep recent/xAI mails

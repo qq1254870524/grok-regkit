@@ -74,26 +74,101 @@ def save_next_action_to_capture(action: str, log: Callable[[str], None] | None =
             log(f"[hybrid] save next-action fail: {exc}")
 
 
-def load_registered_emails() -> set[str]:
-    """Emails already saved in local accounts_*.txt (successful Grok registrations)."""
-    out: set[str] = set()
-    for p in ROOT.glob("accounts*.txt"):
+def _account_scan_dirs() -> list[Path]:
+    """Dirs that may contain successful Grok account dumps."""
+    dirs = [
+        ROOT,
+        Path.home() / "Desktop" / "Gark",
+        Path.home() / "Desktop" / "Grok",
+        Path.home() / "Desktop" / "grok-regkit",
+        Path(r"C:/Users/zhang/Desktop/Gark"),
+    ]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in dirs:
         try:
-            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-                email = (line.split("----")[0] or "").strip().lower()
+            key = str(d.resolve()) if d.exists() else str(d)
+        except Exception:
+            key = str(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def _registry_path() -> Path:
+    return ROOT / "registered_emails_registry.txt"
+
+
+def load_registered_emails() -> set[str]:
+    """Emails already saved as successful Grok registrations (multi-dir + local registry)."""
+    out: set[str] = set()
+    reg = _registry_path()
+    if reg.is_file():
+        try:
+            for line in reg.read_text(encoding="utf-8", errors="ignore").splitlines():
+                email = (line.split("----")[0] or line.strip() or "").strip().lower()
                 if email and "@" in email:
                     out.add(email)
         except Exception:
+            pass
+    patterns = ("accounts*.txt", "accounts_hybrid_*.txt", "accounts_browser_*.txt")
+    for base in _account_scan_dirs():
+        if not base.exists() or not base.is_dir():
             continue
+        for pat in patterns:
+            try:
+                for pth in base.glob(pat):
+                    try:
+                        for line in pth.read_text(encoding="utf-8", errors="ignore").splitlines():
+                            email = (line.split("----")[0] or "").strip().lower()
+                            if email and "@" in email:
+                                out.add(email)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
     return out
+
+
+def remember_registered_email(email: str, log: Callable[[str], None] | None = None) -> None:
+    """Append email to local registry so future runs skip it even if accounts file is elsewhere."""
+    em = (email or "").strip().lower()
+    if not em or "@" not in em:
+        return
+    try:
+        path = _registry_path()
+        existing: set[str] = set()
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                e = (line.split("----")[0] or line.strip() or "").strip().lower()
+                if e:
+                    existing.add(e)
+        if em not in existing:
+            with path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(em + "\n")
+            if log:
+                log(f"[hybrid] registry +1 registered email: {em} (total_was={len(existing)})")
+    except Exception as exc:
+        if log:
+            log(f"[hybrid] registry write fail: {exc}")
 
 
 def mark_outlook_registered(email: str, log: Callable[[str], None] | None = None) -> None:
     """Prevent reusing an Outlook mailbox that already completed Grok registration."""
+    remember_registered_email(email, log)
     try:
         import outlook_mail as om
 
         pool = getattr(om, "_POOL", None)
+        if pool is None:
+            try:
+                from grok_register_ttk import config as _cfg
+
+                pool = om.get_pool(_cfg, log_callback=log)
+            except Exception:
+                pool = getattr(om, "_POOL", None)
         if pool is None:
             return
         with om._POOL_LOCK:
@@ -514,12 +589,15 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
 
     next_action = load_next_action_from_capture()
     try:
+        scan_dirs = [str(d) for d in _account_scan_dirs() if d.exists()]
+        log(f"[hybrid] scan registered account dirs: {scan_dirs}")
         registered = load_registered_emails()
+        log(f"[hybrid] already-registered emails loaded: {len(registered)}")
         if registered:
-            log(f"[hybrid] local already-registered emails: {len(registered)}")
-            for em in list(registered)[:200]:
+            for em in list(registered)[:500]:
                 mark_outlook_registered(em, None)
-            log("[hybrid] pre-marked Outlook pool entries that already appear in accounts*.txt")
+            sample = ", ".join(list(sorted(registered))[:5])
+            log(f"[hybrid] pre-marked Outlook pool; sample: {sample}")
     except Exception as pre_exc:
         log(f"[hybrid] pre-mark registered outlook fail: {pre_exc}")
     ua = str(engine.config.get("user_agent") or "")
