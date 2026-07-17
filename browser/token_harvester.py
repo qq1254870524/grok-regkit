@@ -1122,6 +1122,210 @@ return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: locati
 
 
 
+    def fetch_signup_server_action(
+        self,
+        *,
+        email: str,
+        code: str,
+        given_name: str,
+        family_name: str,
+        password: str,
+        turnstile_token: str,
+        castle_token: str,
+        next_action: str,
+        conversion_id: str = "",
+        router_state_tree: str = "",
+        timeout: float = 25,
+    ) -> dict:
+        """POST SignUp server action from inside the browser (same-origin + CF cookies).
+
+        curl_cffi may hang/timeout on accounts.x.ai via SOCKS while Chromium already works.
+        """
+        import json as _json
+        import re as _re
+        import uuid as _uuid
+
+        from grok_register_ttk import _get_page
+
+        page = _get_page()
+        act = (next_action or "").strip()
+        if not act:
+            return {"status": 0, "text": "next-action missing", "sso": "", "cookies": {}}
+        clean_code = str(code or "").replace("-", "").strip()
+        cid = conversion_id or str(_uuid.uuid4())
+        tree = (router_state_tree or "").strip() or (
+            "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C16%5D"
+        )
+        timeout_ms = int(max(5, float(timeout or 25)) * 1000)
+        self._lg(
+            f"[*] browser-fetch SignUp next-action={act[:20]}... "
+            f"email={email} code_len={len(clean_code)} castle_len={len(castle_token or '')} "
+            f"turnstile_len={len(turnstile_token or '')} timeout_ms={timeout_ms}"
+        )
+        try:
+            raw = page.run_js(
+                r"""
+return (async function(){
+  const email = String(arguments[0] || '');
+  const code = String(arguments[1] || '');
+  const givenName = String(arguments[2] || '');
+  const familyName = String(arguments[3] || '');
+  const password = String(arguments[4] || '');
+  const turnstile = String(arguments[5] || '');
+  const castle = String(arguments[6] || '');
+  const nextAction = String(arguments[7] || '');
+  const conversionId = String(arguments[8] || '');
+  const tree = String(arguments[9] || '');
+  const timeoutMs = Number(arguments[10] || 25000);
+  const payload = [{
+    emailValidationCode: code,
+    createUserAndSessionRequest: {
+      email: email,
+      givenName: givenName,
+      familyName: familyName,
+      clearTextPassword: password,
+      tosAcceptedVersion: 1
+    },
+    turnstileToken: turnstile,
+    conversionId: conversionId,
+    castleRequestToken: castle
+  }];
+  const body = JSON.stringify(payload);
+  const headers = {
+    'content-type': 'text/plain;charset=UTF-8',
+    'accept': 'text/x-component',
+    'next-action': nextAction,
+    'next-router-state-tree': tree
+  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(function(){ try { ctrl.abort(); } catch(e){} }, timeoutMs);
+  try {
+    const r = await fetch('https://accounts.x.ai/sign-up?redirect=grok-com', {
+      method: 'POST',
+      credentials: 'include',
+      headers: headers,
+      body: body,
+      signal: ctrl.signal
+    });
+    clearTimeout(timer);
+    let text = '';
+    try { text = await r.text(); } catch (e) { text = String(e); }
+    return {
+      status: r.status,
+      ok: !!r.ok,
+      text: String(text || '').slice(0, 8000),
+      cookie: String(document.cookie || ''),
+      url: String(location.href || '')
+    };
+  } catch (e) {
+    clearTimeout(timer);
+    return {
+      status: 0,
+      ok: false,
+      text: String(e && (e.message || e) || e),
+      cookie: String(document.cookie || ''),
+      url: String(location.href || '')
+    };
+  }
+})();
+""",
+                email,
+                clean_code,
+                given_name,
+                family_name,
+                password,
+                turnstile_token or "",
+                castle_token or "",
+                act,
+                cid,
+                tree,
+                timeout_ms,
+            )
+        except Exception as e:
+            self._lg(f"[!] browser-fetch SignUp exception: {e}")
+            return {
+                "status": 0,
+                "text": str(e),
+                "sso": "",
+                "cookies": {},
+                "error_hints": ["browser_fetch_exception"],
+            }
+
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                raw = {"status": 0, "text": raw, "cookie": ""}
+        if not isinstance(raw, dict):
+            raw = {"status": 0, "text": str(raw), "cookie": ""}
+
+        text = str(raw.get("text") or "")
+        cookie_str = str(raw.get("cookie") or "")
+        status = raw.get("status")
+        try:
+            status = int(status)
+        except Exception:
+            status = 0
+
+        sso = ""
+        m = _re.search(r"(?:^|;\s*)sso=([^;]+)", cookie_str)
+        if m and len(m.group(1)) > 20:
+            sso = m.group(1)
+        if not sso:
+            m = _re.search(r"(?:^|;\s*)sso-rw=([^;]+)", cookie_str)
+            if m and len(m.group(1)) > 20:
+                sso = m.group(1)
+        if not sso and text:
+            m = _re.search(r"\bsso[\"']?\s*[:=]\s*[\"']([^\"']{20,})[\"']", text)
+            if m:
+                sso = m.group(1)
+
+        jar = {}
+        try:
+            jar = self.export_cookies() or {}
+            if not sso:
+                sso = jar.get("sso") or jar.get("sso-rw") or ""
+        except Exception:
+            pass
+
+        low = text.lower()
+        hints = []
+        for key in (
+            "error",
+            "invalid",
+            "already",
+            "exists",
+            "castle",
+            "turnstile",
+            "forbidden",
+            "server action not found",
+            "$sreact.fragment",
+            "abort",
+            "timeout",
+        ):
+            if key.lower() in low:
+                hints.append(key)
+
+        self._lg(
+            f"[*] browser-fetch SignUp done status={status} sso_len={len(sso or '')} "
+            f"text_len={len(text)} url={raw.get('url')!r} hints={hints}"
+        )
+        return {
+            "status": status,
+            "text": text[:8000],
+            "text_len": len(text),
+            "cookies": jar,
+            "sso": sso or "",
+            "redirect_url": "",
+            "set_cookie_blob": cookie_str[:2000],
+            "error_hints": hints,
+            "castle_len": len(castle_token or ""),
+            "turnstile_len": len(turnstile_token or ""),
+            "tos_accepted_version": 1,
+            "next_action": act,
+            "path": "browser-fetch",
+        }
+
     def submit_profile_and_wait_sso(
         self,
         *,

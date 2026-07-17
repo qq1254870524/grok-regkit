@@ -3,6 +3,9 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-17e: 协议 curl 超时(0 bytes)根因修复：跳过已有候选时的 curl chunk discover；
+  SignUp 超时降至 18s；curl 超时/status=0 立即停止协议重试（不再试 hardcoded 死哈希）；
+  协议失败后优先浏览器同源 fetch SignUp，再 UI 点提交；详细网络路径日志不脱敏。
 - 2026-07-17d: SignUp 提交前强制刷新 castle（不再复用 CreateEmail 旧 token）；
   200 无 sso 详细日志（body/set-cookie/hints）；协议失败后浏览器 UI 资料提交兜底；
   注册成功/登录失败邮箱从 AOL/Outlook 账号池文件永久删除。
@@ -560,8 +563,8 @@ def register_one_hybrid(
             for stale in ("sso", "sso-rw"):
                 jar2.pop(stale, None)
             sess.set_cookies(jar2)
-            # Build next-action candidates. Never prefer stale hardcoded hash over live discovery.
-            # Hardcoded known is last resort only — xAI redeploys invalidate it (404 Server action not found).
+            # Build next-action candidates. Prefer browser (CF/proxy already working).
+            # Hardcoded known is last resort only — xAI redeploys invalidate it (404).
             known = "7f50061dd2f5b389a530e4a048d5fdf0c48d1d9259"
             candidates: list[str] = []
 
@@ -585,18 +588,26 @@ def register_one_hybrid(
             _add_action(action, "earlier_or_capture")
             if stop():
                 return False
-            try:
-                client.next_action = ""
-                # Keep short: stop button cannot interrupt this network scan otherwise.
-                discovered = client.discover_next_action(timeout=20) or ""
-                _add_action(discovered, "chunk_discover")
-            except Exception as disc_exc:
-                log(f"[hybrid] chunk discover next-action fail: {disc_exc}")
+            _add_action(load_next_action_from_capture(), "capture_file")
+            # curl chunk discover often hangs 20s with 0 bytes when SOCKS/proxy path is dead
+            # for accounts.x.ai static chunks. Skip if we already have live candidates.
+            if candidates:
+                log(
+                    f"[hybrid] skip curl chunk discover "
+                    f"(have {len(candidates)} live candidate(s); avoid 20s timeout)"
+                )
+            else:
+                try:
+                    client.next_action = ""
+                    discovered = client.discover_next_action(timeout=8) or ""
+                    _add_action(discovered, "chunk_discover")
+                except Exception as disc_exc:
+                    log(f"[hybrid] chunk discover next-action fail: {disc_exc}")
             if stop():
                 return False
-            _add_action(load_next_action_from_capture(), "capture_file")
-            # Dead hash only last; 404s are expected after redeploy.
-            _add_action(known, "hardcoded_fallback")
+            if not candidates:
+                # Dead hash only when nothing else — expected 404 after redeploy.
+                _add_action(known, "hardcoded_fallback")
             if not candidates:
                 log("[hybrid] no next-action candidates at all")
                 return False
@@ -621,6 +632,7 @@ def register_one_hybrid(
                 return castle2
 
             def _do_signup(act: str, castle_tok: str):
+                # Short timeout: curl path often hangs 40s with 0 bytes on bad proxy.
                 return client.create_user_via_server_action(
                     email=email,
                     code=clean,
@@ -631,7 +643,7 @@ def register_one_hybrid(
                     castle_token=castle_tok,
                     next_action=act,
                     conversion_id=str(uuid.uuid4()),
-                    timeout=40,
+                    timeout=18,
                 )
 
             def _extract_sso(resp: dict) -> str:
@@ -641,13 +653,33 @@ def register_one_hybrid(
                     s = ck.get("sso") or ck.get("sso-rw") or ""
                 return s or ""
 
-            def _log_signup_diag(idx: int, resp: dict) -> None:
+            def _is_protocol_network_dead(st, body: str) -> bool:
+                low = (body or "").lower()
+                if st in (0, None):
+                    return True
+                return any(
+                    k in low
+                    for k in (
+                        "curl: (28)",
+                        "operation timed out",
+                        "timed out after",
+                        "0 bytes received",
+                        "connection timed out",
+                        "failed to perform",
+                        "proxy",
+                        "could not resolve",
+                        "connection reset",
+                        "ssl connect error",
+                    )
+                )
+
+            def _log_signup_diag(idx: int, resp: dict, path: str = "protocol") -> None:
                 body = str((resp or {}).get("text") or "")
                 sc = (resp or {}).get("set_cookie_blob") or ""
                 hints = (resp or {}).get("error_hints") or []
                 redir = (resp or {}).get("redirect_url") or ""
                 log(
-                    f"[hybrid] sign-up diag try={idx} status={resp.get('status')} "
+                    f"[hybrid] sign-up diag path={path} try={idx} status={resp.get('status')} "
                     f"sso_len={len(_extract_sso(resp))} text_len={resp.get('text_len') or len(body)} "
                     f"castle_len={resp.get('castle_len')} turnstile_len={resp.get('turnstile_len')} "
                     f"tos={resp.get('tos_accepted_version')} redirect={redir!r} "
@@ -663,6 +695,7 @@ def register_one_hybrid(
             r3 = {}
             sso = ""
             body_txt = ""
+            protocol_network_dead = False
             for idx, act in enumerate(candidates, 1):
                 if stop():
                     return False
@@ -676,8 +709,8 @@ def register_one_hybrid(
                 castle_tok = _mint_castle_for_try(idx)
                 client.next_action = act
                 log(
-                    f"[hybrid] sign-up try {idx}/{len(candidates)} "
-                    f"next-action={act[:20]}... castle_len={len(castle_tok)}"
+                    f"[hybrid] sign-up try {idx}/{len(candidates)} path=protocol/curl "
+                    f"next-action={act[:20]}... castle_len={len(castle_tok)} timeout=18s"
                 )
                 t_try = time.time()
                 try:
@@ -699,7 +732,7 @@ def register_one_hybrid(
                     f"elapsed={time.time() - t_try:.1f}s body={body_txt[:180]!r}"
                 )
                 if not sso:
-                    _log_signup_diag(idx, r3)
+                    _log_signup_diag(idx, r3, path="protocol/curl")
                 if sso:
                     try:
                         save_next_action_to_capture(act, log)
@@ -731,6 +764,13 @@ def register_one_hybrid(
                     except Exception:
                         pass
                     break
+                if _is_protocol_network_dead(st, body_txt):
+                    protocol_network_dead = True
+                    log(
+                        "[hybrid] protocol network DEAD (curl timeout/0-byte/proxy) — "
+                        "stop further protocol candidates; switch to browser same-origin path"
+                    )
+                    break
                 if st == 404 or "server action not found" in low:
                     log(f"[hybrid] next-action {act[:16]} invalid (404/not found), try next")
                     continue
@@ -740,7 +780,7 @@ def register_one_hybrid(
                 )
             log(
                 f"[hybrid] sign-up final status={r3.get('status')} sso_len={len(sso)} "
-                f"elapsed={time.time() - t0:.1f}s"
+                f"elapsed={time.time() - t0:.1f}s protocol_network_dead={protocol_network_dead}"
             )
             if not sso:
                 log(
@@ -749,29 +789,88 @@ def register_one_hybrid(
                 )
                 if stop():
                     return False
+                # Prefer browser same-origin fetch: browser already passed CF/proxy to accounts.x.ai
+                live_acts = [c for c in candidates if c != known] or list(candidates)
                 log(
-                    "[hybrid] protocol SignUp failed; browser UI profile submit fallback "
-                    f"email={email} given={given} family={family}"
+                    f"[hybrid] browser same-origin fetch SignUp "
+                    f"candidates={len(live_acts)} email={email}"
                 )
-                try:
-                    ui_sso = browser.submit_profile_and_wait_sso(
-                        given_name=given,
-                        family_name=family,
-                        password=password,
-                        turnstile_token=turnstile,
-                        timeout=90,
-                        cancel_callback=stop,
+                for bidx, act in enumerate(live_acts[:3], 1):
+                    if stop():
+                        return False
+                    try:
+                        castle_tok = _mint_castle_for_try(bidx + 10)
+                        log(
+                            f"[hybrid] browser-fetch try {bidx}/{min(3, len(live_acts))} "
+                            f"next-action={act[:20]}... castle_len={len(castle_tok)}"
+                        )
+                        t_bf = time.time()
+                        br = browser.fetch_signup_server_action(
+                            email=email,
+                            code=clean,
+                            given_name=given,
+                            family_name=family,
+                            password=password,
+                            turnstile_token=turnstile,
+                            castle_token=castle_tok,
+                            next_action=act,
+                            conversion_id=str(uuid.uuid4()),
+                            router_state_tree=getattr(client, "router_state_tree", "") or "",
+                            timeout=25,
+                        )
+                        sso = _extract_sso(br) or ""
+                        if not sso:
+                            try:
+                                jar_b = browser.export_cookies() or {}
+                                sso = jar_b.get("sso") or jar_b.get("sso-rw") or ""
+                            except Exception:
+                                pass
+                        body_txt = str((br or {}).get("text") or body_txt)
+                        r3 = br or r3
+                        log(
+                            f"[hybrid] browser-fetch try {bidx} status={br.get('status')} "
+                            f"sso_len={len(sso)} elapsed={time.time() - t_bf:.1f}s "
+                            f"body={str(br.get('text') or '')[:180]!r}"
+                        )
+                        if not sso:
+                            _log_signup_diag(bidx, br or {}, path="browser-fetch")
+                        if sso:
+                            try:
+                                save_next_action_to_capture(act, log)
+                            except Exception:
+                                pass
+                            break
+                        st_b = br.get("status")
+                        low_b = str(br.get("text") or "").lower()
+                        if st_b == 404 or "server action not found" in low_b:
+                            log(f"[hybrid] browser-fetch next-action {act[:16]} invalid, try next")
+                            continue
+                    except Exception as bf_exc:
+                        log(f"[hybrid] browser-fetch try {bidx} error: {bf_exc}")
+                if not sso and not stop():
+                    log(
+                        "[hybrid] browser-fetch no sso; UI profile submit fallback "
+                        f"email={email} given={given} family={family}"
                     )
-                    if ui_sso:
-                        sso = ui_sso
-                        log(f"[hybrid] browser UI fallback sso ok len={len(sso)}")
-                    else:
-                        log("[hybrid] browser UI fallback got no sso")
-                except Exception as ui_exc:
-                    log(f"[hybrid] browser UI fallback error: {ui_exc}")
+                    try:
+                        ui_sso = browser.submit_profile_and_wait_sso(
+                            given_name=given,
+                            family_name=family,
+                            password=password,
+                            turnstile_token=turnstile,
+                            timeout=90,
+                            cancel_callback=stop,
+                        )
+                        if ui_sso:
+                            sso = ui_sso
+                            log(f"[hybrid] browser UI fallback sso ok len={len(sso)}")
+                        else:
+                            log("[hybrid] browser UI fallback got no sso")
+                    except Exception as ui_exc:
+                        log(f"[hybrid] browser UI fallback error: {ui_exc}")
             if not sso:
                 log(
-                    f"[hybrid] no sso after protocol+UI cookies="
+                    f"[hybrid] no sso after protocol+browser-fetch+UI cookies="
                     f"{list((r3.get('cookies') or {}).keys())[:12]} body={body_txt[:240]}"
                 )
                 return False
