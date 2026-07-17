@@ -1,4 +1,4 @@
-# grok-regkit
+﻿# grok-regkit
 
 xAI / Grok **账号自动注册工具包**。
 
@@ -286,4 +286,11 @@ python -B scripts/import_cpa_to_sub2api.py --dir ./cpa_auths --dry-parse --limit
 
 Web 控制台「号池联动」页可填写 CPA 目录并一键导入。  
 同邮箱 / sub 默认更新已有账号；可用性测试失败默认只告警，不回滚已创建记录。
+
+## 关联仓库
+
+- 本仓: https://github.com/qq1254870524/grok-regkit
+- 服务编排: https://github.com/qq1254870524/grok-regkit-services
+- Sub2API 修改版: https://github.com/qq1254870524/sub2api
+- MuMu 剪贴板隔离: https://github.com/qq1254870524/mumu-clipboard-isolation
 
