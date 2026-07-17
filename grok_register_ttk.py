@@ -1047,15 +1047,9 @@ def load_proxy_list(cfg=None, force_reload=False) -> list:
 
 
 def _mask_proxy_url(proxy_url: str) -> str:
-    raw = str(proxy_url or "").strip()
-    parsed = _parse_proxy_url(raw)
-    if not parsed or not parsed.hostname:
-        return "(empty)"
-    host = parsed.hostname
-    port = _safe_proxy_port(parsed)
-    scheme = parsed.scheme or "socks5h"
-    auth = "auth@" if (parsed.username is not None or parsed.password is not None) else ""
-    return f"{scheme}://{auth}{host}:{port}" if port else f"{scheme}://{auth}{host}"
+    """Return proxy URL as-is (user requested full logs, no redaction)."""
+    return str(proxy_url or "")
+
 
 
 def pick_proxy_from_list(cfg=None, rotate=None) -> str:
@@ -3010,6 +3004,9 @@ def get_oai_code(
     log_callback=None,
     cancel_callback=None,
     resend_callback=None,
+    since_ts=None,
+    ignore_existing=True,
+    **kwargs,
 ):
     provider = get_email_provider()
     if public_email is not None and public_email.is_public_provider(provider):
@@ -3053,6 +3050,8 @@ def get_oai_code(
                 cancel_callback=cancel_callback,
                 extract_fn=extract_verification_code,
                 proxies=proxies,
+                ignore_existing=ignore_existing,
+                since_ts=since_ts,
             )
         except Exception as exc:
             if proxies and is_proxy_connection_error(exc):
@@ -3066,6 +3065,8 @@ def get_oai_code(
                     cancel_callback=cancel_callback,
                     extract_fn=extract_verification_code,
                     proxies=None,
+                    ignore_existing=ignore_existing,
+                    since_ts=since_ts,
                 )
             raise
     if provider == "yyds":

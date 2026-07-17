@@ -210,18 +210,64 @@ return {
         st = self.create_email_status_via_browser()
         return bool(st.get("sent"))
 
+
     def click_email_continue_for_create(self, email: str) -> str:
-        """Fill email and click Continue/Send to fire CreateEmailValidationCode."""
-        from grok_register_ttk import _get_page
+        """Fill email field (React-safe), verify value, click Continue/发送 not generic 注册."""
+        from grok_register_ttk import _get_page, click_email_signup_button
 
         page = _get_page()
+        email = str(email or "").strip()
+        if not email:
+            return "empty-email"
+
+        # Ensure we are on email-input step (not method chooser)
         try:
-            r = page.run_js(
-                r"""
-const email = arguments[0];
+            state = page.run_js(
+                """
 function isVisible(node) {
   if (!node) return false;
   const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const emailInput = Array.from(document.querySelectorAll('input, textarea')).some((n) => {
+  if (!isVisible(n) || n.disabled) return false;
+  const type = String(n.type || '').toLowerCase();
+  if (['password','hidden','checkbox','radio','submit','button'].includes(type)) return false;
+  const meta = [type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete].join(' ').toLowerCase();
+  return type === 'email' || meta.includes('email') || meta.includes('mail');
+});
+return {url: location.href, emailInput: !!emailInput, title: document.title || ''};
+"""
+            )
+            self._lg(f"[*] UI page state before fill: {state}")
+            if isinstance(state, dict) and not state.get("emailInput"):
+                try:
+                    click_email_signup_button(timeout=8, log_callback=self.log)
+                    time.sleep(1.2)
+                except Exception as e:
+                    self._lg(f"[!] click_email_signup_button: {e}")
+        except Exception as e:
+            self._lg(f"[!] UI pre-state: {e}")
+
+        # Prefer proven fill path used by profile step
+        try:
+            fill_r = self._set_input_and_submit(email, "email")
+            self._lg(f"[*] UI _set_input_and_submit(email) => {fill_r} email={email}")
+        except Exception as e:
+            fill_r = f"set_input_error:{e}"
+            self._lg(f"[!] UI _set_input_and_submit fail: {e}")
+
+        # Explicit fill+click with value verification (full email in log, no redaction)
+        try:
+            detail = page.run_js(
+                """
+const email = String(arguments[0] || '');
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (!style) return false;
   if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
@@ -229,77 +275,137 @@ function isVisible(node) {
 function setInputValue(input, v) {
   input.focus();
   try { input.click(); } catch (e) {}
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+    || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
   const tracker = input._valueTracker;
   if (tracker) tracker.setValue('');
-  if (setter) setter.call(input, v); else input.value = v;
+  if (setter) setter.call(input, '');
+  else input.value = '';
+  if (tracker) tracker.setValue('');
+  if (setter) setter.call(input, v);
+  else input.value = v;
+  input.dispatchEvent(new Event('focus', {bubbles:true}));
+  input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, data:v, inputType:'insertText'}));
   input.dispatchEvent(new InputEvent('input', {bubbles:true, data:v, inputType:'insertText'}));
   input.dispatchEvent(new Event('change', {bubbles:true}));
-  input.dispatchEvent(new Event('blur', {bubbles:true}));
+  input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, key:'a'}));
 }
-const inputs = Array.from(document.querySelectorAll('input, textarea'));
-let input = inputs.find((n) => {
-  if (!isVisible(n)) return false;
-  const meta = [n.type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete]
-    .join(' ').toLowerCase();
-  return n.type === 'email' || meta.includes('email') || meta.includes('e-mail') || meta.includes('\u90ae\u7bb1');
+const all = Array.from(document.querySelectorAll('input, textarea'));
+const candidates = all.map((n, idx) => {
+  const type = String(n.type || n.getAttribute('type') || '').toLowerCase();
+  const meta = [type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete].join(' ').toLowerCase();
+  return {
+    idx,
+    type,
+    name: String(n.name||''),
+    id: String(n.id||''),
+    placeholder: String(n.placeholder||''),
+    meta,
+    visible: isVisible(n),
+    disabled: !!n.disabled,
+    value: String(n.value||''),
+    emailish: type === 'email' || meta.includes('email') || meta.includes('mail') || meta.includes('邮箱')
+  };
+});
+let input = all.find((n) => {
+  if (!isVisible(n) || n.disabled) return false;
+  const type = String(n.type || '').toLowerCase();
+  if (['password','hidden','checkbox','radio','submit','button'].includes(type)) return false;
+  const meta = [type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete].join(' ').toLowerCase();
+  return type === 'email' || meta.includes('email') || meta.includes('mail') || meta.includes('邮箱');
 });
 if (!input) {
-  input = inputs.find((n) => isVisible(n) && !['password','hidden','checkbox','radio','submit','button'].includes(String(n.type||'').toLowerCase()));
+  input = all.find((n) => isVisible(n) && !n.disabled && !['password','hidden','checkbox','radio','submit','button'].includes(String(n.type||'').toLowerCase()));
 }
-if (!input) return 'no-input';
+if (!input) {
+  return {ok:false, reason:'no-input', candidates, url: location.href};
+}
 setInputValue(input, email);
+const filled = String(input.value || '');
+const filledOk = filled === email || filled.toLowerCase() === email.toLowerCase();
+// Prefer Continue/发送/Next over generic 注册 when email already filled
 const btnNodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a'));
 const scoreBtn = (n) => {
   if (!isVisible(n)) return -1;
   if (n.disabled || n.getAttribute('aria-disabled') === 'true') return -1;
   const t = ((n.innerText || n.textContent || n.value || n.getAttribute('aria-label') || '') + '')
-    .replace(/\s+/g, '').toLowerCase();
+    .replace(/\\s+/g, '').toLowerCase();
   let s = 0;
-  if (t.includes('\u7ee7\u7eed') || t.includes('continue')) s += 50;
-  if (t.includes('\u4e0b\u4e00\u6b65') || t.includes('next')) s += 40;
-  if (t.includes('\u53d1\u9001') || t.includes('send')) s += 45;
-  if (t.includes('\u9a8c\u8bc1') || t.includes('verify')) s += 35;
-  if (t.includes('\u6ce8\u518c') || t.includes('signup') || t.includes('sign-up') || t.includes('create')) s += 30;
-  if (t.includes('\u786e\u8ba4') || t.includes('confirm') || t.includes('submit')) s += 25;
-  if (String(n.getAttribute('type')||'').toLowerCase() === 'submit') s += 20;
-  if (t.includes('google') || t.includes('apple') || t.includes('github') || t.includes('\u767b\u5f55') || t.includes('login')) s -= 80;
+  if (t.includes('继续') || t.includes('continue')) s += 100;
+  if (t.includes('下一步') || t.includes('next')) s += 90;
+  if (t.includes('发送') || t.includes('send') || t.includes('submit')) s += 85;
+  if (t.includes('验证') || t.includes('verify') || t.includes('confirm') || t.includes('确认')) s += 70;
+  if (String(n.getAttribute('type')||'').toLowerCase() === 'submit') s += 40;
+  // demote method-switch buttons after email is filled
+  if (t.includes('注册') || t.includes('signup') || t.includes('sign-up') || t.includes('createaccount')) s += 10;
+  if (t.includes('google') || t.includes('apple') || t.includes('github') || t.includes('登录') || t.includes('login') || t.includes('使用邮箱')) s -= 100;
   return s;
 };
-let best = null, bestScore = 0;
+let best = null, bestScore = 0, ranked = [];
 for (const n of btnNodes) {
   const sc = scoreBtn(n);
+  const t = ((n.innerText || n.textContent || n.value || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+  if (sc > 0) ranked.push({score: sc, text: t});
   if (sc > bestScore) { bestScore = sc; best = n; }
 }
+ranked.sort((a,b) => b.score - a.score);
+let clickHow = 'none';
 if (best && bestScore > 0) {
   try { best.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {}
+  try { best.click(); clickHow = 'click'; }
+  catch (e1) {
+    try {
+      best.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+      clickHow = 'mouse';
+    } catch (e2) { clickHow = 'click-fail'; }
+  }
+} else {
   try {
-    best.click();
-    return 'clicked:' + bestScore + ':' + ((best.innerText||best.value||'').replace(/\s+/g,'').slice(0,40));
-  } catch (e) {}
-  try {
-    best.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-    return 'mouse-click:' + bestScore;
-  } catch (e2) {}
+    const form = input.form || input.closest('form');
+    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); clickHow = 'form-requestSubmit'; }
+    else if (form) { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); clickHow = 'form-submit'; }
+    else {
+      input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+      clickHow = 'enter';
+    }
+  } catch (e) { clickHow = 'fallback-fail'; }
 }
-try {
-  const form = input.form || input.closest('form');
-  if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(); return 'form-requestSubmit'; }
-  if (form) { form.dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})); return 'form-submit-event'; }
-} catch (e) {}
-try {
-  input.focus();
-  input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
-  input.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
-  return 'enter-key';
-} catch (e) {}
-return 'filled-no-button';
+return {
+  ok: filledOk && clickHow !== 'none' && clickHow !== 'click-fail' && clickHow !== 'fallback-fail',
+  reason: filledOk ? ('filled+' + clickHow) : ('fill-mismatch+' + clickHow),
+  filled: filled,
+  expected: email,
+  filledOk: filledOk,
+  clickHow: clickHow,
+  bestScore: bestScore,
+  bestText: best ? ((best.innerText || best.textContent || best.value || '') + '').replace(/\\s+/g,' ').trim().slice(0,80) : '',
+  ranked: ranked.slice(0, 8),
+  url: location.href,
+  candidates: candidates.filter(c => c.visible).slice(0, 12)
+};
                 """,
                 email,
             )
-            return str(r or "")
-        except Exception as exc:
-            return f"error:{exc}"
+        except Exception as e:
+            detail = {"ok": False, "reason": f"js_error:{e}", "expected": email}
+
+        self._lg(f"[*] UI email fill/click detail={detail}")
+        if isinstance(detail, dict):
+            if detail.get("filledOk"):
+                self._lg(
+                    f"[+] UI email filled OK value={detail.get('filled')} "
+                    f"click={detail.get('clickHow')} btn={detail.get('bestText')!r} score={detail.get('bestScore')}"
+                )
+                return f"ok:{detail.get('clickHow')}:{detail.get('bestText')}"
+            self._lg(
+                f"[!] UI email NOT filled as expected expected={email} "
+                f"got={detail.get('filled')!r} reason={detail.get('reason')} "
+                f"candidates={detail.get('candidates')}"
+            )
+            return f"fail:{detail.get('reason')}"
+        return f"detail:{detail}|fill_r:{fill_r}"
+
 
     def browser_user_agent(self) -> str:
         from grok_register_ttk import _get_page
@@ -360,8 +466,11 @@ true;
         except Exception:
             pass
 
+        self._lg(f"[*] harvest CreateEmail start email={email} timeout={timeout}")
         click_r = self.click_email_continue_for_create(email)
-        self._lg(f"[*] UI email submit click={click_r}")
+        self._lg(f"[*] UI email submit click={click_r} email={email}")
+        if str(click_r).startswith("fail:") or str(click_r) in ("no-input", "empty-email"):
+            self._lg(f"[!] first email fill/click failed: {click_r} — will retry in loop")
 
         deadline = time.time() + max(15, int(timeout))
         last_retry = time.time()
@@ -394,8 +503,10 @@ true;
                     pass
                 click_r = self.click_email_continue_for_create(email)
                 self._lg(
-                    f"[*] UI CreateEmail retry#{retries} click={click_r} "
-                    f"status={st.get('status')} seen={st.get('seen')} reason={st.get('reason')}"
+                    f"[*] UI CreateEmail retry#{retries} click={click_r} email={email} "
+                    f"status={st.get('status')} seen={st.get('seen')} ok={st.get('ok')} "
+                    f"net_hits={st.get('net_hits')} reason={st.get('reason')} "
+                    f"castle_len={st.get('castle_len')} full_status={st}"
                 )
             time.sleep(0.45)
 
