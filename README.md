@@ -140,6 +140,20 @@ python grok_register_ttk.py --cli
 
 ---
 
+## 配套服务仓
+
+本仓库是注册/导入主程序。本机编排（服务管理器、CPA Gateway、CLIProxy 示例配置）见独立公开仓：
+
+- https://github.com/qq1254870524/grok-regkit-services
+
+快速导入 CPA/CLIProxy 的 `xai-*.json` 到 Sub2API：
+
+```bash
+python -B scripts/import_cpa_to_sub2api.py --dir "C:/path/to/Grok/cpa"
+```
+
+Web：`http://127.0.0.1:8092` → 号池联动 → CPA 目录 → 导入 CPA 到 Sub2API。
+
 ## 可选：反代与 CPA 网关
 
 注册成功并 mint 出 `xai-*.json` 后，可用 **CLIProxyAPI** 提供 OpenAI 兼容接口。  
