@@ -5,6 +5,8 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-17e: 接入 AOL 邮箱 provider（IMAP 协议登录，账号----密码/应用专用密码；
+  配置 aol_accounts / aol_accounts_file；Web/GUI 可选 aol）。
 - 2026-07-17d: 接入微软 Outlook/Hotmail 邮箱 provider（password+TOTP 或 refresh_token），
   Graph Mail.Read 收验证码；配置 outlook_accounts / outlook_accounts_file / outlook_token_cache；
   Web/桌面 GUI 可选 outlook；依赖 pyotp。
@@ -71,6 +73,10 @@ try:
     import outlook_mail
 except Exception:
     outlook_mail = None  # type: ignore
+try:
+    import aol_mail
+except Exception:
+    aol_mail = None  # type: ignore
 
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -203,6 +209,9 @@ DEFAULT_CONFIG = {
     "outlook_accounts_file": "outlook_accounts.txt",
     "outlook_client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
     "outlook_token_cache": "outlook_token_cache.json",
+    # AOL mailbox (IMAP email----password/app-password)
+    "aol_accounts": "",
+    "aol_accounts_file": "aol_accounts.txt",
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -2935,6 +2944,28 @@ def get_email_and_token(api_key=None, log_callback=None):
                 return email, token
             raise
 
+
+    if aol_mail is not None and aol_mail.is_aol_provider(provider_key):
+        proxies = get_proxies() or None
+        _lg("[*] 邮箱来源: AOL / AIM 账号池")
+        _lg("[*] 获取方式: IMAP 协议登录 imap.aol.com:993（email----password 或应用专用密码）")
+        _lg(f"[*] 账号池文件: {config.get('aol_accounts_file') or 'aol_accounts.txt'}")
+        try:
+            email, token = aol_mail.get_email_and_token(
+                config, proxies=proxies, log_callback=log_callback
+            )
+            _lg(f"[+] AOL 邮箱获取成功: {email}")
+            return email, token
+        except Exception as exc:
+            if proxies and is_proxy_connection_error(exc):
+                _lg(f"[!] AOL 经代理路径失败，改直连重试: {exc}")
+                email, token = aol_mail.get_email_and_token(
+                    config, proxies=None, log_callback=log_callback
+                )
+                _lg(f"[+] AOL 邮箱获取成功(直连): {email}")
+                return email, token
+            raise
+
     if provider_key == "yyds":
         _lg("[*] 邮箱来源: YYDS 付费邮箱 API")
         _lg("[*] 获取方式: 调用 YYDS 接口创建临时地址")
@@ -3056,6 +3087,41 @@ def get_oai_code(
         except Exception as exc:
             if proxies and is_proxy_connection_error(exc):
                 return outlook_mail.get_oai_code(
+                    config,
+                    dev_token,
+                    email,
+                    timeout=timeout,
+                    poll_interval=poll_interval,
+                    log_callback=log_callback,
+                    cancel_callback=cancel_callback,
+                    extract_fn=extract_verification_code,
+                    proxies=None,
+                    ignore_existing=ignore_existing,
+                    since_ts=since_ts,
+                )
+            raise
+    
+    if aol_mail is not None and aol_mail.is_aol_provider(provider):
+        proxies = get_proxies() or None
+        try:
+            return aol_mail.get_oai_code(
+                config,
+                dev_token,
+                email,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+                extract_fn=extract_verification_code,
+                proxies=proxies,
+                ignore_existing=ignore_existing,
+                since_ts=since_ts,
+            )
+        except Exception as exc:
+            if proxies and is_proxy_connection_error(exc):
+                if log_callback:
+                    log_callback(f"[!] AOL 收信经代理失败，改直连: {exc}")
+                return aol_mail.get_oai_code(
                     config,
                     dev_token,
                     email,
@@ -5028,7 +5094,7 @@ class GrokRegisterGUI:
 
         add_label(0, 0, "邮箱服务商:")
         self.email_provider_var = tk.StringVar(value=config.get("email_provider", "duckmail"))
-        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "outlook", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org", "mailtm", "tempmail_lol", "tempmail_plus"], width=16)
+        self.email_provider_combo = tk_option_menu(config_frame, self.email_provider_var, ["duckmail", "yyds", "cloudflare", "outlook", "aol", "tempmail_io", "linshiyouxiang", "boomlify", "tempmail_org", "mailtm", "tempmail_lol", "tempmail_plus"], width=16)
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
 
         add_label(0, 2, "注册数量:")
@@ -5236,6 +5302,21 @@ class GrokRegisterGUI:
             has_file = bool(acc_path and os.path.isfile(acc_path) and os.path.getsize(acc_path) > 0)
             if not has_text and not has_file:
                 self.log("[!] Outlook 模式需要配置 outlook_accounts 或 outlook_accounts.txt（email----password----totp）")
+
+        if str(config.get("email_provider") or "").strip().lower() in ("aol", "aol_mail", "aol.com", "aim", "verizon_aol"):
+            has_text = bool(str(config.get("aol_accounts") or "").strip())
+            acc_file = str(config.get("aol_accounts_file") or "aol_accounts.txt").strip()
+            path_ok = False
+            try:
+                from pathlib import Path as _P
+                p = _P(acc_file) if _P(acc_file).is_absolute() else (_P(__file__).resolve().parent / acc_file)
+                path_ok = p.is_file() and p.stat().st_size > 0
+            except Exception:
+                path_ok = False
+            if not has_text and not path_ok:
+                self.log("[!] AOL 模式需要配置 aol_accounts 或 aol_accounts.txt（email----password 或应用专用密码）")
+                return
+
                 return
         try:
             count = int(self.count_var.get())

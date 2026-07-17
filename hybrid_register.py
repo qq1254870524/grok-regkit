@@ -245,38 +245,57 @@ def register_one_hybrid(
                 return False
 
 
-            # Pre-login Outlook Graph BEFORE CreateEmail so we never empty-run signup.
+                        # Pre-login mailbox BEFORE CreateEmail so we never empty-run signup.
             try:
-                import outlook_mail as om
-                from grok_register_ttk import config as _cfg_pre
+                from grok_register_ttk import config as _cfg_pre, get_email_provider as _gep
 
-                pre = om.preflight_mailbox(
-                    _cfg_pre,
-                    mail_token,
-                    email,
-                    log_callback=log,
-                    top=25,
-                )
-                log(
-                    f"[hybrid] Outlook pre-login OK email={email} "
-                    f"auth={pre.get('auth')} inbox={pre.get('folder_counts', {}).get('inbox', 0)} "
-                    f"junk={pre.get('folder_counts', {}).get('junkemail', 0)} "
-                    f"total={pre.get('total')} scanned_folders={pre.get('scanned_folders')} "
-                    f"top={pre.get('top')} full_mailbox={pre.get('full_mailbox')}"
-                )
-            except Exception as pre_exc:
-                log(f"[hybrid] Outlook pre-login FAIL email={email}: {pre_exc}")
+                prov = str(_gep() or "").strip().lower()
+                em_l = (email or "").lower()
+                is_aol = False
                 try:
-                    import outlook_mail as om2
+                    import aol_mail as _am
+                    is_aol = _am.is_aol_provider(prov) or em_l.endswith(("@aol.com", "@aim.com"))
+                except Exception:
+                    is_aol = em_l.endswith(("@aol.com", "@aim.com"))
+                if is_aol:
+                    import aol_mail as am
+                    pre = am.preflight_mailbox(
+                        _cfg_pre, mail_token, email, log_callback=log, top=15
+                    )
+                    log(
+                        f"[hybrid] AOL pre-login OK email={email} "
+                        f"auth={pre.get('auth')} total={pre.get('total')} "
+                        f"counts={pre.get('folder_counts')} "
+                        f"scanned_folders={pre.get('scanned_folders')} top={pre.get('top')}"
+                    )
+                else:
+                    import outlook_mail as om
+                    pre = om.preflight_mailbox(
+                        _cfg_pre, mail_token, email, log_callback=log, top=25
+                    )
+                    log(
+                        f"[hybrid] Outlook pre-login OK email={email} "
+                        f"auth={pre.get('auth')} inbox={pre.get('folder_counts', {}).get('inbox', 0)} "
+                        f"junk={pre.get('folder_counts', {}).get('junkemail', 0)} "
+                        f"total={pre.get('total')} scanned_folders={pre.get('scanned_folders')} "
+                        f"top={pre.get('top')} full_mailbox={pre.get('full_mailbox')}"
+                    )
+            except Exception as pre_exc:
+                log(f"[hybrid] mailbox pre-login FAIL email={email}: {pre_exc}")
+                try:
                     from grok_register_ttk import config as _cfg_pre2
-
-                    pool = om2.get_pool(_cfg_pre2, log_callback=log)
-                    pool.release(email, ok=False)
+                    em_l2 = (email or "").lower()
+                    if em_l2.endswith(("@aol.com", "@aim.com")):
+                        import aol_mail as am2
+                        am2.get_pool(_cfg_pre2, log_callback=log).release(email, ok=False)
+                    else:
+                        import outlook_mail as om2
+                        om2.get_pool(_cfg_pre2, log_callback=log).release(email, ok=False)
                 except Exception as rel_pre:
                     log(f"[hybrid] pre-login release email: {rel_pre}")
                 return False
 
-            # Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
+# Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
             castle = browser.harvest_castle_via_email_submit(email, timeout=45)
             browser_cookies = browser.export_cookies()
             if not castle or len(castle) < 1000 or not str(castle).startswith("IBYIll"):

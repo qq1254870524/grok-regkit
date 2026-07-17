@@ -564,6 +564,7 @@
             <button type="button" class="provider-tab" data-p="duckmail">DuckMail</button>
             <button type="button" class="provider-tab" data-p="yyds">YYDS</button>
             <button type="button" class="provider-tab" data-p="outlook">Outlook</button>
+          <button type="button" class="provider-tab" data-p="aol">AOL</button>
             <button type="button" class="provider-tab" data-p="tempmail_io">TempMail.io</button>
             <button type="button" class="provider-tab" data-p="linshiyouxiang">临时邮箱.net</button>
             <button type="button" class="provider-tab" data-p="boomlify">Boomlify</button>
@@ -640,6 +641,25 @@
               <div class="field">
                 <div class="label">Client ID（可选）</div>
                 <input id="outlook_client_id" type="text" placeholder="9e5f94bc-e8a4-4e73-b8be-63364c29d753" />
+              </div>
+            </div>
+          </div>
+
+          
+          <div id="panel-aol" class="soft-box" style="display:none">
+            <div class="tips">
+              <p>· <b>AOL / AIM</b>：用自有账号池 IMAP 协议登录收 Grok 验证码（不创建临时邮箱）。</p>
+              <p>· 格式：<code>账号----密码</code> 或 <code>账号----应用专用密码</code>（你写的 TOTP 字段按 IMAP 密码使用）。</p>
+              <p>· 也可三列：<code>email----password----totp</code>（IMAP 仍用 password）。</p>
+              <p>· 服务器：<code>imap.aol.com:993</code> SSL；扫 INBOX + Junk/Spam/Bulk（非全量）。</p>
+              <p>· 点「保存配置」会同步写入 <code>aol_accounts.txt</code>（本地文件，不入库）。</p>
+            </div>
+            <div class="label">AOL 账号池（每行一个）</div>
+            <textarea id="aol_accounts" rows="8" placeholder="user@aol.com----password_or_app_password" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12px;"></textarea>
+            <div class="grid2" style="margin-top:8px">
+              <div>
+                <div class="label">账号池文件</div>
+                <input id="aol_accounts_file" type="text" placeholder="aol_accounts.txt" />
               </div>
             </div>
           </div>
@@ -831,7 +851,7 @@
         btn.classList.toggle('active', btn.dataset.p === p);
       });
       const panels = [
-        'cloudflare', 'duckmail', 'yyds', 'outlook',
+        'cloudflare', 'duckmail', 'yyds', 'outlook', 'aol',
         'tempmail_io', 'linshiyouxiang', 'boomlify', 'tempmail_org', 'mailtm', 'tempmail_lol', 'tempmail_plus'
       ];
       panels.forEach((name) => {
@@ -1031,6 +1051,8 @@
         outlook_accounts: ($('outlook_accounts')?.value || '').replace(/\r\n/g, '\n'),
         outlook_accounts_file: ($('outlook_accounts_file')?.value || 'outlook_accounts.txt').trim() || 'outlook_accounts.txt',
         outlook_client_id: ($('outlook_client_id')?.value || '').trim(),
+        aol_accounts: ($('aol_accounts')?.value || '').replace(/\r\n/g, '\n'),
+        aol_accounts_file: ($('aol_accounts_file')?.value || 'aol_accounts.txt').trim() || 'aol_accounts.txt',
         proxy_mode: mode,
         proxy,
         proxy_airport_url: airportUrl,
@@ -1094,6 +1116,8 @@
       setVal('outlook_accounts', c.outlook_accounts || '');
       setVal('outlook_accounts_file', c.outlook_accounts_file || 'outlook_accounts.txt');
       setVal('outlook_client_id', c.outlook_client_id || '9e5f94bc-e8a4-4e73-b8be-63364c29d753');
+      setVal('aol_accounts', c.aol_accounts || '');
+      setVal('aol_accounts_file', c.aol_accounts_file || 'aol_accounts.txt');
       setVal('proxy', c.proxy || '');
       setVal('proxy_airport_url', c.proxy_airport_url || c.proxy || 'http://127.0.0.1:7893');
       setVal('proxy_api_url', c.proxy_api_url || 'https://api.cliproxy.io/white/api');
