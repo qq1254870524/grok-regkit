@@ -194,11 +194,10 @@ def register_one_hybrid(
     accounts_file: Path,
     should_stop: Optional[Callable[[], bool]] = None,
     post_success: bool = True,
-    browser: Optional[BrowserTokenSession] = None,
 ) -> bool:
     """Register one account via hybrid path. Returns True on SSO success.
 
-    If browser is provided, reuse it (do not open/close Chromium per account).
+    Each account uses its own browser session (open at start, close at end).
     """
     from grok_register_ttk import (
         build_profile,
@@ -210,17 +209,9 @@ def register_one_hybrid(
     stop = should_stop or (lambda: False)
     t0 = time.time()
     action = (next_action or load_next_action_from_capture() or "").strip()
-    owns_browser = browser is None
 
     try:
-        if owns_browser:
-            log("[browser] create new BrowserTokenSession for this account")
-            browser = BrowserTokenSession(log=log)
-            browser.start()
-            log("[browser] started for single-account mode")
-        else:
-            log("[browser] reuse shared BrowserTokenSession (no relaunch)")
-        try:
+        with BrowserTokenSession(log=log) as browser:
             if stop():
                 return False
             log("[browser] open signup page for this account")
@@ -592,25 +583,12 @@ def register_one_hybrid(
                     log(f"[hybrid] post_success: {e}")
             log(f"[hybrid] account success elapsed={time.time()-t0:.1f}s email={email}")
             return True
-        finally:
-            if owns_browser and browser is not None:
-                try:
-                    log("[browser] close single-account session")
-                    browser.close()
-                except Exception as close_exc:
-                    log(f"[browser] close error: {close_exc}")
     except Exception as e:
         log(f"[hybrid] exception: {e}")
         try:
             log(traceback.format_exc())
         except Exception:
             pass
-        if owns_browser and browser is not None:
-            try:
-                log("[browser] close after exception")
-                browser.close()
-            except Exception:
-                pass
         return False
 
 
@@ -670,12 +648,7 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
     ua = str(engine.config.get("user_agent") or "")
     proxy = str(engine.config.get("proxy") or resolved_proxy or "")
 
-    shared_browser = None
     try:
-        log("[browser] start shared Chromium for whole hybrid job (reuse across accounts)")
-        shared_browser = BrowserTokenSession(log=log)
-        shared_browser.start()
-        log("[browser] shared Chromium ready")
         i = 0
         while i < count:
             if controller.should_stop():
@@ -689,7 +662,6 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
                 accounts_file=Path(accounts_output_file),
                 should_stop=controller.should_stop,
                 post_success=True,
-                browser=shared_browser,
             )
             if ok:
                 success_count += 1
@@ -710,12 +682,6 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
         except Exception:
             pass
     finally:
-        if shared_browser is not None:
-            try:
-                log("[browser] close shared Chromium at job end")
-                shared_browser.close()
-            except Exception as be:
-                log(f"[browser] shared close error: {be}")
         # Stop browser immediately so Web「停止」不会留下 Chromium 僵尸进程
         try:
             if controller.should_stop():
