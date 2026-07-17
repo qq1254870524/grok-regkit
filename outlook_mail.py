@@ -13,6 +13,9 @@ poll_code: Microsoft Graph inbox, extract xAI/Grok code
 token cache: outlook_token_cache.json (local, gitignored)
 
 Changelog:
+- 2026-07-17b: preflight Graph login helper; poll top=50; each-round mail dump
+  (folder/subject/from/received/id); explicit non-full-mailbox scan note;
+  hybrid waits 3s after CreateEmail (caller side).
 - 2026-07-17: fix false OTP from inbox noise (e.g. bank "855-730").
   Only xAI/Grok related mails; baseline-skip existing inbox on poll start;
   reject bare XXX-XXX without xAI context.
@@ -747,6 +750,92 @@ def _default_extract(text: str, subject: str = ""):
     return None
 
 
+
+def preflight_mailbox(
+    config,
+    token_blob: str,
+    email: str,
+    *,
+    log_callback=None,
+    proxies=None,
+    top: int = 25,
+) -> dict:
+    """Validate Graph login BEFORE CreateEmail. Returns summary dict or raises.
+
+    Does NOT scan the whole mailbox — only inbox + junkemail top=N recent mails.
+    """
+    pool = get_pool(config, proxies=proxies, log_callback=log_callback)
+    _log(
+        log_callback,
+        f"[*] Outlook preflight start email={email} "
+        f"scanned_folders=inbox+junkemail top={int(top)} (非全量邮箱)",
+    )
+    access = pool.resolve_access_token(email, token_blob)
+    if not access:
+        raise Exception(f"Outlook preflight: empty access_token email={email}")
+    auth_hint = "token_blob"
+    try:
+        data = json.loads(token_blob) if token_blob else {}
+        if data.get("access_token"):
+            auth_hint = "reuse_access_token_or_refresh"
+        elif data.get("refresh_token"):
+            auth_hint = "refresh_token"
+        elif data.get("password") and data.get("totp_secret"):
+            auth_hint = "password+TOTP"
+    except Exception:
+        pass
+    cid = DEFAULT_CLIENT_ID
+    try:
+        cid = json.loads(token_blob).get("client_id") or cid
+    except Exception:
+        pass
+    sess = OutlookSession(client_id=cid, proxies=proxies, log_callback=log_callback)
+    try:
+        msgs = sess.list_inbox(access, top=int(top))
+    except Exception as graph_exc:
+        if proxies and _is_proxy_error(graph_exc):
+            _log(log_callback, f"[!] Outlook preflight proxy fail, force direct: {graph_exc}")
+            sess = OutlookSession(client_id=cid, proxies=None, log_callback=log_callback)
+            msgs = sess.list_inbox(access, top=int(top))
+        else:
+            raise
+    folder_counts: dict[str, int] = {}
+    for msg in msgs:
+        f = str((msg or {}).get("_folder") or "inbox")
+        folder_counts[f] = folder_counts.get(f, 0) + 1
+    # dump recent few for diagnosis
+    for i, msg in enumerate(msgs[:12]):
+        mid = str((msg or {}).get("id") or "")
+        mid_short = (mid[:16] + "...") if len(mid) > 16 else mid
+        subj = str((msg or {}).get("subject") or "")[:100]
+        frm = message_from_address(msg)
+        recv = str((msg or {}).get("receivedDateTime") or "")
+        folder = str((msg or {}).get("_folder") or "inbox")
+        xai = is_xai_related_message(msg, text=message_text(msg), subject=subj)
+        _log(
+            log_callback,
+            f"[*] Outlook preflight mail[{i}] folder={folder} xai={xai} "
+            f"received={recv} from={frm} subject={subj} id={mid_short}",
+        )
+    summary = {
+        "email": email,
+        "auth": auth_hint,
+        "ok": True,
+        "total": len(msgs),
+        "folder_counts": folder_counts,
+        "scanned_folders": "inbox+junkemail",
+        "top": int(top),
+        "full_mailbox": False,
+    }
+    _log(
+        log_callback,
+        f"[+] Outlook preflight OK email={email} auth={auth_hint} "
+        f"inbox={folder_counts.get('inbox', 0)} junkemail={folder_counts.get('junkemail', 0)} "
+        f"total={len(msgs)} scanned_folders=inbox+junkemail top={int(top)} 非全量",
+    )
+    return summary
+
+
 def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                  log_callback=None, cancel_callback=None, extract_fn=None, proxies=None,
                  ignore_existing: bool = True, since_ts: Optional[float] = None) -> str:
@@ -758,24 +847,56 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
         except Exception:
             return False
 
+    GRAPH_TOP = 50  # recent per folder; NOT full mailbox
     pool = get_pool(config, proxies=proxies, log_callback=log_callback)
     poll_started = _now()
     # Prefer caller-provided since_ts (email submit time); else poll start.
     baseline_ts = float(since_ts) if since_ts else poll_started
     _log(
         log_callback,
-        f"[*] Outlook poll code | email={email} | API=Microsoft Graph inbox+junkemail"
-        f" | ignore_existing={ignore_existing} | since={baseline_ts:.0f}",
+        f"[*] Outlook poll code | email={email} | API=Microsoft Graph "
+        f"scanned_folders=inbox+junkemail top={GRAPH_TOP} 非全量邮箱"
+        f" | ignore_existing={ignore_existing} | since_ts={baseline_ts:.3f} "
+        f"cutoff={baseline_ts - 120:.3f}",
     )
     deadline = poll_started + timeout
     seen = set()
     baseline_done = not ignore_existing
     last_err = None
+    poll_round = 0
+    login_method = "unknown"
     while _now() < deadline:
         if cancelled():
             raise Exception("cancelled")
+        poll_round += 1
         try:
             access = pool.resolve_access_token(email, token_blob)
+            if not access:
+                raise Exception(f"empty access_token after resolve email={email}")
+            # Infer login path from pool account / token blob
+            login_method = "resolve_access_token"
+            try:
+                data0 = json.loads(token_blob) if token_blob else {}
+                with _POOL_LOCK:
+                    for a in pool.accounts:
+                        if a.identity() == (email or "").lower():
+                            if a.access_token and a.access_expires_at > _now() + 30:
+                                login_method = "reuse_access_token"
+                            elif a.refresh_token:
+                                login_method = "refresh_token_or_reuse"
+                            elif a.password and a.totp_secret:
+                                login_method = "password+TOTP"
+                            break
+                if login_method == "resolve_access_token" and data0.get("access_token"):
+                    login_method = "token_blob_access_token"
+            except Exception:
+                pass
+            _log(
+                log_callback,
+                f"[*] Outlook poll round={poll_round} email={email} "
+                f"login={login_method} access_token_len={len(access)} "
+                f"remain={max(0, deadline - _now()):.0f}s",
+            )
             cid = DEFAULT_CLIENT_ID
             try:
                 cid = json.loads(token_blob).get("client_id") or cid
@@ -783,15 +904,46 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                 pass
             sess = OutlookSession(client_id=cid, proxies=proxies, log_callback=log_callback)
             try:
-                msgs = sess.list_inbox(access, top=25)
+                msgs = sess.list_inbox(access, top=GRAPH_TOP)
             except Exception as graph_exc:
                 if proxies and _is_proxy_error(graph_exc):
                     _log(log_callback, f"[!] Outlook Graph all-proxy failed, force direct: {graph_exc}")
                     sess_direct = OutlookSession(client_id=cid, proxies=None, log_callback=log_callback)
-                    msgs = sess_direct.list_inbox(access, top=25)
+                    msgs = sess_direct.list_inbox(access, top=GRAPH_TOP)
                 else:
                     raise
-            _log(log_callback, f"[*] Outlook Graph messages count={len(msgs)} email={email} folders=inbox+junkemail")
+            folder_counts: dict[str, int] = {}
+            for m0 in msgs:
+                f0 = str((m0 or {}).get("_folder") or "inbox")
+                folder_counts[f0] = folder_counts.get(f0, 0) + 1
+            _log(
+                log_callback,
+                f"[*] Outlook Graph messages count={len(msgs)} email={email} "
+                f"folders=inbox+junkemail top={GRAPH_TOP} 非全量 "
+                f"counts={folder_counts} login={login_method}",
+            )
+            # Always dump recent mails each round for diagnosis (no redaction)
+            dump_n = min(len(msgs), 15 if poll_round <= 2 else 8)
+            for i, msg in enumerate(msgs[:dump_n]):
+                mid = str((msg or {}).get("id") or "")
+                mid_short = (mid[:18] + "...") if len(mid) > 18 else mid
+                subject0 = str((msg or {}).get("subject") or "")[:100]
+                frm0 = message_from_address(msg)
+                recv0 = str((msg or {}).get("receivedDateTime") or "")
+                folder0 = str((msg or {}).get("_folder") or "inbox")
+                body0 = message_text(msg)
+                xai0 = is_xai_related_message(msg, text=body0, subject=subject0)
+                _log(
+                    log_callback,
+                    f"[*] Outlook dump r{poll_round}[{i}] folder={folder0} xai={xai0} "
+                    f"received={recv0} from={frm0} subject={subject0} id={mid_short}",
+                )
+            if len(msgs) > dump_n:
+                _log(
+                    log_callback,
+                    f"[*] Outlook dump r{poll_round} ... and {len(msgs) - dump_n} more "
+                    f"(only top recent listed)",
+                )
 
             # First poll: baseline-skip non-xAI noise only. Keep recent/xAI mails
             # evaluable so a fast verification letter is not dropped.
@@ -881,7 +1033,11 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
             _log(log_callback, f"[!] Outlook poll error: {exc}")
         time.sleep(max(1.0, float(poll_interval)))
     pool.release(email, ok=False)
-    raise Exception(f"Outlook code timeout email={email} last_error={last_err}")
+    raise Exception(
+        f"Outlook code timeout email={email} last_error={last_err} "
+        f"rounds={poll_round} login={login_method} "
+        f"scanned_folders=inbox+junkemail top={GRAPH_TOP} 非全量"
+    )
 
 
 def is_outlook_provider(name: str) -> bool:

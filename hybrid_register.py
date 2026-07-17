@@ -244,6 +244,38 @@ def register_one_hybrid(
             if stop():
                 return False
 
+
+            # Pre-login Outlook Graph BEFORE CreateEmail so we never empty-run signup.
+            try:
+                import outlook_mail as om
+                from grok_register_ttk import config as _cfg_pre
+
+                pre = om.preflight_mailbox(
+                    _cfg_pre,
+                    mail_token,
+                    email,
+                    log_callback=log,
+                    top=25,
+                )
+                log(
+                    f"[hybrid] Outlook pre-login OK email={email} "
+                    f"auth={pre.get('auth')} inbox={pre.get('folder_counts', {}).get('inbox', 0)} "
+                    f"junk={pre.get('folder_counts', {}).get('junkemail', 0)} "
+                    f"total={pre.get('total')} scanned_folders={pre.get('scanned_folders')} "
+                    f"top={pre.get('top')} full_mailbox={pre.get('full_mailbox')}"
+                )
+            except Exception as pre_exc:
+                log(f"[hybrid] Outlook pre-login FAIL email={email}: {pre_exc}")
+                try:
+                    import outlook_mail as om2
+                    from grok_register_ttk import config as _cfg_pre2
+
+                    pool = om2.get_pool(_cfg_pre2, log_callback=log)
+                    pool.release(email, ok=False)
+                except Exception as rel_pre:
+                    log(f"[hybrid] pre-login release email: {rel_pre}")
+                return False
+
             # Browser UI submit triggers native CreateEmail (passes CF). Capture castle from that request.
             castle = browser.harvest_castle_via_email_submit(email, timeout=45)
             browser_cookies = browser.export_cookies()
@@ -325,9 +357,22 @@ def register_one_hybrid(
 
             send_ts = time.time()
             log(
-                f"[hybrid] 等待邮箱验证码 email={email} timeout=180s "
-                f"CreateEmail browser_sent={browser_sent} protocol_sent={protocol_sent} "
-                f"(scan Inbox+Junk/Spam; cancel 支持已启用)"
+                f"[hybrid] CreateEmail done send_ts={send_ts:.3f} email={email} "
+                f"browser_sent={browser_sent} protocol_sent={protocol_sent}; "
+                f"wait 3s before poll mail (Graph inbox+junkemail only, 非全量)"
+            )
+            # Wait 3s after send so Graph has time to receive; support cancel.
+            for _w in range(30):
+                if stop():
+                    log("[hybrid] stop during post-CreateEmail 3s wait")
+                    return False
+                if time.time() - send_ts >= 3.0:
+                    break
+                time.sleep(0.1)
+            log(
+                f"[hybrid] 开始查邮件 email={email} timeout=180s since_ts={send_ts:.3f} "
+                f"elapsed_since_send={time.time() - send_ts:.2f}s "
+                f"(scan Inbox+Junk top=50; 非全量; cancel 支持已启用)"
             )
             code = get_oai_code(
                 mail_token,
@@ -619,16 +664,8 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
         raise
 
     if resolved_proxy:
-        safe = resolved_proxy
-        try:
-            import urllib.parse
-
-            parsed = urllib.parse.urlparse(resolved_proxy)
-            if parsed.password:
-                safe = resolved_proxy.replace(":" + parsed.password + "@", ":****@")
-        except Exception:
-            pass
-        log(f"[*] 代理模式: {mode} | {safe}")
+        # Full proxy URL in logs (no redaction), per user request.
+        log(f"[*] 代理模式: {mode} | {resolved_proxy}")
     else:
         log(f"[*] 代理模式: {mode or 'direct'}（直连）")
 
