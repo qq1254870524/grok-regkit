@@ -256,5 +256,152 @@ class RegressionTests(unittest.TestCase):
             server.engine.config.update(original_config)
 
 
+
+    def test_aol_login_fail_removes_from_file_and_config(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        import aol_mail
+        import grok_register_ttk as engine
+
+        logs = []
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "aol_accounts.txt"
+            path.write_text(
+                "good1@aol.com----pass1\nbad1@aol.com----pass-bad\ngood2@aol.com----pass2\n",
+                encoding="utf-8",
+            )
+            old_config = dict(engine.config)
+            old_save = engine.save_config
+            old_pool = aol_mail._POOL
+            try:
+                engine.config.clear()
+                engine.config.update({
+                    "aol_accounts": path.read_text(encoding="utf-8") + "resurrect@aol.com----x\n",
+                    "aol_accounts_file": str(path),
+                })
+                saved = {"n": 0}
+                engine.save_config = lambda: saved.__setitem__("n", saved["n"] + 1)
+                pool = aol_mail.AolAccountPool(
+                    aol_mail.load_accounts_from_file(str(path)),
+                    log_callback=logs.append,
+                    source_file=str(path),
+                )
+                aol_mail._POOL = pool
+
+                def fake_login(self):
+                    if "bad1" in self.email:
+                        raise Exception("b'[AUTHENTICATIONFAILED] LOGIN Invalid credentials'")
+                    return None
+
+                old_login = aol_mail.AolImapSession.connect_login
+                aol_mail.AolImapSession.connect_login = fake_login
+                old_list = aol_mail.AolImapSession.list_folders
+                aol_mail.AolImapSession.list_folders = lambda self: ["INBOX"]
+                old_logout = aol_mail.AolImapSession.logout
+                aol_mail.AolImapSession.logout = lambda self: None
+                try:
+                    # force order: first good, then bad should be deleted when reached
+                    # directly remove via auth fail path
+                    pool.accounts = [
+                        aol_mail.AolAccount(email="bad1@aol.com", password="pass-bad"),
+                        aol_mail.AolAccount(email="good2@aol.com", password="pass2"),
+                    ]
+                    email, token = pool.acquire()
+                    self.assertEqual(email, "good2@aol.com")
+                finally:
+                    aol_mail.AolImapSession.connect_login = old_login
+                    aol_mail.AolImapSession.list_folders = old_list
+                    aol_mail.AolImapSession.logout = old_logout
+
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("bad1@aol.com", text)
+                self.assertIn("good2@aol.com", text)
+                self.assertNotIn("bad1@aol.com", engine.config.get("aol_accounts") or "")
+                self.assertIn("good2@aol.com", engine.config.get("aol_accounts") or "")
+                self.assertGreaterEqual(saved["n"], 1)
+                self.assertTrue(any(("登录失败" in x or "login" in x.lower()) and ("删除" in x or "remove" in x.lower()) for x in logs))
+
+                # force_reload must not resurrect deleted account
+                reloaded = aol_mail.build_pool_from_config(engine.config, log_callback=logs.append)
+                emails = [a.email for a in reloaded.accounts]
+                self.assertNotIn("bad1@aol.com", emails)
+                self.assertNotIn("resurrect@aol.com", emails)
+                self.assertIn("good2@aol.com", emails)
+            finally:
+                engine.save_config = old_save
+                engine.config.clear()
+                engine.config.update(old_config)
+                aol_mail._POOL = old_pool
+
+
+
+    def test_outlook_login_fail_removes_from_file_and_config(self):
+        import tempfile
+        from pathlib import Path
+        import outlook_mail
+        import grok_register_ttk as engine
+
+        logs = []
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "outlook_accounts.txt"
+            path.write_text(
+                "bad1@outlook.com----pass-bad----totpbad\ngood2@outlook.com----pass2----totpgood\n",
+                encoding="utf-8",
+            )
+            old_config = dict(engine.config)
+            old_save = engine.save_config
+            old_pool = outlook_mail._POOL
+            try:
+                engine.config.clear()
+                engine.config.update({
+                    "outlook_accounts": "bad1@outlook.com----pass-bad----totpbad\nresurrect@outlook.com----x----y\n",
+                    "outlook_accounts_file": str(path),
+                })
+                saved = {"n": 0}
+                engine.save_config = lambda: saved.__setitem__("n", saved["n"] + 1)
+
+                def fake_ensure(self, acc):
+                    if "bad1" in acc.email:
+                        raise Exception("password login failed: invalid credentials")
+                    acc.access_token = "tok"
+                    acc.refresh_token = "rt"
+                    acc.access_expires_at = 9999999999
+                    return acc
+
+                old_ensure = outlook_mail.OutlookAccountPool.ensure_tokens
+                outlook_mail.OutlookAccountPool.ensure_tokens = fake_ensure
+                try:
+                    pool = outlook_mail.OutlookAccountPool(
+                        outlook_mail.load_accounts_from_file(str(path)),
+                        log_callback=logs.append,
+                        source_file=str(path),
+                    )
+                    outlook_mail._POOL = pool
+                    email, token = pool.acquire()
+                    self.assertEqual(email, "good2@outlook.com")
+                finally:
+                    outlook_mail.OutlookAccountPool.ensure_tokens = old_ensure
+
+                text = path.read_text(encoding="utf-8")
+                self.assertNotIn("bad1@outlook.com", text)
+                self.assertIn("good2@outlook.com", text)
+                self.assertNotIn("bad1@outlook.com", engine.config.get("outlook_accounts") or "")
+                self.assertIn("good2@outlook.com", engine.config.get("outlook_accounts") or "")
+                self.assertGreaterEqual(saved["n"], 1)
+
+                # force_reload must not resurrect deleted/stale config-only accounts
+                reloaded = outlook_mail.build_pool_from_config(engine.config, log_callback=logs.append)
+                emails = [a.email for a in reloaded.accounts]
+                self.assertNotIn("bad1@outlook.com", emails)
+                self.assertNotIn("resurrect@outlook.com", emails)
+                self.assertIn("good2@outlook.com", emails)
+            finally:
+                engine.save_config = old_save
+                engine.config.clear()
+                engine.config.update(old_config)
+                outlook_mail._POOL = old_pool
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

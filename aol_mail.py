@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """AOL mailbox provider via IMAP protocol (email----password/app password).
 
 Account line formats:
@@ -10,6 +10,8 @@ create/acquire: rent mailbox from pool, IMAP LOGIN
 poll_code: IMAP INBOX + Junk/Spam/Bulk, extract xAI/Grok code
 
 Changelog:
+- 2026-07-17e: build_pool 文件优先；登录失败/注册成功删除后实时同步内存+文件+config，避免重载复活。
+- 2026-07-17d: 删除邮箱后同步写回 aol_accounts 文件 + config.aol_accounts 文本；避免 force_reload 把已删邮箱重新加载回来。
 - 2026-07-17c: 登录失败/注册成功后从账号池文件永久删除该行；内存+磁盘同步。
 - 2026-07-17b: login fail -> mark bad + next account; scan ALL IMAP folders.
 - 2026-07-17: initial AOL IMAP provider (imap.aol.com:993).
@@ -392,6 +394,37 @@ class AolImapSession:
         return out
 
 
+
+def _sync_engine_accounts_text(path: str, body: str) -> None:
+    """Keep runtime config.aol_accounts aligned with the live pool file."""
+    try:
+        import grok_register_ttk as engine
+    except Exception:
+        return
+    try:
+        text = (body or "").replace("\r\n", "\n").strip("\n")
+        if hasattr(engine, "config") and isinstance(getattr(engine, "config", None), dict):
+            engine.config["aol_accounts"] = text
+            name = str(engine.config.get("aol_accounts_file") or "aol_accounts.txt").strip() or "aol_accounts.txt"
+            try:
+                p = Path(path)
+                root = Path(getattr(engine, "__file__", Path.cwd())).resolve().parent
+                if p.resolve() == (root / name).resolve() or not Path(name).is_absolute():
+                    engine.config["aol_accounts_file"] = name
+            except Exception:
+                pass
+        save = getattr(engine, "save_config", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:
+                pass
+    except Exception:
+        # never break mail flow because config sync failed
+        return
+
+
+
 class AolAccountPool:
     def __init__(self, accounts: List[AolAccount], log_callback=None, source_file: str = ""):
         self.accounts = accounts
@@ -467,7 +500,7 @@ class AolAccountPool:
                     )
                     if auth_fail:
                         self._lg(
-                            f"[!] AOL IMAP 登录失败，从账号池删除并换下一个 | email={acc.email} | "
+                            f"[!] AOL IMAP 登录失败，立即从账号池删除(内存+文件+配置)并换下一个 | email={acc.email} | "
                             f"err={exc}"
                         )
                         self.accounts = [a for a in self.accounts if a.identity() != acc.identity()]
@@ -524,19 +557,24 @@ class AolAccountPool:
         return f"{acc.email}----{acc.password}"
 
     def persist_accounts_file(self) -> None:
-        """Rewrite source accounts file from current in-memory pool (no secrets in logs)."""
+        """Rewrite source accounts file and keep config.aol_accounts in sync."""
         path = (self.source_file or "").strip()
-        if not path:
-            self._lg("[!] AOL persist skip: no source_file")
-            return
-        p = Path(path)
         lines = [self._format_line(a) for a in self.accounts if (a.email or "").strip()]
         body = "\n".join(lines)
         if body:
             body += "\n"
+        if not path:
+            self._lg("[!] AOL persist skip: no source_file")
+            _sync_engine_accounts_text("", body)
+            return
+        p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(body, encoding="utf-8")
-        self._lg(f"[*] AOL 账号池已写回 file={p} remaining={len(self.accounts)}")
+        _sync_engine_accounts_text(str(p), body)
+        self._lg(
+            f"[*] AOL 账号池已实时更新 file={p} remaining={len(self.accounts)} "
+            f"config_synced=1"
+        )
 
     def remove_account(self, email: str, reason: str = "removed") -> bool:
         """Permanently remove email from memory pool and accounts file."""
@@ -584,20 +622,49 @@ _POOL_LOCK = threading.RLock()
 
 
 def build_pool_from_config(config: dict, log_callback=None) -> AolAccountPool:
-    text = str((config or {}).get("aol_accounts") or "").strip()
-    accounts = []
-    if text:
-        accounts.extend(load_accounts_from_text(text))
+    """Load AOL pool with live file as source of truth.
+
+    Priority:
+    1) aol_accounts.txt (or configured file) if present
+    2) config.aol_accounts text only when file is missing
+    After load, always mirror the live account list back into config.aol_accounts
+    so UI/force_reload cannot resurrect deleted mailboxes.
+    """
     path = str((config or {}).get("aol_accounts_file") or "aol_accounts.txt").strip() or "aol_accounts.txt"
     file_path = Path(path)
     if not file_path.is_absolute():
         file_path = _root_dir() / file_path
+    accounts = []
+    source = "empty"
     if file_path.is_file():
-        for acc in load_accounts_from_file(str(file_path)):
-            if acc.identity() not in {a.identity() for a in accounts}:
-                accounts.append(acc)
-    _log(log_callback, f"[*] AOL pool loaded accounts={len(accounts)} file={file_path}")
+        accounts = load_accounts_from_file(str(file_path))
+        source = f"file:{file_path}"
+    else:
+        text = str((config or {}).get("aol_accounts") or "").strip()
+        if text:
+            accounts = load_accounts_from_text(text)
+            source = "config.aol_accounts"
+    # de-dup preserve order
+    seen = set()
+    uniq = []
+    for acc in accounts:
+        ident = acc.identity()
+        if not ident or ident in seen:
+            continue
+        seen.add(ident)
+        uniq.append(acc)
+    accounts = uniq
+    _log(log_callback, f"[*] AOL pool loaded accounts={len(accounts)} source={source} file={file_path}")
     pool = AolAccountPool(accounts, log_callback=log_callback, source_file=str(file_path))
+    # Keep runtime config text aligned with the live pool immediately
+    try:
+        lines = [pool._format_line(a) for a in pool.accounts if (a.email or "").strip()]
+        body = "\n".join(lines)
+        if body:
+            body += "\n"
+        _sync_engine_accounts_text(str(file_path), body)
+    except Exception:
+        pass
     return pool
 
 

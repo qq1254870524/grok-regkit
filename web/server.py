@@ -166,11 +166,11 @@ def _sync_proxy_list_file(text: str, cfg: Optional[Dict[str, Any]] = None) -> st
 
 
 def _outlook_accounts_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
-    """Return editable multi-line Outlook account pool text for the web UI."""
+    """Return editable multi-line Outlook account pool text for the web UI.
+
+    File is the live source of truth after runtime login-fail/register deletes.
+    """
     c = cfg if isinstance(cfg, dict) else dict(engine.config)
-    inline = str(c.get("outlook_accounts") or "").strip()
-    if inline:
-        return inline.replace('\r\n', '\n').strip() + '\n'
     name = str(c.get("outlook_accounts_file") or "outlook_accounts.txt").strip() or "outlook_accounts.txt"
     path = Path(name) if os.path.isabs(name) else (ROOT / name)
     try:
@@ -179,24 +179,28 @@ def _outlook_accounts_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
             return text.replace('\r\n', '\n').strip() + ('\n' if text.strip() else "")
     except Exception:
         pass
+    inline = str(c.get("outlook_accounts") or "").strip()
+    if inline:
+        return inline.replace('\r\n', '\n').strip() + '\n'
     return ""
 
 
 
 def _aol_accounts_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
-    """Return editable multi-line AOL account pool text for the web UI."""
+    """Return editable multi-line AOL account pool text for the web UI.
+
+    File is the live source of truth after runtime login-fail/register deletes.
+    """
     c = cfg if cfg is not None else engine.config
-    inline = str(c.get("aol_accounts") or "").strip()
-    if inline:
-        return inline
     name = str(c.get("aol_accounts_file") or "aol_accounts.txt").strip() or "aol_accounts.txt"
     path = Path(name) if os.path.isabs(name) else (ROOT / name)
     if path.is_file():
         try:
-            return path.read_text(encoding="utf-8", errors="ignore").rstrip("\n")
+            return path.read_text(encoding="utf-8", errors="ignore").replace('\r\n', '\n').rstrip("\n")
         except Exception:
-            return ""
-    return ""
+            pass
+    inline = str(c.get("aol_accounts") or "").strip()
+    return inline.replace('\r\n', '\n').rstrip('\n') if inline else ""
 
 
 def _public_config() -> Dict[str, Any]:

@@ -351,22 +351,34 @@ def register_one_hybrid(
                     )
                     try:
                         em_l2 = (email or "").lower()
+                        msg = str(pre_exc)
+                        msg_l = msg.lower()
                         bad = any(
-                            x in str(pre_exc)
+                            x in msg
                             for x in (
                                 "AUTHENTICATIONFAILED",
                                 "Invalid credentials",
-                                "LOGIN",
+                                "LOGIN failed",
                                 "password login failed",
                                 "MFA/TOTP",
-                                "401",
                                 "invalid_grant",
                                 "AADSTS",
+                            )
+                        ) or any(
+                            x in msg_l
+                            for x in (
                                 "authentication failed",
+                                "login invalid",
+                                "auth fail",
+                                "unauthorized",
                             )
                         )
                         if bad:
                             remove_mailbox_from_pool(email, reason="login_fail", log=log)
+                            log(
+                                f"[hybrid] 已从邮箱池实时删除登录失败邮箱: {email} "
+                                f"(reason=login_fail)"
+                            )
                         else:
                             # temporary: release back to idle/cooldown without permanent delete
                             from grok_register_ttk import config as _cfg_pre2
