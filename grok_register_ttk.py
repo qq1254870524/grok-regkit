@@ -4712,7 +4712,7 @@ def build_profile():
     return given_name, family_name, password
 
 
-def fill_profile_and_submit(timeout=120, log_callback=None, cancel_callback=None):
+def fill_profile_and_submit(timeout=210, log_callback=None, cancel_callback=None):
     given_name, family_name, password = build_profile()
     deadline = time.time() + timeout
     form_filled_once = False
@@ -4834,6 +4834,16 @@ return String(cfInput.value || '').trim().length;
                             )
                             if log_callback:
                                 log_callback(f"[*] Turnstile 二次复用完成，回填长度={synced}")
+                        # 18r24: late CF token must still get a submit window
+                        try:
+                            deadline = max(deadline, time.time() + 75)
+                        except Exception:
+                            pass
+                        if log_callback:
+                            try:
+                                log_callback("[*] profile submit window extended +75s after late Turnstile")
+                            except Exception:
+                                pass
                     except Exception as cf_exc:
                         if log_callback:
                             log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")
@@ -4925,6 +4935,16 @@ return String(cfInput.value || '').trim().length;
                         )
                         if log_callback:
                             log_callback(f"[*] Turnstile 二次复用完成，回填长度={synced}")
+                        # 18r24: late CF token must still get a submit window
+                        try:
+                            deadline = max(deadline, time.time() + 75)
+                        except Exception:
+                            pass
+                        if log_callback:
+                            try:
+                                log_callback("[*] profile submit window extended +75s after late Turnstile")
+                            except Exception:
+                                pass
                 except Exception as cf_exc:
                     if log_callback:
                         log_callback(f"[Debug] Turnstile 二次复用失败: {cf_exc}")

@@ -1,6 +1,8 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Matrix cross-run orchestrator for grok-regkit web API.
+"""
+18r24: classify fixed (no false email_login_fail on IMAP login OK); profile/sso classes.
+Matrix cross-run orchestrator for grok-regkit web API.
 
 Changelog:
 - 2026-07-19r22: put_config no longer forces register_count=1 (preserve UI preference); job still /api/start count=1 per cell-round.
@@ -146,35 +148,158 @@ def api(method: str, path: str, body: dict | None = None, timeout: int = 60, ret
 
 
 def classify(logs: str) -> str:
-    t = logs.lower()
+    """Failure/success taxonomy for matrix cells. Prefer specific terminal signals.
+
+    IMPORTANT: do NOT match healthy log noise such as "IMAP login OK" or
+    successful "confirmation code" fetch lines.
+    """
+    t = (logs or "")
+    tl = t.lower()
+
+    # Terminal counters first
+    if re.search(r"任务结束。成功\s*1\s*\|\s*失败\s*0", t) or re.search(
+        r"成功\s*1\s*\|\s*失败\s*0\s*\|\s*pending_sso\s*0", t
+    ):
+        return "success"
+
     rules = [
         ("stop_requested", ["stop requested", "force_stop", "stop requested from web"]),
-        ("email_login_fail", ["邮箱登录失败", "imap login", "login failed", "auth fail", "invalid credentials", "获取邮箱失败"]),
+        ("empty_log", ["<log fetch fail"]),
         ("early_no_new_mail", ["early_no_new_mail", "seen_new_after_send=0", "graph no post-send"]),
-        ("create_email_fail", ["createemail", "create email", "发信失败", "发送到此邮箱的验证码过多", "too many", "rate_limited", "switch_mailbox"]),
-        ("rate_limit_mailbox", ["验证码过多", "create_email_rate_limited", "retry in", "minutes}} 后重试"]),
-        ("verify_email_fail", ["verifyemail", "验证码", "code invalid", "spo-", "confirmation code"]),
-        ("turnstile_fail", ["turnstile", "cf_clearance", "人机"]),
-        ("next_action_404", ["server action not found", "next-action", "next action"]),
-        ("signup_no_sso", ["no sso", "sso_len=0", "protocol no sso", "pending_sso", "无 sso"]),
+        (
+            "rate_limit_mailbox",
+            [
+                "验证码过多",
+                "create_email_rate_limited",
+                "发送到此邮箱的验证码过多",
+                "too many verification",
+            ],
+        ),
+        (
+            "create_email_fail",
+            [
+                "createemail fail",
+                "create email fail",
+                "发信失败",
+                "switch_mailbox",
+                "create_email_rate_limited",
+            ],
+        ),
+        (
+            "email_login_fail",
+            [
+                "邮箱登录失败",
+                "获取邮箱失败",
+                "imap login fail",
+                "imap login failed",
+                "login failed",
+                "auth fail",
+                "invalid credentials",
+                "authentication failed",
+                "preflight login fail",
+                "aol ensure_login fail",
+                "outlook login fail",
+                "graph login fail",
+            ],
+        ),
+        (
+            "profile_fill_fail",
+            [
+                "最终注册页资料填写失败",
+                "资料填写失败",
+                "fill-failed",
+                "no-submit-button",
+                "filled-no-submit",
+            ],
+        ),
+        (
+            "sso_timeout",
+            [
+                "未获取到 sso cookie",
+                "您正在登录",
+                "signing-in",
+                "wait_for_sso",
+                "sso nudge",
+            ],
+        ),
+        (
+            "pending_sso",
+            [
+                "burn_mailbox_to_pending",
+                "pending_sso saved",
+                "-> pending_sso",
+                "mailbox burned to pending_sso",
+            ],
+        ),
+        (
+            "signup_no_sso",
+            [
+                "protocol no sso",
+                "no sso cookies=",
+                "sso_len=0",
+                "browser-fetch no sso",
+            ],
+        ),
+        (
+            "turnstile_fail",
+            [
+                "turnstile 获取 token 失败",
+                "turnstile 二次复用失败",
+                "turnstile token 失败",
+            ],
+        ),
+        ("next_action_404", ["server action not found"]),
         ("consent_404", ["consent http 404", "consent 失败"]),
-        ("proxy_fail", ["proxy", "socks", "tunnel", "connection refused", "curl: (28)", "timed out", "ippure", "非住宅"]),
-        ("cf_block", ["cf_clearance", "cloudflare", "attention required", "just a moment"]),
-        ("ui_desync", ["ui fallback", "desync", "email-page", "hasprofile"]),
-        ("browser_disconnect", ["page disconnected", "与页面的连接已断开", "new_tab", "nonetype"]),
-        ("rate_limit", ["rate limit", "too many requests", "429", "重试"]),
-        ("password_error", ["账号密码错误", "incorrect password", "wrong password", "invalid password"]),
-        ("success", ["success=1", "注册成功", "sso 有效", "immediate sso", "sso_len="]),
+        (
+            "verify_email_fail",
+            ["verifyemail fail", "code invalid", "验证码错误", "invalid code"],
+        ),
+        (
+            "proxy_fail",
+            [
+                "cannot complete socks5",
+                "tunnel failed",
+                "proxy error",
+                "curl: (97)",
+                "curl: (28)",
+            ],
+        ),
+        ("cf_block", ["attention required", "just a moment", "cf challenge"]),
+        ("ui_desync", ["ui desync", "ui fallback desync"]),
+        (
+            "browser_disconnect",
+            ["page disconnected", "与页面的连接已断开"],
+        ),
+        (
+            "password_error",
+            [
+                "账号密码错误",
+                "incorrect password",
+                "wrong password",
+                "invalid password",
+            ],
+        ),
+        ("success", ["注册成功", "sso 有效", "immediate sso", "已写入号池"]),
     ]
     for name, kws in rules:
-        if any(k in t for k in kws):
-            # success only if also not no-sso heavy fail
-            if name == "success" and ("success 0" in t or "失败 1" in t or "fail=1" in t):
-                continue
-            return name
-    if "success" in t and "fail" in t:
+        hit = False
+        for k in kws:
+            if k.isascii():
+                if k.lower() in tl:
+                    hit = True
+                    break
+            elif k in t:
+                hit = True
+                break
+        if not hit:
+            continue
+        if name == "success" and ("成功 0" in t or "失败 1" in t or "fail=1" in tl):
+            continue
+        return name
+    if "success" in tl and "fail" in tl:
         return "mixed"
     return "unknown"
+
 
 
 def wait_idle(timeout: int = 30) -> bool:

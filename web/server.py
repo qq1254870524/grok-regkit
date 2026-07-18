@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
@@ -6,6 +6,7 @@
 stats; POST /api/pending-sso/recover starts secondary SSO recovery job.
 2026-07-18d: Sub2API pool status in /api/integration (healthy/count/open URL),
 pending-SSO account files in /api/accounts, dedicated /api/sub2api/status.
+2026-07-19-live-metrics2: session stats + mid-job markers + phase + live last_event tick + broader waiting_code patterns;
 2026-07-18b: parse hybrid/browser progress logs and update success/fail in
 _job_state while a job is running, so Web UI metrics refresh in real time.
 2026-07-18c: added CPA OAuth JSON directory import API for Sub2API.
@@ -93,6 +94,25 @@ _job_state: Dict[str, Any] = {
     "started_at": None,
     "finished_at": None,
     "error": "",
+    # current-job only counters reset each start; session_* survive matrix restarts
+    "session_success": 0,
+    "session_fail": 0,
+    "session_pending_sso": 0,
+    "session_skipped": 0,
+    "phase": "idle",
+    "last_event": "",
+    "updated_at": None,
+    "jobs_started": 0,
+    "jobs_finished": 0,
+}
+_progress_seen_ok: set = set()
+_progress_seen_pending: set = set()
+_progress_seen_fail: set = set()
+_job_baseline_session: Dict[str, int] = {
+    "success": 0,
+    "fail": 0,
+    "pending_sso": 0,
+    "skipped": 0,
 }
 
 
@@ -121,30 +141,159 @@ def _append_log(message: str) -> None:
 
 
 _PROGRESS_RE = re.compile(
-    r"(?:当前统计|混合任务结束|任务结束|pending_sso 恢复结束)[^0-9]{0,20}"
+    r"(?:当前统计|混合任务结束|任务结束|pending_sso 恢复结束)[^0-9]{0,40}"
     r"成功\s*(\d+)\s*\|\s*失败\s*(\d+)"
     r"(?:\s*\|\s*pending_sso\s*(\d+))?"
     r"(?:\s*\|\s*跳过\(池空\)\s*(\d+))?"
 )
+_OK_EVENT_RE = re.compile(
+    r"(?:\[hybrid\]\[\+\]\s*OK|OK immediate SSO\+pool path|session sso ready).*?(?:email=)?([\w.+-]+@[\w.-]+)?",
+    re.I,
+)
+_PENDING_EVENT_RE = re.compile(
+    r"(?:pending_sso saved|mailbox burned to pending_sso).*?(?:email=)?([\w.+-]+@[\w.-]+)?",
+    re.I,
+)
+_FAIL_EVENT_RE = re.compile(
+    r"(?:\[hybrid\]\[-\]|注册失败|signup_unconfirmed|job error:).*?(?:email=)?([\w.+-]+@[\w.-]+)?",
+    re.I,
+)
+
+
+def _set_phase(phase: str, event: str = "") -> None:
+    with _job_lock:
+        _job_state["phase"] = phase
+        if event:
+            _job_state["last_event"] = event[:180]
+        _job_state["updated_at"] = time.time()
+
+
+def _bump_session_from_job_totals() -> None:
+    """Map absolute current-job counters onto session totals using job baseline."""
+    with _job_lock:
+        for key in ("success", "fail", "pending_sso", "skipped"):
+            cur = int(_job_state.get(key) or 0)
+            base = int(_job_baseline_session.get(key) or 0)
+            sess_key = f"session_{key}"
+            _job_state[sess_key] = base + cur
+        _job_state["updated_at"] = time.time()
 
 
 def _update_job_progress_from_log(message: str) -> None:
     """Keep Web success/fail/pending/skipped metrics live while a job is running."""
     text = str(message or "")
-    match = _PROGRESS_RE.search(text)
-    if not match:
-        return
-    success = int(match.group(1))
-    fail = int(match.group(2))
-    pending = match.group(3)
-    skipped = match.group(4)
+    low = text.lower()
+
+        # Lightweight phase tracking so UI is not stuck at zeros with no context.
+    # Always keep last_event ticking so the browser feels live even when counters stay 0 mid-account.
     with _job_lock:
-        _job_state["success"] = success
-        _job_state["fail"] = fail
-        if pending is not None:
-            _job_state["pending_sso"] = int(pending)
-        if skipped is not None:
-            _job_state["skipped"] = int(skipped)
+        if _job_state.get("running"):
+            _job_state["last_event"] = text[:180]
+            _job_state["updated_at"] = time.time()
+
+    if "starting registration" in low or "混合任务启动" in text or "混合模式启动" in text or "开始第" in text:
+        _set_phase("starting", text)
+    elif (
+        "createemail" in low
+        or "使用邮箱注册" in text
+        or "open signup" in low
+        or "next-action ready" in low
+        or "scrape next-action" in low
+    ):
+        _set_phase("create_email", text)
+    elif (
+        "poll code" in low
+        or "开始查邮件" in text
+        or "outlook poll" in low
+        or "aol poll" in low
+        or "outlook graph" in low
+        or "post-send new-mail" in low
+        or "early_no_new_mail" in low
+        or "waiting for code" in low
+        or "mail poll" in low
+        or "imap" in low
+        or "aol preflight" in low
+        or "aol imap" in low
+        or "list folders" in low
+        or "graph via" in low
+        or "mail_token" in low
+    ):
+        _set_phase("waiting_code", text)
+    elif "verifyemail" in low or ("code=" in low and ("outlook code" in low or "clean" in low or "[hybrid] code=" in low)):
+        _set_phase("verify_code", text)
+    elif "sign-up try" in low or "sign-up final" in low or "signup" in low and "sso_len" in low:
+        _set_phase("signup", text)
+    elif "sso materialize" in low or "session sso" in low or "authcode_pkce" in low:
+        _set_phase("sso", text)
+    elif "consent" in low or "mint_method" in low or "[cpa]" in low or "sub2api" in low:
+        _set_phase("post_process", text)
+    elif "混合任务结束" in text or "web job thread finished" in low or "当前统计" in text:
+        _set_phase("finished", text)
+
+    match = _PROGRESS_RE.search(text)
+    if match:
+        success = int(match.group(1))
+        fail = int(match.group(2))
+        pending = match.group(3)
+        skipped = match.group(4)
+        with _job_lock:
+            _job_state["success"] = success
+            _job_state["fail"] = fail
+            if pending is not None:
+                _job_state["pending_sso"] = int(pending)
+            if skipped is not None:
+                _job_state["skipped"] = int(skipped)
+            _job_state["updated_at"] = time.time()
+            _job_state["last_event"] = text[:180]
+        _bump_session_from_job_totals()
+        return
+
+    # Mid-job markers (matrix count=1 stays at 0 until final 当前统计 otherwise).
+    # Deduplicate: hybrid logs both short "[hybrid][+] OK email" and
+    # "OK immediate SSO+pool path ... email=" for the same account.
+    if (
+        "OK immediate SSO+pool path" in text
+        or re.search(r"\[hybrid\]\[\+\]\s*OK\s+[\w.+-]+@[\w.-]+", text)
+        or ("session sso ready" in low and "email=" in low)
+    ):
+        em = re.search(r"[\w.+-]+@[\w.-]+", text)
+        key = (em.group(0).lower() if em else text)[:120]
+        with _job_lock:
+            if key not in _progress_seen_ok:
+                _progress_seen_ok.add(key)
+                _job_state["success"] = int(_job_state.get("success") or 0) + 1
+                _job_state["phase"] = "success"
+                _job_state["last_event"] = text[:180]
+                _job_state["updated_at"] = time.time()
+        _bump_session_from_job_totals()
+        return
+
+    mpend = _PENDING_EVENT_RE.search(text)
+    if mpend and ("pending_sso saved" in text or "mailbox burned to pending_sso" in text):
+        key = (mpend.group(1) or text)[:120]
+        with _job_lock:
+            if key not in _progress_seen_pending:
+                _progress_seen_pending.add(key)
+                _job_state["pending_sso"] = max(
+                    int(_job_state.get("pending_sso") or 0), len(_progress_seen_pending)
+                )
+                _job_state["phase"] = "pending_sso"
+                _job_state["last_event"] = text[:180]
+                _job_state["updated_at"] = time.time()
+        _bump_session_from_job_totals()
+        return
+
+    mfail = _FAIL_EVENT_RE.search(text)
+    if mfail and ("注册失败" in text or "signup_unconfirmed" in text or "job error:" in text or "[hybrid][-]" in text):
+        key = (mfail.group(1) or text)[:120]
+        with _job_lock:
+            if key not in _progress_seen_fail:
+                _progress_seen_fail.add(key)
+                _job_state["fail"] = max(int(_job_state.get("fail") or 0), len(_progress_seen_fail))
+                _job_state["phase"] = "fail"
+                _job_state["last_event"] = text[:180]
+                _job_state["updated_at"] = time.time()
+        _bump_session_from_job_totals()
 
 
 def _mask_value(key: str, value: Any) -> Any:
@@ -413,6 +562,7 @@ def _run_job(count: int, job_kind: str = "register") -> None:
         _append_log(str(msg))
 
     controller = engine.CliStopController(log_callback=log_cb_early)
+    global _progress_seen_ok, _progress_seen_pending, _progress_seen_fail
     with _job_lock:
         _controller = controller
         _job_state["running"] = True
@@ -425,6 +575,18 @@ def _run_job(count: int, job_kind: str = "register") -> None:
         _job_state["error"] = ""
         _job_state["started_at"] = time.time()
         _job_state["finished_at"] = None
+        _job_state["phase"] = "starting"
+        _job_state["last_event"] = f"job start kind={job_kind} count={count}"
+        _job_state["updated_at"] = time.time()
+        _job_state["jobs_started"] = int(_job_state.get("jobs_started") or 0) + 1
+        # session counters keep accumulating across matrix rounds
+        _job_baseline_session["success"] = int(_job_state.get("session_success") or 0)
+        _job_baseline_session["fail"] = int(_job_state.get("session_fail") or 0)
+        _job_baseline_session["pending_sso"] = int(_job_state.get("session_pending_sso") or 0)
+        _job_baseline_session["skipped"] = int(_job_state.get("session_skipped") or 0)
+        _progress_seen_ok = set()
+        _progress_seen_pending = set()
+        _progress_seen_fail = set()
 
     def log_cb(msg: str) -> None:
         text = str(msg)
@@ -434,11 +596,20 @@ def _run_job(count: int, job_kind: str = "register") -> None:
     try:
         engine.load_config()
         if job_kind == "pending_sso_recovery":
-            from pending_sso_recovery import run_pending_sso_recovery_job
-            result = run_pending_sso_recovery_job(
+            import importlib
+            import pending_sso_recovery as _pending_mod
+            importlib.reload(_pending_mod)
+            result = _pending_mod.run_pending_sso_recovery_job(
                 count, log_callback=log_cb, controller=controller
             )
         else:
+            # Prefer freshly loaded hybrid path helpers when modules were patched mid-process.
+            try:
+                import importlib
+                import hybrid_register as _hy
+                importlib.reload(_hy)
+            except Exception:
+                pass
             result = engine.run_registration_job(
                 count, log_callback=log_cb, controller=controller
             )
@@ -448,14 +619,23 @@ def _run_job(count: int, job_kind: str = "register") -> None:
             _job_state["pending_sso"] = int(result.get("pending_sso") or 0)
             _job_state["skipped"] = int(result.get("skipped") or 0)
             _job_state["last_accounts_file"] = str(result.get("accounts_file") or "")
+            _job_state["updated_at"] = time.time()
+            _job_state["phase"] = "finished"
+        _bump_session_from_job_totals()
     except Exception as exc:
         _append_log(f"[!] job error: {exc}")
         with _job_lock:
             _job_state["error"] = str(exc)
+            _job_state["phase"] = "error"
+            _job_state["updated_at"] = time.time()
     finally:
         with _job_lock:
             _job_state["running"] = False
             _job_state["finished_at"] = time.time()
+            _job_state["jobs_finished"] = int(_job_state.get("jobs_finished") or 0) + 1
+            if not _job_state.get("phase") or _job_state.get("phase") == "starting":
+                _job_state["phase"] = "idle"
+            _job_state["updated_at"] = time.time()
             _controller = None
         _append_log("[*] web job thread finished")
 
@@ -1208,3 +1388,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

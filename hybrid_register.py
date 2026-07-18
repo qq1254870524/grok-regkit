@@ -3,7 +3,10 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
-- 2026-07-19r23b: browser wait_for_sso_cookie signing-in nudge -> grok.com/accounts.x.ai to mint sso.
+- 2026-07-19r24c: hybrid get_email_and_token 传入 log_callback，避免 Outlook acquire/preflight 静默卡住无日志。
+- 2026-07-19r24b: pending 失败后队首轮转到 accounts_registered_pending_sso 末尾；8092 pending job importlib.reload 热加载；避免 doron28 堵死 count=1。
+- 2026-07-19r24: browser 资料页默认 timeout 210s；Turnstile 迟到后 +75s 再提交；matrix classify 不再误判 IMAP login OK。
+2026-07-19r23b: browser wait_for_sso_cookie signing-in nudge -> grok.com/accounts.x.ai to mint sso.
 - 2026-07-19r23: browser success also mark_outlook_registered; Outlook strict post-send code only; form action # fix.
 - 2026-07-19r22: VerifyEmail 在 SOCKS5/代理下 curl timeout 重试(最多3次, timeout 45/60s+backoff)；收码后瞬时网络失败不立刻 burn pending；主路径仍 注册→即时SSO→入池。
 - 2026-07-19r21: Outlook early_no_new_mail(75s 无 post-send 信) 明文 burn→pending 并换号，避免空等满 180s；主路径不变。
@@ -578,7 +581,7 @@ def register_one_hybrid(
                 if stop():
                     return _result(STATUS_STOPPED)
                 try:
-                    email, mail_token = get_email_and_token()
+                    email, mail_token = get_email_and_token(log_callback=log)
                 except Exception as get_exc:
                     log(f"[hybrid] 获取邮箱失败(池内可能都登录失败): {get_exc}")
                     if is_pool_empty_error(get_exc):

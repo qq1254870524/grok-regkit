@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -329,12 +329,17 @@
     </div>
 
     <div class="metrics">
-      <div class="metric"><div class="label">成功</div><div id="mSuccess" class="value ok">0</div></div>
-      <div class="metric"><div class="label">失败</div><div id="mFail" class="value bad">0</div></div>
-      <div class="metric"><div class="label">pending_sso</div><div id="mPendingSso" class="value">0</div></div>
+      <div class="metric"><div class="label">本任务成功</div><div id="mSuccess" class="value ok">0</div></div>
+          <div class="metric"><div class="label">本任务失败</div><div id="mFail" class="value bad">0</div></div>
+          <div class="metric"><div class="label">本任务 pending</div><div id="mPendingSso" class="value">0</div></div>
+          <div class="metric"><div class="label">会话成功</div><div id="mSessionSuccess" class="value ok">0</div></div>
+          <div class="metric"><div class="label">会话失败/pending</div><div id="mSessionOther" class="value">0</div></div>
+          <div class="metric"><div class="label">阶段</div><div id="mPhase" class="value" style="font-size:14px">idle</div></div>
+          <div class="metric"><div class="label">状态刷新</div><div id="mPollAt" class="value" style="font-size:12px;color:var(--muted)">—</div></div>
       <div class="metric"><div class="label">跳过(池空)</div><div id="mSkipped" class="value">0</div></div>
-      <div class="metric"><div class="label">目标数量</div><div id="mTarget" class="value">0</div></div>
+      <div class="metric"><div class="label">本任务目标</div><div id="mTarget" class="value">0</div></div>
       <div class="metric"><div class="label">状态</div><div id="mState" class="value sm">空闲</div></div>
+      <div class="metric" style="grid-column:1/-1"><div class="label">最近事件</div><div id="mLastEvent" class="value sm" style="font-size:12px;word-break:break-all;color:var(--muted)">—</div></div>
     </div>
 
     <div class="layout">
@@ -344,12 +349,13 @@
           <div class="section-head">
             <div>
               <div class="section-title">任务参数</div>
-              <div class="section-sub">按数量注册，建议先用 1 试跑</div>
+              <div class="section-sub">按数量注册；矩阵自动化每轮只跑 1 个账号做组合验证，界面「本任务目标」会显示 1</div>
             </div>
           </div>
           <div class="form-grid two">
             <div class="field">
-              <div class="label">注册数量</div>
+              <div class="label">注册数量（配置偏好）</div>
+              <div class="hint" style="font-size:11px;color:var(--muted);margin:0 0 4px">手动点「启动」时用这个数。矩阵交叉测试每轮强制目标=1，不会改你的偏好（修复后）。</div>
               <input id="regCount" type="number" min="1" max="1000" value="1" />
             </div>
             <div class="field">
@@ -1332,8 +1338,12 @@
 
     async function refreshStatus() {
       try {
-        const r = await fetch('/api/status', { headers: headers() });
-        if (!r.ok) return;
+        const r = await fetch('/api/status', { headers: headers(), cache: 'no-store' });
+        if (!r.ok) {
+          if ($('mPollAt')) $('mPollAt').textContent = 'HTTP ' + r.status;
+          if ($('mState')) $('mState').textContent = '状态接口失败';
+          return;
+        }
         const s = await r.json();
         running = !!s.running;
         $('mSuccess').textContent = s.success ?? 0;
@@ -1341,10 +1351,32 @@
         if ($('mPendingSso')) $('mPendingSso').textContent = s.pending_sso ?? 0;
         if ($('mSkipped')) $('mSkipped').textContent = s.skipped ?? 0;
         $('mTarget').textContent = s.target ?? 0;
+        if ($('mTarget') && $('mTarget').parentElement) {
+          $('mTarget').parentElement.title = '当前正在跑的任务目标数（矩阵每轮=1；手动启动=你填的注册数量）';
+        }
+        if ($('mSessionSuccess')) $('mSessionSuccess').textContent = s.session_success ?? 0;
+        if ($('mSessionOther')) {
+          const fo = Number(s.session_fail || 0) + Number(s.session_pending_sso || 0);
+          $('mSessionOther').textContent = fo;
+        }
+        if ($('mPhase')) {
+          const ph = s.phase || (running ? 'running' : 'idle');
+          $('mPhase').textContent = ph;
+        }
+        if ($('mPollAt')) {
+          const now = new Date();
+          const hh = String(now.getHours()).padStart(2, '0');
+          const mm = String(now.getMinutes()).padStart(2, '0');
+          const ss = String(now.getSeconds()).padStart(2, '0');
+          $('mPollAt').textContent = hh + ':' + mm + ':' + ss;
+        }
         const kind = s.job_kind || '';
         $('mState').textContent = running
-          ? (kind === 'pending_sso_recovery' ? '补SSO中' : '运行中')
+          ? (kind === 'pending_sso_recovery' ? '补SSO中' : ('运行中' + (s.phase ? ' · ' + s.phase : '')))
           : '空闲';
+        if ($('mLastEvent')) {
+          $('mLastEvent').textContent = (s.last_event || '—').slice(0, 180);
+        }
         $('runDot').className = 'dot ' + (running ? 'run' : 'idle');
         $('runLabel').textContent = running ? '运行中' : '已停止';
         $('startBtn').disabled = running;
@@ -1352,22 +1384,29 @@
           const name = s.last_accounts_file.split(/[\\/]/).pop();
           $('lastFile').textContent = '账号文件：' + name;
         }
-      } catch (_) {}
+      } catch (e) {
+        if ($('mPollAt')) $('mPollAt').textContent = 'poll err';
+        if ($('mState')) $('mState').textContent = '无法连接 /api/status';
+      }
     }
 
+    let lastLogSeqSeen = 0;
     async function pollLogs() {
       try {
-        const r = await fetch('/api/logs/snapshot?limit=300', { headers: headers() });
-        if (!r.ok) return;
+        const r = await fetch('/api/logs/snapshot?limit=300', { headers: headers(), cache: 'no-store' });
+        if (!r.ok) {
+          if ($('mPollAt') && !running) { /* keep status poll message */ }
+          return;
+        }
         const data = await r.json();
         const seq = Number(data.seq || 0);
-        // If server buffer was cleared, seq still increases but lines empty.
         if (!data.lines || data.lines.length === 0) {
           return;
         }
-        // When we cleared display, drop snapshots that still contain old buffer
-        // content until server clear API is used; after clear, lines are new-only.
+        // Prefer seq-aware append: only new lines after last seen seq when possible.
+        // snapshot has no per-line seq; dedupe by knownLogLines still applies.
         (data.lines || []).forEach(appendLog);
+        lastLogSeqSeen = seq;
       } catch (_) {}
     }
 
@@ -1593,7 +1632,7 @@
       await pollLogs();
       if (pollTimer) clearInterval(pollTimer);
       if (logTimer) clearInterval(logTimer);
-      pollTimer = setInterval(refreshStatus, 2000);
+      pollTimer = setInterval(refreshStatus, 1000);
       logTimer = setInterval(pollLogs, 1500);
       setInterval(refreshIntegration, 15000);
     }
@@ -1731,3 +1770,5 @@
   </script>
 </body>
 </html>
+
+

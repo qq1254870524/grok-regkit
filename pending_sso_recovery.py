@@ -1,4 +1,7 @@
-"""Pending SSO recovery helpers for grok-regkit hybrid.
+"""
+18r24b: pending fail rotates account to end of accounts_registered_pending_sso.txt so count=1 matrix no longer stuck on same head (e.g. doron28).
+18r24: pending-sso sign-in prefers ?email=true deep-link; after 2 empty social-btn clicks force email form URL.
+Pending SSO recovery helpers for grok-regkit hybrid.
 
 2026-07-18e: pool-empty stop support helpers + pending_sso secondary recovery.
 
@@ -212,6 +215,57 @@ def remove_pending_sso_account(email: str, log: Callable[[str], None] | None = N
                 if log:
                     log(f"[pending] write {path.name} fail: {exc}")
     return removed
+
+
+
+def rotate_pending_sso_account_to_end(email: str, log: Callable[[str], None] | None = None) -> bool:
+    """Move email line to end of primary pending file so next job picks another head."""
+    target = str(email or "").strip().lower()
+    if not target:
+        return False
+    path = ROOT / "accounts_registered_pending_sso.txt"
+    if not path.is_file():
+        return False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        if log:
+            log(f"[pending] rotate read fail: {exc}")
+        return False
+    keep: list[str] = []
+    moved: list[str] = []
+    for ln in lines:
+        parsed = parse_pending_account_line(ln)
+        if parsed and parsed["email"].lower() == target:
+            moved.append(ln.strip() or (parsed.get("raw") or ln))
+        else:
+            keep.append(ln)
+    if not moved:
+        return False
+    seen_m: set[str] = set()
+    uniq_moved: list[str] = []
+    for ln in moved:
+        key = ln.strip().lower()
+        if key in seen_m:
+            continue
+        seen_m.add(key)
+        uniq_moved.append(ln)
+    new_lines = [x for x in keep if str(x).strip()] + uniq_moved
+    try:
+        text = "\n".join(new_lines)
+        if new_lines:
+            text += "\n"
+        path.write_text(text, encoding="utf-8")
+    except Exception as exc:
+        if log:
+            log(f"[pending] rotate write fail: {exc}")
+        return False
+    if log:
+        log(
+            f"[pending] rotated {target} to end of {path.name} "
+            f"(moved={len(uniq_moved)} remain={len(new_lines)})"
+        )
+    return True
 
 
 def recover_one_pending_sso(
@@ -563,25 +617,45 @@ return out;
             if page is None:
                 return result(STATUS_FAIL, email=email, detail="no browser page")
 
-            for nav_try in range(1, 4):
+            # 18r24: prefer email=true deep-link so we skip flaky "使用邮箱登录" social landing.
+            signin_email_url = signin_url
+            if "email=" not in str(signin_url):
+                signin_email_url = (
+                    str(signin_url)
+                    + ("&" if "?" in str(signin_url) else "?")
+                    + "email=true"
+                )
+            nav_targets = [signin_email_url, signin_url]
+            for nav_try in range(1, 5):
                 if stop():
                     return result(STATUS_STOPPED, email=email)
+                target = nav_targets[(nav_try - 1) % len(nav_targets)]
                 try:
-                    page.get(signin_url)
+                    page.get(target)
                     try:
                         page.wait.doc_loaded()
                     except Exception:
                         pass
-                    sleep_with_cancel(1.0, stop)
+                    sleep_with_cancel(1.2, stop)
                     cur = str(getattr(page, "url", "") or "")
-                    log(f"[pending-sso] navigate sign-in try={nav_try} url={cur}")
-                    if "sign-in" in cur or "accounts.x.ai" in cur:
-                        break
+                    log(f"[pending-sso] navigate sign-in try={nav_try} target={target} url={cur}")
+                    # if already on email form path, stop retrying nav
+                    if "email=true" in cur or "sign-in" in cur or "accounts.x.ai" in cur:
+                        # probe once whether email input exists
+                        try:
+                            probe = page.run_js(wait_inputs_js) or {}
+                        except Exception:
+                            probe = {}
+                        if isinstance(probe, dict) and (probe.get("email") or probe.get("pw") or probe.get("ready")):
+                            log(f"[pending-sso] sign-in inputs visible after nav: {probe}")
+                            break
+                        if nav_try >= 2 and "email=true" in cur:
+                            break
                 except Exception as nav_exc:
                     if stop():
                         return result(STATUS_STOPPED, email=email)
                     log(f"[pending-sso] navigate sign-in fail try={nav_try}: {nav_exc}")
-                    if nav_try >= 3:
+                    if nav_try >= 4:
                         return result(STATUS_FAIL, email=email, detail=str(nav_exc))
                     sleep_with_cancel(1.0, stop)
 
@@ -616,6 +690,21 @@ return out;
                         email_btn_clicks += 1
                         log(f"[pending-sso] clicked email sign-in btn#{email_btn_clicks}: {click_r.get('text')}")
                         sleep_with_cancel(1.0, stop)
+                        # 18r24: after 2 empty clicks, force email=true deep link
+                        if email_btn_clicks >= 2:
+                            try:
+                                force_u = signin_url
+                                if "email=" not in str(force_u):
+                                    force_u = str(force_u) + ("&" if "?" in str(force_u) else "?") + "email=true"
+                                log(f"[pending-sso] force email=true deep-link after empty clicks -> {force_u}")
+                                page.get(force_u)
+                                try:
+                                    page.wait.doc_loaded()
+                                except Exception:
+                                    pass
+                                sleep_with_cancel(1.2, stop)
+                            except Exception as force_exc:
+                                log(f"[pending-sso] force email=true fail: {force_exc}")
                         continue
                     elif email_btn_clicks == 0 and isinstance(click_r, dict):
                         # log once for diagnostics (candidates, no secrets)
@@ -1159,6 +1248,11 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                 success_count += 1
             else:
                 fail_count += 1
+                # 18r24b: always rotate failed head to end so next round / count=1 is not stuck.
+                try:
+                    rotate_pending_sso_account_to_end(email, log=log)
+                except Exception as rot_exc:
+                    log(f"[pending] rotate after fail error: {rot_exc}")
                 # 密码错误/账号不存在/auth_error：走 hybrid 重注册。
                 # 关键：accounts_registered_pending_sso 仅在最终成功后才移出；
                 # 若重注册失败仍保留原 pending，避免数据丢失。
