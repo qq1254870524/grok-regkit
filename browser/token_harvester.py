@@ -10,6 +10,9 @@
 
 2026-07-18r7: 协议已 VerifyEmail 后禁止 open_signup/使用邮箱注册/email re-submit（根因双码）；
               prepare_profile 只确认验证码/等待 profile；UI fallback 有 code 时默认 block CreateEmail。
+2026-07-18r12: RESTORE protocol: CreateEmail hook observe-only (no fake Response short-circuit);
+               do not disable whole form after click; send-lock skip only after real 2xx;
+               UI desync fast-abort after protocol VerifyEmail; last_ui_fallback_result for pending gate.
 2026-07-18r10: CreateEmail true-send lock (fetch/XHR short-circuit after first request);
               status exposes actual_send_count/net_hits_raw; click path disables controls after fire.
 2026-07-18r9: mint_fresh_castle early-abort on repeated weak ~744 injected tokens; cap redrive/log flood; prefer reuse CreateEmail IBYIll over 32s empty mint.
@@ -86,16 +89,12 @@ class BrowserTokenSession:
   function isCreateEmailUrl(u) {
     try { return String(u || '').includes('CreateEmailValidationCode'); } catch (e) { return false; }
   }
-  function markCreateEmailRequest(url) {
-    if (!isCreateEmailUrl(url)) return 'pass';
-    if (window.__hybrid_create_email_sent_once || window.__hybrid_create_email_inflight) {
-      window.__hybrid_create_email_blocked = Number(window.__hybrid_create_email_blocked || 0) + 1;
-      return 'block';
-    }
+  // 18r12: observe-only. Never short-circuit/fake CreateEmail (r10 broke protocol path).
+  function noteCreateEmailRequest(url) {
+    if (!isCreateEmailUrl(url)) return;
     window.__hybrid_create_email_inflight = true;
     window.__hybrid_create_email_seen = true;
     window.__hybrid_create_email_actual_sends = Number(window.__hybrid_create_email_actual_sends || 0) + 1;
-    return 'allow';
   }
   function markCreateEmailResponse(url, status, ok) {
     if (!isCreateEmailUrl(url)) return;
@@ -104,17 +103,6 @@ class BrowserTokenSession:
     window.__hybrid_create_email_inflight = false;
     if (ok || (Number(status) >= 200 && Number(status) < 300)) {
       window.__hybrid_create_email_sent_once = true;
-    }
-  }
-  function fakeCreateEmailResponse() {
-    try {
-      return new Response(JSON.stringify({ok:true, blocked_duplicate:true}), {
-        status: 200,
-        statusText: 'OK',
-        headers: {'Content-Type': 'application/json'}
-      });
-    } catch (e) {
-      return { ok: true, status: 200, json: async () => ({ok:true, blocked_duplicate:true}), text: async () => '{"ok":true}' };
     }
   }
   function pushNextAction(v) {
@@ -197,12 +185,7 @@ class BrowserTokenSession:
     let url = '';
     try {
       url = (typeof input === 'string') ? input : (input && input.url) || '';
-      const gate = markCreateEmailRequest(url);
-      if (gate === 'block') {
-        try { captureBody(init && init.body, url); } catch (e) {}
-        markCreateEmailResponse(url, 200, true);
-        return fakeCreateEmailResponse();
-      }
+      noteCreateEmailRequest(url);
       captureBody(init && init.body, url);
       captureHeaders(init && init.headers);
       if (input && typeof input === 'object') {
@@ -228,14 +211,14 @@ class BrowserTokenSession:
     return oset.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function(body){
+    try { noteCreateEmailRequest(this.__u); } catch (e) {}
     captureBody(body, this.__u);
     const xhr = this;
     try {
       xhr.addEventListener('load', function(){
         try {
-          if (String(xhr.__u||'').includes('CreateEmailValidationCode')) {
-            window.__hybrid_create_email_status = xhr.status || 0;
-            window.__hybrid_create_email_ok = xhr.status >= 200 && xhr.status < 300;
+          if (isCreateEmailUrl(xhr.__u)) {
+            markCreateEmailResponse(xhr.__u, xhr.status || 0, xhr.status >= 200 && xhr.status < 300);
           }
         } catch (e) {}
       });
@@ -408,12 +391,13 @@ return {
 };
 """
             )
+            # 18r12: skip only after real CreateEmail 2xx (not inflight/status=0).
+            st_n = int(gate.get("status") or 0) if isinstance(gate, dict) else 0
             if isinstance(gate, dict) and (
                 gate.get("sent_once")
-                or int(gate.get("actual") or 0) >= 1
-                or (gate.get("inflight") and int(gate.get("status") or 0) in (0, 200))
+                or (int(gate.get("actual") or 0) >= 1 and 200 <= st_n < 300)
             ):
-                self._lg(f"[*] UI CreateEmail click skipped (send-lock) gate={gate}")
+                self._lg(f"[*] UI CreateEmail click skipped (send-lock-2xx) gate={gate}")
                 return f"skip:send-lock:actual={gate.get('actual')}:status={gate.get('status')}"
         except Exception as gate_exc:
             self._lg(f"[Debug] CreateEmail send-lock probe: {gate_exc}")
@@ -649,21 +633,10 @@ if (best && bestScore > 0) {
     }
   } catch (e) { clickHow = 'fallback-fail'; }
 }
-// 18r10: after one submit attempt, lock controls to reduce dual-submit races.
+// 18r12: mark click once for logging only; DO NOT disable whole form (r10 broke SPA/profile).
 try {
   if (filledOk && clickHow !== 'none' && clickHow !== 'click-fail' && clickHow !== 'fallback-fail') {
     window.__hybrid_create_email_ui_locked = true;
-    const lockNodes = Array.from(document.querySelectorAll('input, textarea, button, [role="button"]'));
-    for (const n of lockNodes) {
-      try {
-        if (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') {
-          n.setAttribute('readonly', 'readonly');
-        } else {
-          n.setAttribute('disabled', 'disabled');
-          n.setAttribute('aria-disabled', 'true');
-        }
-      } catch (eLock) {}
-    }
   }
 } catch (eLockAll) {}
 return {
@@ -2310,6 +2283,14 @@ return String(cfInput.value || '').trim().length;
         submitted = False
         last_state_sig = ""
         last_page_err = ""
+        email_page_blocked_hits = 0
+        self.last_ui_fallback_result = {
+            "reason": "running",
+            "signup_confirmed": False,
+            "protocol_verified": bool(protocol_verified),
+            "submitted": False,
+            "email_page_blocked_hits": 0,
+        }
         if protocol_verified:
             self._lg(
                 "[*] UI fallback protocol_verified=1; block email re-submit / open_signup "
@@ -2488,11 +2469,29 @@ return 'email-submitted:' + buttonText(btn);
                 and not has_profile
                 and not state.get("code")
             ):
+                email_page_blocked_hits += 1
                 if "email_page_blocked" not in last_state_sig:
+                    last_state_sig = f"email_page_blocked|{last_state_sig}"
                     self._lg(
                         "[!] UI fallback sees email page after protocol VerifyEmail; "
-                        "SKIP CreateEmail re-submit (dual-code prevention)"
+                        "SKIP CreateEmail re-submit (dual-code prevention) "
+                        f"hit={email_page_blocked_hits}"
                     )
+                if email_page_blocked_hits >= 3:
+                    self.last_ui_fallback_result = {
+                        "reason": "email_page_desync_after_protocol_verify",
+                        "signup_confirmed": False,
+                        "protocol_verified": True,
+                        "submitted": False,
+                        "email_page_blocked_hits": email_page_blocked_hits,
+                        "url": str(state.get("url") or ""),
+                    }
+                    self._lg(
+                        f"[!] UI fallback abort: protocol verified but UI stuck on email page "
+                        f"hits={email_page_blocked_hits} (not registered; not pending_sso)"
+                    )
+                    return ""
+
 
             # Step 2: still on verification code page.
             # Protocol may already have VerifyEmail; UI can lag. Confirm limited times, wait for profile.
@@ -2766,6 +2765,15 @@ return 'submitted:' + buttonText(submitBtn);
                     self._lg(f"[*] UI fallback click={click_r}")
                     if str(click_r).startswith("submitted"):
                         submitted = True
+                        try:
+                            self.last_ui_fallback_result = dict(self.last_ui_fallback_result or {})
+                            self.last_ui_fallback_result.update({
+                                "submitted": True,
+                                "signup_confirmed": True,
+                                "reason": "profile_submitted",
+                            })
+                        except Exception:
+                            pass
                 except Exception as e:
                     self._lg(f"[Debug] UI fallback click: {e}")
 
@@ -2774,6 +2782,16 @@ return 'submitted:' + buttonText(submitBtn);
             sso = jar.get("sso") or jar.get("sso-rw") or ""
             if sso and len(str(sso)) > 20:
                 self._lg(f"[*] UI fallback sso ok len={len(sso)}")
+                try:
+                    self.last_ui_fallback_result = {
+                        "reason": "sso_ok",
+                        "signup_confirmed": True,
+                        "protocol_verified": bool(protocol_verified),
+                        "submitted": bool(submitted),
+                        "email_page_blocked_hits": int(email_page_blocked_hits),
+                    }
+                except Exception:
+                    pass
                 return str(sso)
 
             # document.cookie fallback
@@ -2784,6 +2802,16 @@ return 'submitted:' + buttonText(submitBtn);
                 m = _re.search(r"(?:^|;\s*)sso=([^;]+)", str(doc))
                 if m and len(m.group(1)) > 20:
                     self._lg(f"[*] UI fallback sso from document.cookie len={len(m.group(1))}")
+                    try:
+                        self.last_ui_fallback_result = {
+                            "reason": "sso_ok_document_cookie",
+                            "signup_confirmed": True,
+                            "protocol_verified": bool(protocol_verified),
+                            "submitted": bool(submitted),
+                            "email_page_blocked_hits": int(email_page_blocked_hits),
+                        }
+                    except Exception:
+                        pass
                     return m.group(1)
             except Exception:
                 pass
@@ -2791,6 +2819,16 @@ return 'submitted:' + buttonText(submitBtn);
             time.sleep(0.8)
 
         self._lg("[!] UI fallback timeout without sso")
+        try:
+            self.last_ui_fallback_result = {
+                "reason": "timeout_no_sso",
+                "signup_confirmed": bool(submitted),
+                "protocol_verified": bool(protocol_verified),
+                "submitted": bool(submitted),
+                "email_page_blocked_hits": int(email_page_blocked_hits),
+            }
+        except Exception:
+            pass
         return ""
 
 
