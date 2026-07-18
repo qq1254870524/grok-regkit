@@ -14,3 +14,20 @@
 - Fix: login-fail must not re-login (double submit boost + CF continue skip + long-wait back to sign-in).
 - ONE login submit; CF inject-only x1 then IMMEDIATE hybrid re-register at >=10s.
 - Live matrix pending recovery next.
+
+## 18r28h live matrix 2026-07-19 05:57:51
+### pending_sso recovery count=2 SOCKS5 Outlook
+1. juliostangoc@outlook.com
+   - ONE login submit after turnstile
+   - page_err=auth_error -> IMMEDIATE re-register (NO second login click)
+   - closed sign-in browser before hybrid re-register
+   - re-register -> early_no_new_mail (mailbox dead) -> kept pending
+2. iveansowparejasir@outlook.com
+   - ONE login submit after turnstile
+   - page_err=auth_error -> IMMEDIATE re-register (NO second login click)
+   - no submit boost / no second login
+   - hybrid re-register in progress at snapshot time
+
+### Git
+- commit 3dfe749
+- package/release stable-2026-07-19-pending-one-login-18r28h (non-overwrite)
