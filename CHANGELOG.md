@@ -1,4 +1,16 @@
-﻿# CHANGELOG
+# CHANGELOG
+
+## 2026-07-18r9 / restore: stable-2026-07-18-noreissue-18r9
+
+- hybrid 主路径保持：CreateEmail → VerifyEmail → protocol SignUp → 即时 materialize SSO → 入池；pending 仅兜底。
+- 18r8: CreateEmail freeze-reclick（sent/2xx/code-step 后禁二次 click）；prepare_profile 仅 given/pw 算 ready；VerifyEmail 后禁止 open_signup 重发码。
+- 18r9: mint_fresh_castle 对注入弱 token(~744) early-abort（weak_hits>=3），窗口 6s/4s，复用 CreateEmail IBYIll；避免约 32s 空刷日志。
+- 实跑验证 hybrid + SOCKS5 + AOL：
+  - 18r8: success=1 pending=0 immediate SSO（marra...）
+  - 18r9: success=1 pending=0，weak early-abort 约 5s 后复用 castle，SignUp sso_len=2477 → session 152；NSFW/g2a/Sub2API 后处理正常。
+- dual-code 同秒双信仍可能出现（fetch+XHR 双记 net_hits），但 freeze-reclick 阻止额外点击。
+- 未覆盖旧 restore tag/package。
+
 
 
 

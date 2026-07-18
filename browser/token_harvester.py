@@ -5,10 +5,19 @@
 2026-07-18j: 新增 scrape_next_action_candidates 多候选；单候选自动拒绝 hybrid 已知死 hash。
 2026-07-18k: browser-fetch 用闭包绑定参数（修复 async IIFE arguments 全空导致 next-action 空串 404）；
               解析 Set-Cookie/sso；不再把当前 live SignUp hash 当死 hash 过滤。
+2026-07-18r4: CreateEmail 填邮箱前强制等到 email 输入框；点「使用邮箱注册」后轮询；
+              仍无输入则硬刷新/重开 signup；CF/空白页不盲填；失败日志带 body/buttons。
+
+2026-07-18r7: 协议已 VerifyEmail 后禁止 open_signup/使用邮箱注册/email re-submit（根因双码）；
+              prepare_profile 只确认验证码/等待 profile；UI fallback 有 code 时默认 block CreateEmail。
+2026-07-18r9: mint_fresh_castle early-abort on repeated weak ~744 injected tokens; cap redrive/log flood; prefer reuse CreateEmail IBYIll over 32s empty mint.
+2026-07-18r8: CreateEmail net_hits>=1+2xx 后禁止二次 click；prepare ready 必须 given/pw/profile，
+              仅 cf+code 不算 ready；UI stuck-on-code 可试 alt code；弱 castle(len<1000) 不当 fresh。
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -218,13 +227,23 @@ class BrowserTokenSession:
                 """
 const net = window.__hybrid_net || [];
 const hits = net.filter(n => String((n&&n.url)||'').includes('CreateEmailValidationCode'));
+// de-dupe identical url+len pairs so one request logged twice doesn't look like dual-send
+const seenKey = new Set();
+const uniq = [];
+for (const n of hits) {
+  const key = String((n&&n.url)||'') + '|' + String((n&&n.len)||0);
+  if (seenKey.has(key)) continue;
+  seenKey.add(key);
+  uniq.push(n);
+}
 return {
   ok: !!window.__hybrid_create_email_ok,
   status: Number(window.__hybrid_create_email_status||0),
   seen: !!window.__hybrid_create_email_seen,
   castle_len: Number((window.__hybrid_castle||'').length||0),
-  net_hits: hits.length,
-  net_urls: hits.slice(0, 5).map(n => String((n&&n.url)||'').slice(0, 160))
+  net_hits: uniq.length,
+  net_hits_raw: hits.length,
+  net_urls: uniq.slice(0, 5).map(n => String((n&&n.url)||'').slice(0, 160))
 };
 """
             )
@@ -236,6 +255,7 @@ return {
                         "seen": bool(raw.get("seen")),
                         "castle_len": int(raw.get("castle_len") or 0),
                         "net_hits": int(raw.get("net_hits") or 0),
+                        "net_hits_raw": int(raw.get("net_hits_raw") or raw.get("net_hits") or 0),
                         "net_urls": list(raw.get("net_urls") or []),
                     }
                 )
@@ -246,17 +266,62 @@ return {
         status = int(data.get("status") or 0)
         ok = bool(data.get("ok"))
         seen = bool(data.get("seen")) or int(data.get("net_hits") or 0) > 0
-        # Strict: only treat as sent when CreateEmail request was observed.
-        # Do NOT treat "have castle only" as CreateEmail success.
-        if ok and (status == 0 or 200 <= status < 300):
+        # Strict: only treat as sent when CreateEmail request was observed AND
+        # we have a real success signal. seen_status_unknown alone is NOT enough
+        # (network hook may mark seen without a completed 2xx response / code page).
+        ui_code_step = False
+        try:
+            ui_raw = page.run_js(
+                """
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const inputs = Array.from(document.querySelectorAll('input, textarea')).filter((n) => isVisible(n) && !n.disabled);
+const hasCode = inputs.some((n) => {
+  const type = String(n.type || '').toLowerCase();
+  const meta = [type, n.name, n.id, n.placeholder, n.getAttribute('aria-label'), n.autocomplete, n.inputMode]
+    .join(' ').toLowerCase();
+  return type === 'tel' || type === 'number' || meta.includes('code') || meta.includes('otp')
+    || meta.includes('验证码') || meta.includes('one-time') || meta.includes('verification');
+});
+const body = String((document.body && (document.body.innerText || document.body.textContent)) || '')
+  .replace(/\s+/g, ' ').trim().toLowerCase();
+const bodyCode = body.includes('验证码') || body.includes('verification code') || body.includes('enter the code')
+  || body.includes('check your email') || body.includes('we sent') || body.includes('已发送');
+const busy = !!document.querySelector('[aria-busy="true"], button[disabled][aria-busy="true"]');
+return {hasCode: !!hasCode, bodyCode: !!bodyCode, busy: busy, url: location.href || ''};
+"""
+            )
+            if isinstance(ui_raw, dict):
+                data["ui_has_code"] = bool(ui_raw.get("hasCode"))
+                data["ui_body_code"] = bool(ui_raw.get("bodyCode"))
+                data["ui_busy"] = bool(ui_raw.get("busy"))
+                data["ui_url"] = str(ui_raw.get("url") or "")
+                ui_code_step = bool(ui_raw.get("hasCode") or ui_raw.get("bodyCode"))
+        except Exception as ui_exc:
+            data["ui_probe_err"] = str(ui_exc)
+
+        if ok and 200 <= status < 300:
             data["sent"] = True
             data["reason"] = f"ok_status={status}"
+        elif ok and status == 0 and ui_code_step:
+            data["sent"] = True
+            data["reason"] = "ok_status_unknown_but_code_step"
         elif seen and 200 <= status < 300:
             data["sent"] = True
             data["reason"] = f"seen_status={status}"
-        elif seen and status == 0:
+        elif seen and status == 0 and ui_code_step:
             data["sent"] = True
+            data["reason"] = "seen_status_unknown_code_step"
+        elif seen and status == 0:
+            # Request may have been initiated, but response not confirmed. Do NOT skip re-click.
+            data["sent"] = False
             data["reason"] = "seen_status_unknown"
+            data["maybe_inflight"] = True
         elif seen and status >= 400:
             data["sent"] = False
             data["reason"] = f"seen_http_{status}"
@@ -279,34 +344,114 @@ return {
         if not email:
             return "empty-email"
 
-        # Ensure we are on email-input step (not method chooser)
-        try:
-            state = page.run_js(
-                """
+        # Ensure we are on email-input step (not method chooser / CF / blank SPA)
+        def _signup_email_state():
+            try:
+                return page.run_js(
+                    """
 function isVisible(node) {
   if (!node) return false;
   const style = window.getComputedStyle(node);
-  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 }
-const emailInput = Array.from(document.querySelectorAll('input, textarea')).some((n) => {
-  if (!isVisible(n) || n.disabled) return false;
+function nodeText(node) {
+  return [node.innerText, node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')]
+    .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+}
+const inputs = Array.from(document.querySelectorAll('input, textarea')).filter((n) => isVisible(n) && !n.disabled);
+const emailInput = inputs.some((n) => {
   const type = String(n.type || '').toLowerCase();
   if (['password','hidden','checkbox','radio','submit','button'].includes(type)) return false;
   const meta = [type, n.name, n.id, n.placeholder, n.getAttribute('data-testid'), n.getAttribute('aria-label'), n.autocomplete].join(' ').toLowerCase();
   return type === 'email' || meta.includes('email') || meta.includes('mail');
 });
-return {url: location.href, emailInput: !!emailInput, title: document.title || ''};
+const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'))
+  .filter((n) => isVisible(n) && !n.disabled)
+  .map((n) => nodeText(n))
+  .filter(Boolean)
+  .slice(0, 12);
+const body = String((document.body && (document.body.innerText || document.body.textContent)) || '')
+  .replace(/\\s+/g, ' ').trim().slice(0, 240);
+const title = document.title || '';
+const url = location.href || '';
+const blob = (title + ' ' + body + ' ' + url).toLowerCase();
+const hasCf = (
+  blob.includes('just a moment') || blob.includes('attention required') ||
+  blob.includes('checking your browser') || blob.includes('cf-browser-verification') ||
+  blob.includes('enable javascript and cookies') ||
+  (blob.includes('cloudflare') && !blob.includes('sign'))
+);
+const hasEmailSignupBtn = buttons.some((t) => {
+  const c = String(t||'').replace(/\\s+/g,'');
+  const low = c.toLowerCase();
+  return c.includes('使用邮箱注册') || low.includes('signupwithemail') ||
+    (low.includes('email') && (low.includes('sign') || low.includes('continue') || low.includes('use')));
+});
+return {
+  url, title, emailInput: !!emailInput, hasCf, hasEmailSignupBtn,
+  inputCount: inputs.length, buttons, body
+};
 """
-            )
+                )
+            except Exception as e:
+                return {"error": str(e), "emailInput": False}
+
+        def _wait_email_input(timeout_s: float = 12.0, label: str = "wait"):
+            deadline = time.time() + max(2.0, float(timeout_s))
+            last = None
+            while time.time() < deadline:
+                st = _signup_email_state()
+                last = st
+                if isinstance(st, dict) and st.get("emailInput"):
+                    self._lg(f"[*] UI email input ready ({label}) state={st}")
+                    return st
+                if isinstance(st, dict) and st.get("hasCf"):
+                    self._lg(f"[*] UI still CF/challenge ({label}) state={st}")
+                time.sleep(0.45)
+            self._lg(f"[!] UI email input NOT ready after {timeout_s}s ({label}) last={last}")
+            return last if isinstance(last, dict) else {"emailInput": False, "last": last}
+
+        try:
+            state = _signup_email_state()
             self._lg(f"[*] UI page state before fill: {state}")
-            if isinstance(state, dict) and not state.get("emailInput"):
+            if not (isinstance(state, dict) and state.get("emailInput")):
+                # 1) click method chooser if present
+                if isinstance(state, dict) and (state.get("hasEmailSignupBtn") or not state.get("emailInput")):
+                    try:
+                        click_email_signup_button(timeout=10, log_callback=self.log)
+                    except Exception as e:
+                        self._lg(f"[!] click_email_signup_button: {e}")
+                state = _wait_email_input(10.0, label="after-email-signup-click")
+
+            # 2) hard reopen signup if still missing input
+            if not (isinstance(state, dict) and state.get("emailInput")):
+                self._lg("[!] email input missing; hard reopen signup page")
+                try:
+                    from grok_register_ttk import open_signup_page
+                    open_signup_page(log_callback=self.log)
+                except Exception as e:
+                    self._lg(f"[!] reopen open_signup_page fail: {e}")
+                    try:
+                        page.get("https://accounts.x.ai/sign-up?redirect=grok-com")
+                        time.sleep(2.0)
+                        click_email_signup_button(timeout=12, log_callback=self.log)
+                    except Exception as e2:
+                        self._lg(f"[!] manual signup reopen fail: {e2}")
+                state = _wait_email_input(12.0, label="after-hard-reopen")
+
+            # 3) one more method-button click + wait
+            if not (isinstance(state, dict) and state.get("emailInput")):
                 try:
                     click_email_signup_button(timeout=8, log_callback=self.log)
-                    time.sleep(1.2)
                 except Exception as e:
-                    self._lg(f"[!] click_email_signup_button: {e}")
+                    self._lg(f"[!] final click_email_signup_button: {e}")
+                state = _wait_email_input(8.0, label="final-wait")
+
+            if not (isinstance(state, dict) and state.get("emailInput")):
+                self._lg(f"[!] abort fill: still no email input state={state}")
+                return "no-email-input"
         except Exception as e:
             self._lg(f"[!] UI pre-state: {e}")
 
@@ -476,6 +621,145 @@ return {
         except Exception:
             return ""
 
+    def clear_captured_castles(self, reason: str = "") -> None:
+        """Drop native/injected castle captures so SignUp cannot reuse CreateEmail token."""
+        from grok_register_ttk import _get_page
+
+        page = _get_page()
+        try:
+            page.run_js(
+                """
+window.__hybrid_castle='';
+window.__hybrid_castles=[];
+window.__hybrid_castle_status='';
+window.__hybrid_castle_err='';
+window.__hybrid_castle_script=false;
+true;
+"""
+            )
+        except Exception as e:
+            self._lg(f"[Debug] clear_captured_castles: {e}")
+        else:
+            why = f" reason={reason}" if reason else ""
+            self._lg(f"[*] cleared captured castles{why}")
+
+    def mint_fresh_castle_token(self, timeout: int = 25, reason: str = "signup") -> str:
+        """Force a new Castle createRequestToken; never return previous capture first.
+
+        18r9: injected junk tokens (~744) with status=done are not real Castle tokens.
+        After a few consecutive weak results, abort early so hybrid can reuse CreateEmail
+        IBYIll castle instead of burning ~32s of empty re-mint logs.
+        """
+        self.clear_captured_castles(reason=f"before_mint:{reason}")
+        # Always re-drive SDK mint even if previous status was done.
+        try:
+            from grok_register_ttk import _get_page
+
+            page = _get_page()
+            page.run_js(
+                "window.__hybrid_castle=''; window.__hybrid_castles=[]; window.__hybrid_castle_status=''; window.__hybrid_castle_script=false; true;"
+            )
+        except Exception:
+            pass
+        pk = self._extract_castle_pk()
+        # Bypass "already done" short-circuit inside _ensure_castle_sdk by clearing status first.
+        try:
+            from grok_register_ttk import _get_page
+
+            page = _get_page()
+            page.run_js(
+                "window.__hybrid_castle=''; window.__hybrid_castles=[]; window.__hybrid_castle_status=''; true;"
+            )
+        except Exception:
+            pass
+        self._ensure_castle_sdk(pk)
+        # Prefer injected mint result (window.__hybrid_castle), not old capture list.
+        from grok_register_ttk import _get_page
+
+        page = _get_page()
+        # 18r9: cap wall time; early abort on repeated weak injected tokens.
+        deadline = time.time() + max(4, min(int(timeout or 25), 12))
+        last = ""
+        weak_hits = 0
+        hard_fail_hits = 0
+        redrive_count = 0
+        while time.time() < deadline:
+            try:
+                data = page.run_js(
+                    """
+const status = String(window.__hybrid_castle_status || '');
+const injected = String(window.__hybrid_castle || '');
+const list = window.__hybrid_castles || [];
+let best = injected;
+for (const t of list) {
+  if (String(t||'').length > String(best||'').length) best = String(t);
+}
+return {status: status, castle: best || '', injected_len: injected.length, n: list.length, err: String(window.__hybrid_castle_err||'')};
+"""
+                )
+                if isinstance(data, dict):
+                    castle = str(data.get("castle") or "")
+                    st = str(data.get("status") or "")
+                    last = f"{st}|inj={data.get('injected_len')}|n={data.get('n')}|err={data.get('err')}"
+                    if castle and 0 < len(castle) < 1000:
+                        weak_hits += 1
+                        # 18r8/18r9: weak/injected junk must never be treated as fresh.
+                        # Only log first 2 and every 5th to avoid log flood.
+                        if weak_hits <= 2 or weak_hits % 5 == 0:
+                            self._lg(
+                                f"[!] mint_fresh_castle weak discard reason={reason} status={st} "
+                                f"len={len(castle)} head={castle[:24]} weak_hits={weak_hits}"
+                            )
+                        # 18r9: after 3 consecutive weak "done" junk tokens, stop early.
+                        if weak_hits >= 3 and st in ("done", "empty", "error", "exception", "sdk-fail", "no-method"):
+                            self._lg(
+                                f"[!] mint_fresh_castle early-abort reason={reason} "
+                                f"weak_hits={weak_hits} last={last} (reuse CreateEmail castle)"
+                            )
+                            return ""
+                        # redrive at most twice; more redrives just spam 744 junk
+                        if redrive_count < 2:
+                            redrive_count += 1
+                            page.run_js(
+                                "window.__hybrid_castle=''; window.__hybrid_castles=[]; "
+                                "window.__hybrid_castle_status=''; window.__hybrid_castle_script=false; true;"
+                            )
+                            self._ensure_castle_sdk(pk)
+                            time.sleep(0.35)
+                        else:
+                            time.sleep(0.25)
+                        continue
+                    if len(castle) >= 1000 and str(castle).startswith("IBYIll"):
+                        src = "injected_fresh" if st in ("done", "minting", "") or int(data.get("injected_len") or 0) >= 1000 else "native_or_injected"
+                        self._lg(
+                            f"[*] mint_fresh_castle ok reason={reason} src={src} status={st} "
+                            f"len={len(castle)} head={castle[:40]}"
+                        )
+                        return castle
+                    if len(castle) >= 2000:
+                        self._lg(
+                            f"[*] mint_fresh_castle ok(long-nonprefix) reason={reason} status={st} "
+                            f"len={len(castle)} head={castle[:40]}"
+                        )
+                        return castle
+                    if st in ("no-method", "sdk-fail", "error", "exception", "empty"):
+                        hard_fail_hits += 1
+                        if hard_fail_hits >= 2:
+                            self._lg(
+                                f"[!] mint_fresh_castle hard-fail abort reason={reason} "
+                                f"hits={hard_fail_hits} last={last}"
+                            )
+                            return ""
+                        page.run_js(
+                            "window.__hybrid_castle_script=false; window.__hybrid_castle_status=''; true;"
+                        )
+                        self._ensure_castle_sdk(pk)
+            except Exception as e:
+                last = str(e)
+            time.sleep(0.35)
+        self._lg(f"[!] mint_fresh_castle timeout reason={reason} last={last} weak_hits={weak_hits}")
+        return ""
+
     def read_captured_castle(self) -> str:
         from grok_register_ttk import _get_page
 
@@ -528,39 +812,69 @@ true;
         self._lg(f"[*] harvest CreateEmail start email={email} timeout={timeout}")
         click_r = self.click_email_continue_for_create(email)
         self._lg(f"[*] UI email submit click={click_r} email={email}")
-        if str(click_r).startswith("fail:") or str(click_r) in ("no-input", "empty-email"):
-            self._lg(f"[!] first email fill/click failed: {click_r} — will retry in loop")
+        if str(click_r).startswith("fail:") or str(click_r) in ("no-input", "no-email-input", "empty-email"):
+            self._lg(f"[!] first email fill/click failed: {click_r} — will retry in loop (no-input does not count as CreateEmail send)")
 
         deadline = time.time() + max(15, int(timeout))
         last_retry = time.time()
         retries = 0
-        # Hard limit: at most 1 re-click. Multiple CreateEmail on same mailbox
-        # triggers xAI "验证码过多 / retry in N minutes".
+        # Hard limit: at most 1 re-click for unconfirmed send.
+        # Extra case: button spinner / network stuck with seen_status_unknown → one more click.
+        # Multiple CreateEmail on same mailbox triggers xAI "验证码过多 / retry in N minutes".
         max_retries = 1
+        spinner_reclick_done = False
+        first_seen_ts = 0.0
         while time.time() < deadline:
             st = self.create_email_status_via_browser()
             c = self.read_captured_castle()
-            if st.get("sent"):
+            if st.get("seen") and not first_seen_ts:
+                first_seen_ts = time.time()
+            net_hits = int(st.get("net_hits") or 0)
+            status_n = int(st.get("status") or 0)
+            code_step = bool(st.get("ui_has_code") or st.get("ui_body_code"))
+            # 18r8: any real CreateEmail evidence freezes further clicks (prevent dual-code).
+            hard_no_reclick = bool(
+                st.get("sent")
+                or (net_hits >= 1 and 200 <= status_n < 300)
+                or (net_hits >= 1 and bool(st.get("ok")))
+                or (code_step and (st.get("seen") or net_hits >= 1 or bool(st.get("ok"))))
+            )
+            if hard_no_reclick:
                 self._lg(
-                    f"[*] CreateEmail UI evidence sent=1 reason={st.get('reason')} "
-                    f"status={st.get('status')} seen={st.get('seen')} net_hits={st.get('net_hits')} "
+                    f"[*] CreateEmail freeze-reclick reason={st.get('reason')} "
+                    f"status={status_n} seen={st.get('seen')} net_hits={net_hits} "
+                    f"raw={st.get('net_hits_raw')} sent={int(bool(st.get('sent')))} "
+                    f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
                     f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
                 )
-                # Once sent is confirmed, NEVER re-click even if castle is late.
                 if c:
                     self._lg(f"[*] native castle len={len(c)} head={c[:20]}")
                     return c
-                # wait a bit more for castle only; no more clicks
                 time.sleep(0.45)
                 continue
             elif c and (time.time() + 8) >= deadline:
                 self._lg(
                     f"[!] CreateEmail not confirmed yet but castle present "
-                    f"len={len(c)} reason={st.get('reason')} — wait without extra click"
+                    f"len={len(c)} reason={st.get('reason')} - wait without extra click"
                 )
 
-            if (not st.get("sent")) and (time.time() - last_retry >= 5.0) and retries < max_retries:
-                retries += 1
+            # Spinner / net-card stuck: request seen but no 2xx and still on email step.
+            maybe_inflight = bool(st.get("maybe_inflight") or st.get("reason") == "seen_status_unknown")
+            ui_busy = bool(st.get("ui_busy"))
+            stuck_long = bool(first_seen_ts and (time.time() - first_seen_ts >= 6.0))
+            if net_hits >= 1:
+                # Request already fired; only wait for status/code page, never dual-send.
+                time.sleep(0.45)
+                continue
+            if (
+                (not st.get("sent"))
+                and maybe_inflight
+                and stuck_long
+                and (not spinner_reclick_done)
+                and retries < max_retries
+                and net_hits == 0
+            ):
+                spinner_reclick_done = True
                 last_retry = time.time()
                 try:
                     self._hooked = False
@@ -568,10 +882,36 @@ true;
                 except Exception:
                     pass
                 click_r = self.click_email_continue_for_create(email)
+                if str(click_r) not in ("no-email-input", "no-input", "empty-email") and not str(click_r).startswith("fail:no"):
+                    retries += 1
+                self._lg(
+                    f"[*] UI CreateEmail spinner/stuck re-click#{retries}/{max_retries} "
+                    f"click={click_r} email={email} busy={ui_busy} reason={st.get('reason')} "
+                    f"status={st.get('status')} seen={st.get('seen')} net_hits={st.get('net_hits')} "
+                    f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')}"
+                )
+            elif (
+                (not st.get("sent"))
+                and (time.time() - last_retry >= 5.0)
+                and retries < max_retries
+                and int(st.get("net_hits") or 0) == 0
+                and not bool(st.get("ui_has_code") or st.get("ui_body_code"))
+            ):
+                last_retry = time.time()
+                try:
+                    self._hooked = False
+                    self.install_network_hook()
+                except Exception:
+                    pass
+                click_r = self.click_email_continue_for_create(email)
+                # only burn the single re-click budget when page actually had an email input path
+                if str(click_r) not in ("no-email-input", "no-input", "empty-email") and not str(click_r).startswith("fail:no"):
+                    retries += 1
                 self._lg(
                     f"[*] UI CreateEmail retry#{retries}/{max_retries} click={click_r} email={email} "
                     f"status={st.get('status')} seen={st.get('seen')} ok={st.get('ok')} "
                     f"net_hits={st.get('net_hits')} reason={st.get('reason')} "
+                    f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
                     f"castle_len={st.get('castle_len')} full_status={st}"
                 )
             time.sleep(0.45)
@@ -1004,12 +1344,14 @@ return '';
         from grok_register_ttk import _get_page
 
         page = _get_page()
-        # already minting / done?
+        # already minting / done? Only skip when a non-empty token is still present.
         try:
             st = page.run_js(
                 "return {s: window.__hybrid_castle_status||'', l:(window.__hybrid_castle||'').length};"
             )
-            if isinstance(st, dict) and (st.get("s") == "done" or int(st.get("l") or 0) > 40):
+            if isinstance(st, dict) and st.get("s") == "done" and int(st.get("l") or 0) > 40:
+                return True
+            if isinstance(st, dict) and st.get("s") == "minting" and int(st.get("l") or 0) > 40:
                 return True
         except Exception:
             pass
@@ -1390,25 +1732,38 @@ return 'filled-no-button';
         )
 
     def prepare_profile_step_for_turnstile(
-        self, email: str, code: str, timeout: int = 90
+        self,
+        email: str,
+        code: str,
+        timeout: int = 90,
+        *,
+        allow_email_resend: bool = False,
+        protocol_verified: bool = True,
     ) -> bool:
-        """Drive UI email→code→profile so Turnstile widget mounts.
+        """Drive UI toward profile/turnstile WITHOUT re-issuing CreateEmail.
 
-        Protocol already verified the code; UI path still needed for widget.
+        2026-07-18r7 root cause fix:
+        Protocol already CreateEmail + VerifyEmail. open_signup() + click email signup
+        + email submit creates a SECOND validation code (dual-code), then old code fails.
+        Default: never reopen signup, never click email-signup, never submit email.
+        Only confirm code on verification page and wait for profile/turnstile.
         """
         from grok_register_ttk import _get_page
 
         page = _get_page()
-        clean = str(code or "").replace("-", "").strip()
-        try:
-            self.open_signup()
-        except Exception as e:
-            self._lg(f"[Debug] reopen signup: {e}")
+        clean = re.sub(r"[^A-Za-z0-9]", "", str(code or ""))
+        if len(clean) > 8:
+            clean = clean[-8:]
+        block_resend = bool(protocol_verified or clean) and not allow_email_resend
+        self._lg(
+            f"[*] prepare_profile_step start protocol_verified={int(bool(protocol_verified))} "
+            f"allow_email_resend={int(bool(allow_email_resend))} block_resend={int(block_resend)} "
+            f"code_len={len(clean)}"
+        )
 
-        deadline = time.time() + timeout
-        email_done = code_done = False
-        while time.time() < deadline:
-            state = page.run_js(
+        # Inspect current page first. Do NOT open_signup when already mid-flow.
+        try:
+            cur = page.run_js(
                 """
 function isVisible(node) {
   if (!node) return false;
@@ -1426,36 +1781,123 @@ const given = Array.from(document.querySelectorAll('input[name="givenName"], inp
 return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: location.href};
 """
             )
-            if isinstance(state, dict) and (state.get("pw") or state.get("cf") or state.get("given")):
-                self._lg(f"[*] profile/turnstile ready state={state}")
-                return True
+        except Exception as e:
+            cur = {}
+            self._lg(f"[Debug] prepare_profile initial state: {e}")
+
+        if isinstance(cur, dict) and (
+            cur.get("pw") or cur.get("cf") or cur.get("given") or cur.get("code") or cur.get("email")
+        ):
+            self._lg(f"[*] prepare_profile keep current page (no open_signup) state={cur}")
+        elif not block_resend:
+            try:
+                self.open_signup()
+                self._lg("[*] prepare_profile open_signup (allow_email_resend path only)")
+            except Exception as e:
+                self._lg(f"[Debug] reopen signup: {e}")
+        else:
+            self._lg(
+                "[*] prepare_profile SKIP open_signup (protocol already verified; "
+                "reopen would re-click email signup and re-send code)"
+            )
+
+        deadline = time.time() + timeout
+        email_done = False
+        code_done = False
+        chooser_clicks = 0
+        while time.time() < deadline:
+            try:
+                state = page.run_js(
+                    """
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const pw = Array.from(document.querySelectorAll('input[type="password"], input[name="password"]')).some(isVisible);
+const cf = !!document.querySelector('input[name="cf-turnstile-response"], div.cf-turnstile, iframe[src*="turnstile"], iframe[src*="challenges.cloudflare"]');
+const email = Array.from(document.querySelectorAll('input[type="email"], input[name="email"], input[data-testid="email"]')).some(isVisible);
+const code = Array.from(document.querySelectorAll('input[data-input-otp="true"], input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]')).some(isVisible)
+  || Array.from(document.querySelectorAll('input')).filter(n => isVisible(n) && Number(n.maxLength||0)===1).length >= 4;
+const given = Array.from(document.querySelectorAll('input[name="givenName"], input[name="familyName"], input[autocomplete="given-name"]')).some(isVisible);
+return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: location.href};
+"""
+                )
+            except Exception as e:
+                self._lg(f"[Debug] prepare_profile state: {e}")
+                time.sleep(0.6)
+                continue
+
+            # 18r8: only real profile/name/password is ready.
+            # cf widget can exist on code page; code+cf is NOT profile ready.
+            if isinstance(state, dict):
+                has_profile_fields = bool(state.get("pw") or state.get("given"))
+                still_on_code = bool(state.get("code")) and not has_profile_fields
+                if has_profile_fields and not still_on_code:
+                    self._lg(f"[*] profile/turnstile ready state={state}")
+                    return True
+                if state.get("cf") and still_on_code:
+                    self._lg(
+                        f"[*] prepare_profile cf present but still on code page; "
+                        f"NOT ready state={state}"
+                    )
+
+            if isinstance(state, dict) and state.get("code") and clean and not code_done:
+                r = self._set_input_and_submit(clean, "code")
+                self._lg(f"[*] UI code submit (no-resend path): {r}")
+                code_done = True
+                time.sleep(2.0)
+                continue
+            if isinstance(state, dict) and state.get("code") and clean and code_done:
+                self._lg(
+                    f"[*] prepare_profile still on code after confirm; keep waiting "
+                    f"(no open_signup / no email re-submit) state={state}"
+                )
+                time.sleep(1.0)
+                continue
 
             if isinstance(state, dict) and state.get("email") and not email_done:
+                if block_resend:
+                    self._lg(
+                        "[!] prepare_profile sees email page after protocol VerifyEmail; "
+                        "SKIP email submit to prevent dual-code CreateEmail reissue"
+                    )
+                    email_done = True
+                    time.sleep(0.8)
+                    continue
                 r = self._set_input_and_submit(email, "email")
                 self._lg(f"[*] UI email submit: {r}")
                 email_done = True
                 time.sleep(1.5)
                 continue
 
-            if isinstance(state, dict) and state.get("code") and not code_done:
-                r = self._set_input_and_submit(clean, "code")
-                self._lg(f"[*] UI code submit: {r}")
-                code_done = True
-                time.sleep(2.0)
-                continue
+            if (
+                isinstance(state, dict)
+                and not state.get("email")
+                and not state.get("code")
+                and not state.get("given")
+                and not state.get("pw")
+            ):
+                if block_resend:
+                    if chooser_clicks == 0:
+                        self._lg(
+                            "[*] prepare_profile on method chooser but block_resend=1; "
+                            "will NOT click email signup (prevents dual-code)"
+                        )
+                    chooser_clicks += 1
+                else:
+                    try:
+                        from grok_register_ttk import click_email_signup_button
 
-            # maybe still on method chooser
-            if isinstance(state, dict) and not state.get("email") and not state.get("code"):
-                try:
-                    from grok_register_ttk import click_email_signup_button
-
-                    click_email_signup_button(timeout=5, log_callback=self.log)
-                except Exception:
-                    pass
+                        click_email_signup_button(timeout=5, log_callback=self.log)
+                        chooser_clicks += 1
+                    except Exception:
+                        pass
             time.sleep(0.8)
-        self._lg("[!] profile step timeout")
+        self._lg("[!] profile step timeout (no-resend)")
         return False
-
 
 
     def fetch_signup_server_action(
@@ -1711,6 +2153,10 @@ return (async function(){{
         2026-07-18n: after code-submitted keep advancing/confirming; capture page errors; one re-confirm if still on code.
         2026-07-18q: export_cookies 使用 page.cookies(all_domains) + document.cookie 兜底，避免漏收 host-only sso。
 2026-07-18o: after VerifyEmail/protocol path, if UI still on code page: fill+confirm once/twice, longer wait for profile, Enter fallback, avoid endless 确认邮箱 loops; never re-send email.
+2026-07-18r6: CreateEmail 仅在 HTTP 2xx/ok 或进入验证码页时算 sent；seen_status_unknown 不再当发信成功；注册按钮转圈超时后自动二次点击（限1次）。
+2026-07-18r5: alnum verification codes (26I-NNM) no longer stripped to digits; force fresh castle mint helpers; UI stuck-on-code aborts early after prepare_profile push.
+2026-07-18r7: code already present (=protocol VerifyEmail) => email_done True; block UI email submit/open_signup reissue; prepare_profile no-resend.
+2026-07-18r8: prepare ready requires profile fields; CreateEmail freeze after first net hit; UI stuck-on-code tries alt codes once.
         """
         from grok_register_ttk import _get_page
 
@@ -1722,9 +2168,16 @@ return (async function(){{
         code_val = (code or "").strip()
         import re as _re
 
-        code_digits = "".join(_re.findall(r"\d+", code_val))
-        if len(code_digits) >= 4:
-            code_val = code_digits[-6:] if len(code_digits) > 6 else code_digits
+        # xAI codes are often alnum like 26I-NNM; strip separators only.
+        # Digits-only stripping used to destroy mixed codes and trap UI on 确认邮箱.
+        code_raw = code_val
+        code_alnum = _re.sub(r"[^A-Za-z0-9]", "", code_val)
+        if len(code_alnum) >= 4:
+            code_val = code_alnum[-8:] if len(code_alnum) > 8 else code_alnum
+        self._lg(
+            f"[*] UI fallback code normalize raw={code_raw!r} -> {code_val!r} "
+            f"(alnum_len={len(code_alnum)})"
+        )
 
         # Ensure turnstile token is in the page if we already solved it.
         tok = (turnstile_token or "").strip()
@@ -1749,13 +2202,44 @@ return String(cfInput.value || '').trim().length;
                 self._lg(f"[Debug] UI fallback inject turnstile: {e}")
 
         deadline = time.time() + max(30, int(timeout or 90))
-        email_done = False
+        # Protocol path already did CreateEmail + VerifyEmail. Having a code means
+        # re-submitting email would issue a second code (dual-code bug).
+        protocol_verified = bool(code_val)
+        email_done = bool(protocol_verified)
         code_done = False
         code_confirm_tries = 0
         filled = False
         submitted = False
         last_state_sig = ""
         last_page_err = ""
+        if protocol_verified:
+            self._lg(
+                "[*] UI fallback protocol_verified=1; block email re-submit / open_signup "
+                "(prevent dual-code CreateEmail)"
+            )
+        # 18r8: collect dual-code candidates for stuck verification recovery
+        alt_codes = []
+        try:
+            from aol_mail import LAST_OAI_CODE_CANDIDATES
+
+            for item in list(LAST_OAI_CODE_CANDIDATES or []):
+                raw_c = ""
+                if isinstance(item, dict):
+                    raw_c = str(item.get("code") or "")
+                else:
+                    raw_c = str(item or "")
+                cc = _re.sub(r"[^A-Za-z0-9]", "", raw_c)
+                if len(cc) >= 4 and cc != code_val and cc not in alt_codes:
+                    alt_codes.append(cc[-8:] if len(cc) > 8 else cc)
+            if alt_codes:
+                self._lg(
+                    f"[*] UI fallback dual-code candidates={len(alt_codes)} "
+                    f"alts={[a for a in alt_codes[:4]]}"
+                )
+        except Exception as alt_load_exc:
+            self._lg(f"[Debug] UI fallback alt-code load: {alt_load_exc}")
+        alt_code_idx = 0
+        tried_alt_codes = set()
         while time.time() < deadline:
             if stop():
                 self._lg("[*] UI fallback cancelled")
@@ -1835,7 +2319,14 @@ return {
             )
 
             # Step 1: still on email page.
-            if email_val and state.get("email") and not has_profile and not email_done:
+            # 18r7: if protocol already verified, never CreateEmail again.
+            if (
+                email_val
+                and state.get("email")
+                and not has_profile
+                and not email_done
+                and not protocol_verified
+            ):
                 try:
                     step_r = page.run_js(
                         """
@@ -1891,6 +2382,19 @@ return 'email-submitted:' + buttonText(btn);
                         continue
                 except Exception as e:
                     self._lg(f"[Debug] UI fallback email step: {e}")
+
+            if (
+                protocol_verified
+                and email_val
+                and state.get("email")
+                and not has_profile
+                and not state.get("code")
+            ):
+                if "email_page_blocked" not in last_state_sig:
+                    self._lg(
+                        "[!] UI fallback sees email page after protocol VerifyEmail; "
+                        "SKIP CreateEmail re-submit (dual-code prevention)"
+                    )
 
             # Step 2: still on verification code page.
             # Protocol may already have VerifyEmail; UI can lag. Confirm limited times, wait for profile.
@@ -1960,6 +2464,62 @@ return 'code-submitted:' + buttonText(btn);
                         continue
                 except Exception as e:
                     self._lg(f"[Debug] UI fallback code step: {e}")
+
+            # Protocol VerifyEmail already 200: if still on code after 2 confirms, try profile push then fail fast.
+            if code_done and not has_profile and state.get("code") and code_confirm_tries >= 2 and code_confirm_tries < 4:
+                try:
+                    body = str((state or {}).get("body") or "")
+                    self._lg(
+                        f"[*] UI fallback still on code after confirms tries={code_confirm_tries}; "
+                        f"push prepare_profile_step body={body[:120]!r}"
+                    )
+                    pushed = self.prepare_profile_step_for_turnstile(
+                        email_val or email,
+                        code_val,
+                        timeout=25,
+                        allow_email_resend=False,
+                        protocol_verified=True,
+                    )
+                    self._lg(f"[*] UI fallback prepare_profile_step pushed={pushed} (no-resend)")
+                    code_confirm_tries = 4
+                    time.sleep(1.2)
+                    continue
+                except Exception as prep_exc:
+                    self._lg(f"[Debug] UI fallback prepare_profile_step: {prep_exc}")
+                    code_confirm_tries = 4
+
+            # 18r8: before hard abort, try next dual-code candidate once each.
+            if (
+                code_done
+                and not has_profile
+                and state.get("code")
+                and code_confirm_tries >= 2
+                and alt_code_idx < len(alt_codes)
+            ):
+                nxt = alt_codes[alt_code_idx]
+                alt_code_idx += 1
+                if nxt and nxt not in tried_alt_codes:
+                    tried_alt_codes.add(nxt)
+                    self._lg(
+                        f"[*] UI fallback stuck on code; try alt dual-code "
+                        f"{alt_code_idx}/{len(alt_codes)} code={nxt}"
+                    )
+                    code_val = nxt
+                    code_done = False
+                    code_confirm_tries = 0
+                    time.sleep(0.8)
+                    continue
+
+            # Hard fail: still code page after push attempts - avoid 90s empty loop.
+            if code_done and not has_profile and state.get("code") and code_confirm_tries >= 4:
+                body = str((state or {}).get("body") or "")
+                page_err = str((state or {}).get("err") or "")
+                self._lg(
+                    f"[!] UI fallback stuck on verification page after protocol VerifyEmail; "
+                    f"abort early err={page_err!r} body={body[:160]!r} "
+                    f"alts_tried={len(tried_alt_codes)}"
+                )
+                return ""
 
             # If stuck after code confirm, try continue/next/Enter without re-sending email.
             if code_done and not has_profile and not state.get("email") and code_confirm_tries >= 1 and code_confirm_tries <= 3:

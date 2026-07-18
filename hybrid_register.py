@@ -1,4 +1,4 @@
-﻿"""Hybrid Grok registration: protocol RPC + browser tokens.
+"""Hybrid Grok registration: protocol RPC + browser tokens.
 
 Used by Web/CLI when config register_mode == "hybrid".
 
@@ -37,16 +37,29 @@ Changelog:
               识别 turnstile/业务错误，避免把唯一 live next-action 标死导致 no candidates。
               主流程仍是 注册→即时SSO→入池；pending 仅兜底。
 2026-07-18l: 重新启用 UI fallback 为最后兜底：协议 SignUp → browser-fetch → UI profile submit → pending_sso。
-- $12026-07-18r3: pending bad_password/auth_error re-register via hybrid (see pending_sso_recovery); main path still register→immediate SSO→pool; UI fallback last.
+2026-07-18r3: pending bad_password/auth_error 移出 pending 后 hybrid 重新注册（非只删号）；主路径仍是 注册→即时SSO→入池；UI fallback 最后。
+2026-07-18r4: CreateEmail 前强制等待邮箱输入框；点「使用邮箱注册」后轮询/硬刷新/重开 signup；no-input 不误记为已发信；修复 re-register 空白页失败。
 - 2026-07-18n: pending_sso 登录页点击「使用邮箱登录」；UI fallback 验证码后继续推进/报错可见；speed 补丁保留。主路径仍 注册→即时SSO→入池。
+- 2026-07-18r4: CreateEmail 前强制等待邮箱输入框；点「使用邮箱注册」后轮询/硬刷新/重开 signup；no-input 不误记为已发信；修复 re-register 空白页失败。
 2026-07-18o: pending 两步登录(email→下一步→password)；UI fallback 验证码后更稳进 profile；主路径仍 注册→即时SSO→入池；pending 仅兜底。
 2026-07-18r: pending 二次补：提交后等待/CF 未过不跳转；密码错误走重新注册而非只删号。
               主路径不变：协议/browser-fetch 拿到 SSO 立刻 schedule_post 入池；UI 不抢主路径、不重复发信；
               仅在 protocol+browser-fetch 均无 SSO 时调用 submit_profile_and_wait_sso；仍无 SSO 才落盘 pending。
+2026-07-18r6: CreateEmail 不再把 seen_status_unknown 当发信成功；仅 2xx/进入验证码页算 sent；转圈卡住允许一次二次点击；pending 仅 SSO/注册真正成功后才从 accounts_registered_pending_sso.txt 移出。
+2026-07-18r5: SignUp 强制 clear+mint fresh castle（不再优先返回 CreateEmail capture）；日志 same_as_old_head；UI fallback 保留字母数字验证码；卡在确认邮箱时 prepare_profile 后快速失败。
+
+2026-07-18r7: dual-code root fix — after protocol VerifyEmail, UI/prepare never open_signup+email re-submit;
+              AOL dual-code prefers Inbox; VerifyEmail can retry alt codes; shorter mint timeouts.
+              Main path still register→immediate SSO→pool; UI last resort and never re-sends code.
+2026-07-18r8: CreateEmail freeze after first net hit; no hybrid re-click when browser_sent;
+2026-07-18r9: weak castle early-abort (no 32s 744 spam); mint windows 6s/4s; reuse CreateEmail IBYIll for SignUp SSO path; keep freeze-reclick dual-code fix.
+              weak castle rejected; mint timeout 18s + retry once; alt-code UI stuck recovery.
+              Main path still register→immediate SSO→pool; UI last; pending only after real success remove.
 """
 from __future__ import annotations
 
 import os
+import re
 import time
 import traceback
 import uuid
@@ -590,29 +603,61 @@ def register_one_hybrid(
                 f"ok={st.get('ok')} net_hits={st.get('net_hits')} sent={st.get('sent')} "
                 f"reason={st.get('reason')} castle_len={len(castle)}"
             )
-            browser_sent = bool(st.get("sent"))
+            # Accept browser_sent only with strong evidence (2xx / ok / code-step).
+            # seen_status_unknown alone previously caused 180s empty mail poll.
+            reason = str(st.get("reason") or "")
+            browser_sent = bool(st.get("sent")) and reason not in {
+                "seen_status_unknown",
+                "not_seen",
+                "no_data",
+            }
             protocol_sent = False
             if browser_sent:
                 log(
                     f"[hybrid] CreateEmail via browser OK (skip protocol re-send) "
-                    f"castle_len={len(castle)} reason={st.get('reason')}"
+                    f"castle_len={len(castle)} reason={reason} "
+                    f"net_hits={st.get('net_hits')} "
+                    f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')}"
                 )
             else:
-                # One careful re-click only if harvest never observed CreateEmail.
-                try:
-                    click2 = browser.click_email_continue_for_create(email)
-                    log(f"[hybrid] CreateEmail single re-click={click2}")
-                    time.sleep(2.5)
-                    st = browser.create_email_status_via_browser()
-                    browser_sent = bool(st.get("sent"))
+                # 18r8: only re-click when NO CreateEmail network hit at all.
+                net_hits_now = int(st.get("net_hits") or 0)
+                if net_hits_now >= 1 or bool(st.get("ui_has_code") or st.get("ui_body_code")):
                     log(
-                        f"[hybrid] CreateEmail after single re-click status={st.get('status')} "
-                        f"seen={st.get('seen')} ok={st.get('ok')} sent={st.get('sent')} "
-                        f"reason={st.get('reason')}"
+                        f"[hybrid] CreateEmail skip re-click (already fired) "
+                        f"net_hits={net_hits_now} reason={reason} "
+                        f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
+                        f"maybe_inflight={st.get('maybe_inflight')}"
                     )
-                except Exception as re_exc:
-                    log(f"[hybrid] CreateEmail re-click error: {re_exc}")
-
+                    if bool(st.get("ui_has_code") or st.get("ui_body_code")):
+                        browser_sent = True
+                        reason = reason or "ui_code_step_after_net_hit"
+                        log(f"[hybrid] CreateEmail accept ui_code_step as sent reason={reason}")
+                else:
+                    try:
+                        click2 = browser.click_email_continue_for_create(email)
+                        log(
+                            f"[hybrid] CreateEmail single re-click={click2} "
+                            f"prev_reason={reason} maybe_inflight={st.get('maybe_inflight')} "
+                            f"ui_busy={st.get('ui_busy')} net_hits=0"
+                        )
+                        time.sleep(2.5)
+                        st = browser.create_email_status_via_browser()
+                        reason = str(st.get("reason") or "")
+                        browser_sent = bool(st.get("sent")) and reason not in {
+                            "seen_status_unknown",
+                            "not_seen",
+                            "no_data",
+                        }
+                        log(
+                            f"[hybrid] CreateEmail after single re-click status={st.get('status')} "
+                            f"seen={st.get('seen')} ok={st.get('ok')} sent={browser_sent} "
+                            f"raw_sent={st.get('sent')} reason={reason} "
+                            f"net_hits={st.get('net_hits')} "
+                            f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')}"
+                        )
+                    except Exception as re_exc:
+                        log(f"[hybrid] CreateEmail re-click error: {re_exc}")
             if not browser_sent:
                 # Protocol path only when UI never sent. Never stack protocol on top of browser_sent.
                 r1 = client.create_email_validation_code(email, castle)
@@ -698,7 +743,36 @@ def register_one_hybrid(
             log(f"[hybrid] VerifyEmail status={r2['status']}")
             if r2["status"] >= 400:
                 log(f"[hybrid] VerifyEmail fail {r2.get('strings')[:5]}")
-                return _result(STATUS_FAIL)
+                # 18r7: dual-code alternate retry (Inbox preferred first; try Bulk next)
+                alt_codes = []
+                try:
+                    from aol_mail import LAST_OAI_CODE_CANDIDATES
+
+                    for c in list(LAST_OAI_CODE_CANDIDATES or []):
+                        cc = re.sub(r"[^A-Za-z0-9]", "", str((c or {}).get("code") or ""))
+                        if cc and cc != clean and cc not in alt_codes:
+                            alt_codes.append(cc)
+                except Exception as alt_exc:
+                    log(f"[hybrid] dual-code alt load fail: {alt_exc}")
+                verified_alt = False
+                for alt in alt_codes[:3]:
+                    if stop():
+                        return _result(STATUS_STOPPED)
+                    try:
+                        log(f"[hybrid] VerifyEmail retry alt code={alt} (dual-code)")
+                        r2b = client.verify_email_validation_code(email, alt)
+                        log(f"[hybrid] VerifyEmail alt status={r2b.get('status')}")
+                        if int(r2b.get("status") or 0) < 400:
+                            clean = alt
+                            code = alt
+                            r2 = r2b
+                            verified_alt = True
+                            log(f"[hybrid] VerifyEmail alt ok code={alt}")
+                            break
+                    except Exception as ve:
+                        log(f"[hybrid] VerifyEmail alt exception: {ve}")
+                if not verified_alt:
+                    return _result(STATUS_FAIL)
             if stop():
                 return _result(STATUS_STOPPED)
 
@@ -720,29 +794,58 @@ def register_one_hybrid(
                 return _result(STATUS_FAIL)
             # CRITICAL: frontend mints a NEW castle via createRequestToken() on every SignUp.
             # Reusing CreateEmail castle often yields HTTP 200 RSC fragment with no sso cookie.
-            castle2 = browser.read_captured_castle() or castle
-            if len(castle2) < 1000:
-                castle2 = castle
+            # 18r5: force clear captures + mint; log whether head actually changed.
+            castle_old = browser.read_captured_castle() or castle or ""
             log(
-                f"[hybrid] mint fresh castle for SignUp (old_len={len(castle2)} "
-                f"old_head={(castle2 or '')[:36]})"
+                f"[hybrid] mint fresh castle for SignUp (old_len={len(castle_old)} "
+                f"old_head={(castle_old or '')[:36]})"
             )
+            castle2 = castle_old
             try:
-                fresh_castle = browser.get_castle_token_injected(timeout=20) or ""
-                if (not fresh_castle or len(fresh_castle) < 1000) and hasattr(
-                    browser, "get_castle_token"
-                ):
-                    fresh_castle = browser.get_castle_token(timeout=15) or fresh_castle
+                fresh_castle = ""
+                for mint_try in range(1, 3):
+                    if hasattr(browser, "mint_fresh_castle_token"):
+                        # 18r9: short mint windows; early-abort inside mint on weak 744 junk.
+                        # CreateEmail IBYIll reuse remains the proven SSO path.
+                        to = 6 if mint_try == 1 else 4
+                        fresh_castle = browser.mint_fresh_castle_token(timeout=to, reason=f"signup_t{mint_try}") or ""
+                    else:
+                        try:
+                            browser.clear_captured_castles(reason=f"signup_t{mint_try}")
+                        except Exception:
+                            pass
+                        fresh_castle = browser.get_castle_token_injected(timeout=6) or ""
+                    if fresh_castle and len(fresh_castle) >= 1000 and str(fresh_castle).startswith("IBYIll"):
+                        break
+                    if fresh_castle and len(fresh_castle) < 1000:
+                        log(
+                            f"[hybrid] fresh castle weak discard try={mint_try} "
+                            f"len={len(fresh_castle)} head={(fresh_castle or '')[:24]}"
+                        )
+                        fresh_castle = ""
+                    # 18r9: skip long get_castle_token after first weak early-abort; only one quick alt read.
+                    if (not fresh_castle or len(fresh_castle) < 1000) and hasattr(
+                        browser, "get_castle_token"
+                    ) and mint_try == 1:
+                        alt = browser.get_castle_token(timeout=3) or ""
+                        if alt and len(alt) >= 1000 and str(alt).startswith("IBYIll"):
+                            fresh_castle = alt
+                            break
+                        if alt and len(alt) < 1000:
+                            log(f"[hybrid] get_castle_token weak discard len={len(alt)}")
                 if fresh_castle and len(fresh_castle) >= 1000:
+                    same_head = (fresh_castle[:48] == (castle_old or "")[:48]) if castle_old else False
                     castle2 = fresh_castle
                     log(
                         f"[hybrid] fresh castle ok len={len(castle2)} "
-                        f"head={castle2[:48]}"
+                        f"head={castle2[:48]} same_as_old_head={int(same_head)} "
+                        f"src=force_mint"
                     )
                 else:
                     log(
-                        f"[hybrid] fresh castle weak len={len(fresh_castle or '')}; "
-                        f"reuse previous head={(castle2 or '')[:36]}"
+                        f"[hybrid] fresh castle weak/empty after retries; "
+                        f"reuse previous head={(castle2 or '')[:36]} "
+                        f"prev_len={len(castle2 or '')}"
                     )
             except Exception as castle_exc:
                 log(f"[hybrid] fresh castle mint fail: {castle_exc}; reuse previous")
@@ -831,15 +934,23 @@ def register_one_hybrid(
 
             def _mint_castle_for_try(try_idx: int) -> str:
                 nonlocal castle2
+                # Always force a real remint for browser-fetch / later tries.
+                # try_idx==1 uses pre-minted castle2; later tries clear+mint.
                 if try_idx == 1:
                     return castle2
                 try:
-                    c = browser.get_castle_token_injected(timeout=12) or ""
+                    if hasattr(browser, "mint_fresh_castle_token"):
+                        c = browser.mint_fresh_castle_token(
+                            timeout=10, reason=f"signup_try_{try_idx}"
+                        ) or ""
+                    else:
+                        c = browser.get_castle_token_injected(timeout=8) or ""
                     if c and len(c) >= 1000:
+                        same_head = (c[:40] == (castle2 or "")[:40]) if castle2 else False
                         castle2 = c
                         log(
                             f"[hybrid] re-mint castle for try {try_idx} "
-                            f"len={len(c)} head={c[:40]}"
+                            f"len={len(c)} head={c[:40]} same_as_prev={int(same_head)}"
                         )
                         return c
                 except Exception as exc:
@@ -1028,6 +1139,53 @@ def register_one_hybrid(
                     f"[hybrid] sign-up try {idx} no sso (status={st}); "
                     f"continue next candidate with fresh castle"
                 )
+            # 18r5: same live hash RSC shell often needs a second protocol shot with forced fresh castle + new conversionId.
+            if (not sso) and (not protocol_network_dead) and candidates and (not stop()):
+                try:
+                    act = candidates[0]
+                    castle_tok = _mint_castle_for_try(99)
+                    try:
+                        jar3 = dict(browser.export_cookies() or {})
+                        for stale in ("sso", "sso-rw"):
+                            jar3.pop(stale, None)
+                        sess.set_cookies(jar3)
+                    except Exception:
+                        pass
+                    client.next_action = act
+                    log(
+                        f"[hybrid] protocol forced-remint retry path=protocol/curl "
+                        f"next-action={act[:20]}... castle_len={len(castle_tok)} "
+                        f"castle_head={(castle_tok or '')[:40]}"
+                    )
+                    t_try = time.time()
+                    try:
+                        r3 = _do_signup(act, castle_tok)
+                    except Exception as signup_exc:
+                        log(f"[hybrid] protocol forced-remint exception: {signup_exc}")
+                        r3 = {
+                            "status": 0,
+                            "text": str(signup_exc),
+                            "cookies": {},
+                            "sso": "",
+                            "error_hints": ["exception"],
+                        }
+                    sso = _extract_sso(r3)
+                    body_txt = str(r3.get("text") or "")
+                    st = r3.get("status")
+                    log(
+                        f"[hybrid] protocol forced-remint status={st} sso_len={len(sso)} "
+                        f"elapsed={time.time() - t_try:.1f}s body={body_txt[:180]!r}"
+                    )
+                    if not sso:
+                        _log_signup_diag(99, r3, path="protocol/curl-forced-remint")
+                    if sso:
+                        try:
+                            save_next_action_to_capture(act, log)
+                        except Exception:
+                            pass
+                except Exception as forced_exc:
+                    log(f"[hybrid] protocol forced-remint block error: {forced_exc}")
+
             # Protocol-first recovery: if candidates only returned RSC shell/no-sso,
             # live re-scrape next-action and retry protocol once before browser-fetch.
             if (not sso) and (not protocol_network_dead) and (not stop()):

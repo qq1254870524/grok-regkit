@@ -9,6 +9,7 @@
 2026-07-18q: 全域 cookies(all_domains) + CDP Network.getAllCookies 收 SSO；登录后即使仍在 sign-in 也轮询 accounts/grok 固化；submit 后 form.requestSubmit/Enter 双保险；详细 page body/url 日志。
 2026-07-18r: 登录提交后强制等待 12s/URL变化/loading消失再 re-fill，禁止 1s 内连点打断；Cloudflare/captcha/challenge 未过完不跳 grok；仅确认离开 sign-in 后才固化 cookie；bad_password/account_missing 明确失败后移出 pending 并走重新注册(hybrid)，不是只删号；CF 未过完不跳 grok；网络/loading 日志细化。
 2026-07-18r2: 修复页面标题「您正在登录」被误判为 loading 导致永久空等；loading 仅认 aria-busy/disabled/纯 spinner 文案。
+2026-07-18r6: accounts_registered_pending_sso 仅在 SSO 恢复成功或 hybrid 重注册成功后移出；auth_error/bad_password 不再提前删除，避免重注册失败丢数据。
 2026-07-18r3: 识别页面 An error occurred/登录失败 为 auth_error；移出 pending 后走 hybrid 重新注册（不是只删号）；rate_limit 不直接重注册。
 """
 from __future__ import annotations
@@ -1160,15 +1161,14 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                 success_count += 1
             else:
                 fail_count += 1
-                # 密码错误/账号不存在：不是简单丢弃，移出 pending 后走注册主流程重跑
+                # 密码错误/账号不存在/auth_error：走 hybrid 重注册。
+                # 关键：accounts_registered_pending_sso 仅在最终成功后才移出；
+                # 若重注册失败仍保留原 pending，避免数据丢失。
                 if fail_reason in {"bad_password", "account_missing", "auth_error"} or res.get("remove_pending"):
-                    try:
-                        remove_pending_sso_account(email, log=log)
-                        log(
-                            f"[pending-sso] {fail_reason or 'auth_fail'} -> 移出 pending，改走注册流程 email={email}"
-                        )
-                    except Exception as rm_exc:
-                        log(f"[pending-sso] remove pending before re-register fail: {rm_exc}")
+                    log(
+                        f"[pending-sso] {fail_reason or 'auth_fail'} -> 暂保留 pending，"
+                        f"改走注册流程 email={email}（成功后再移出）"
+                    )
                     if not controller.should_stop():
                         try:
                             from hybrid_register import register_one_hybrid
@@ -1192,10 +1192,15 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                             if rr_status == STATUS_SUCCESS:
                                 success_count += 1
                                 fail_count = max(0, fail_count - 1)
+                                try:
+                                    remove_pending_sso_account(email, log=log)
+                                    log(f"[pending-sso] re-register success -> 移出 pending email={email}")
+                                except Exception as rm_exc:
+                                    log(f"[pending-sso] remove pending after re-register success fail: {rm_exc}")
                             elif rr_status == STATUS_PENDING_SSO:
                                 log("[pending-sso] re-register got pending_sso again; kept as pending fallback")
                             elif rr_status == STATUS_STOPPED:
-                                log("[pending-sso] re-register stopped")
+                                log("[pending-sso] re-register stopped; pending kept")
                                 break
                             elif rr_status == STATUS_POOL_EMPTY:
                                 skipped += 1

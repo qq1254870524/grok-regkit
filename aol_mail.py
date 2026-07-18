@@ -17,6 +17,7 @@ Changelog:
 - 2026-07-17b: login fail -> mark bad + next account; scan ALL IMAP folders.
 - 2026-07-17: initial AOL IMAP provider (imap.aol.com:993).
 - 2026-07-18m: speed — smaller IMAP top, less preflight/poll dump; keep ALL-folder scan + send+3s poll.
+- 2026-07-18r7: dual-code prefer INBOX/latest; log Bulk candidates; store LAST_OAI_CODE_CANDIDATES.
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# 18r7: last dual-code candidates for hybrid alternate retry
+LAST_OAI_CODE_CANDIDATES: List[dict] = []
 
 try:
     import pyotp  # noqa: F401  # optional; not required for IMAP app-password
@@ -874,6 +878,7 @@ def get_oai_code(
                 baseline_done = True
 
             cutoff = baseline_ts - 120
+            round_candidates = []
             for msg in msgs:
                 mid = msg.get("id") or ""
                 if mid and mid in seen:
@@ -883,6 +888,7 @@ def get_oai_code(
                 subject = msg.get("subject") or ""
                 body = msg.get("body") or ""
                 frm = msg.get("from") or ""
+                folder = str(msg.get("folder") or "INBOX")
                 recv_ts = float(msg.get("received_ts") or 0)
                 if recv_ts and recv_ts < cutoff:
                     _log(
@@ -898,7 +904,7 @@ def get_oai_code(
                     continue
                 _log(
                     log_callback,
-                    f"[*] AOL check xAI mail folder={msg.get('folder')} subject={subject[:80]} "
+                    f"[*] AOL check xAI mail folder={folder} subject={subject[:80]} "
                     f"from={frm} date={msg.get('date')}",
                 )
                 code = None
@@ -910,14 +916,58 @@ def get_oai_code(
                 if not code:
                     code = extract_code(body, subject)
                 if code:
+                    folder_l = folder.lower()
+                    if folder_l in ("inbox",) or folder_l.endswith(".inbox"):
+                        rank = 0
+                    elif any(k in folder_l for k in ("bulk", "spam", "junk", "trash")):
+                        rank = 2
+                    else:
+                        rank = 1
+                    round_candidates.append(
+                        {
+                            "code": code,
+                            "folder": folder,
+                            "rank": rank,
+                            "recv_ts": recv_ts or 0.0,
+                            "subject": subject[:80],
+                            "from": frm,
+                            "id": mid,
+                        }
+                    )
+                else:
                     _log(
                         log_callback,
-                        f"[+] AOL code ok email={em} code={code} subject={subject[:60]} "
-                        f"from={frm} source=IMAP/{msg.get('folder')}",
+                        f"[*] AOL xAI mail has no parseable code yet subject={subject[:60]}",
                     )
-                    pool.release(email, ok=True)
-                    return code
-                _log(log_callback, f"[*] AOL xAI mail has no parseable code yet subject={subject[:60]}")
+
+            if round_candidates:
+                # Prefer INBOX over Bulk/Spam, then newest.
+                round_candidates.sort(
+                    key=lambda c: (int(c.get("rank") or 9), -float(c.get("recv_ts") or 0.0))
+                )
+                global LAST_OAI_CODE_CANDIDATES
+                LAST_OAI_CODE_CANDIDATES = list(round_candidates)
+                if len(round_candidates) > 1:
+                    summary = " | ".join(
+                        f"{c.get('code')}@{c.get('folder')}(rank={c.get('rank')})"
+                        for c in round_candidates[:6]
+                    )
+                    _log(
+                        log_callback,
+                        f"[!] AOL dual-code detected email={em} count={len(round_candidates)} "
+                        f"candidates=[{summary}] prefer={round_candidates[0].get('code')}@"
+                        f"{round_candidates[0].get('folder')}",
+                    )
+                best = round_candidates[0]
+                _log(
+                    log_callback,
+                    f"[+] AOL code ok email={em} code={best.get('code')} "
+                    f"subject={(best.get('subject') or '')[:60]} "
+                    f"from={best.get('from')} source=IMAP/{best.get('folder')} "
+                    f"alt_count={max(0, len(round_candidates)-1)}",
+                )
+                pool.release(email, ok=True)
+                return best.get("code")
         except Exception as exc:
             last_err = exc
             _log(log_callback, f"[!] AOL poll error: {exc}")
