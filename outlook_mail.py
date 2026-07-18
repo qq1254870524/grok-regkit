@@ -21,6 +21,7 @@ Changelog:
   (folder/subject/from/received/id); explicit non-full-mailbox scan note;
   hybrid waits 3s after CreateEmail (caller side).
 - 2026-07-17: fix false OTP from inbox noise (e.g. bank "855-730").
+- 2026-07-18m: speed — Graph top 20, less preflight/poll dump; keep ALL folders + send+3s poll.
   Only xAI/Grok related mails; baseline-skip existing inbox on poll start;
   reject bare XXX-XXX without xAI context.
 """
@@ -448,7 +449,7 @@ class OutlookSession:
         self,
         access_token: str,
         folder: str,
-        top: int = 15,
+        top: int = 10,
     ) -> List[dict]:
         """Fetch messages from one Graph mail folder (inbox/junkemail/...)."""
         folder_key = (folder or "inbox").strip().strip("/")
@@ -582,7 +583,7 @@ class OutlookSession:
         )
         return out
 
-    def list_inbox(self, access_token: str, top: int = 15) -> List[dict]:
+    def list_inbox(self, access_token: str, top: int = 10) -> List[dict]:
         """List recent mail from ALL Graph mail folders (deduped by id)."""
         merged: List[dict] = []
         seen_ids: set[str] = set()
@@ -1083,7 +1084,7 @@ def preflight_mailbox(
     *,
     log_callback=None,
     proxies=None,
-    top: int = 25,
+    top: int = 10,
 ) -> dict:
     """Validate Graph login BEFORE CreateEmail. Returns summary dict or raises.
 
@@ -1145,7 +1146,7 @@ def preflight_mailbox(
         f = str((msg or {}).get("_folder") or "inbox")
         folder_counts[f] = folder_counts.get(f, 0) + 1
     # dump recent few for diagnosis
-    for i, msg in enumerate(msgs[:12]):
+    for i, msg in enumerate(msgs[:4]):  # 2026-07-18m speed
         mid = str((msg or {}).get("id") or "")
         mid_short = (mid[:16] + "...") if len(mid) > 16 else mid
         subj = str((msg or {}).get("subject") or "")[:100]
@@ -1188,7 +1189,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
         except Exception:
             return False
 
-    GRAPH_TOP = 50  # recent per folder; NOT full mailbox
+    GRAPH_TOP = 20  # 2026-07-18m speed: recent per folder; still ALL folders, not full mailbox
     pool = get_pool(config, proxies=proxies, log_callback=log_callback)
     poll_started = _now()
     # Prefer caller-provided since_ts (email submit time); else poll start.
@@ -1264,7 +1265,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
                 f"counts={folder_counts} login={login_method}",
             )
             # Always dump recent mails each round for diagnosis (no redaction)
-            dump_n = min(len(msgs), 15 if poll_round <= 2 else 8)
+            dump_n = min(len(msgs), 4 if poll_round <= 2 else 2)  # 2026-07-18m speed
             for i, msg in enumerate(msgs[:dump_n]):
                 mid = str((msg or {}).get("id") or "")
                 mid_short = (mid[:18] + "...") if len(mid) > 18 else mid

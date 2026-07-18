@@ -404,7 +404,7 @@ const scoreBtn = (n) => {
 let best = null, bestScore = 0, ranked = [];
 for (const n of btnNodes) {
   const sc = scoreBtn(n);
-  const t = ((n.innerText || n.textContent || n.value || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+  const t = ((n.innerText || n.textContent || n.value || '') + '').replace(/\s+/g, ' ').trim().slice(0, 60);
   if (sc > 0) ranked.push({score: sc, text: t});
   if (sc > bestScore) { bestScore = sc; best = n; }
 }
@@ -616,12 +616,41 @@ true;
         open_signup_page(log_callback=self.log, cancel_callback=cancel_callback)
 
     def export_cookies(self) -> dict:
-        from grok_register_ttk import _get_browser
+        """Export cookies from current Chromium; prefer all_domains to catch host-only sso."""
+        from grok_register_ttk import _get_browser, _get_page
 
         jar = {}
         try:
             browser = _get_browser()
-            cookies = browser.cookies() if browser else []
+            page = None
+            try:
+                page = _get_page()
+            except Exception:
+                page = None
+            cookies = []
+            if page is not None:
+                for kwargs in (
+                    {"all_domains": True, "all_info": True},
+                    {"all_domains": True},
+                    {},
+                ):
+                    try:
+                        cookies = page.cookies(**kwargs) or []
+                        if cookies:
+                            break
+                    except TypeError:
+                        try:
+                            cookies = page.cookies() or []
+                            break
+                        except Exception:
+                            cookies = []
+                    except Exception:
+                        cookies = []
+            if not cookies and browser is not None:
+                try:
+                    cookies = browser.cookies() or []
+                except Exception:
+                    cookies = []
             for c in cookies or []:
                 if isinstance(c, dict):
                     n, v = c.get("name", ""), c.get("value", "")
@@ -629,6 +658,15 @@ true;
                     n, v = getattr(c, "name", ""), getattr(c, "value", "")
                 if n:
                     jar[str(n)] = str(v)
+            if page is not None and "sso" not in jar:
+                try:
+                    doc = page.run_js("return document.cookie || ''") or ""
+                    import re as _re
+                    m = _re.search(r"(?:^|;\s*)sso=([^;]+)", str(doc))
+                    if m and len(m.group(1)) >= 20:
+                        jar["sso"] = m.group(1)
+                except Exception:
+                    pass
         except Exception as e:
             self._lg(f"[Debug] export_cookies: {e}")
         return jar
@@ -1670,6 +1708,9 @@ return (async function(){{
 
         When protocol/browser-fetch next-action fails, the page may still be on
         email or verification step. Advance those steps first, then fill profile.
+        2026-07-18n: after code-submitted keep advancing/confirming; capture page errors; one re-confirm if still on code.
+        2026-07-18q: export_cookies 使用 page.cookies(all_domains) + document.cookie 兜底，避免漏收 host-only sso。
+2026-07-18o: after VerifyEmail/protocol path, if UI still on code page: fill+confirm once/twice, longer wait for profile, Enter fallback, avoid endless 确认邮箱 loops; never re-send email.
         """
         from grok_register_ttk import _get_page
 
@@ -1710,9 +1751,11 @@ return String(cfInput.value || '').trim().length;
         deadline = time.time() + max(30, int(timeout or 90))
         email_done = False
         code_done = False
+        code_confirm_tries = 0
         filled = False
         submitted = False
         last_state_sig = ""
+        last_page_err = ""
         while time.time() < deadline:
             if stop():
                 self._lg("[*] UI fallback cancelled")
@@ -1737,6 +1780,12 @@ const family = Array.from(document.querySelectorAll('input[name="familyName"], i
 const pw = Array.from(document.querySelectorAll('input[type="password"], input[name="password"]')).some(isVisible);
 const cf = document.querySelector('input[name="cf-turnstile-response"]');
 const cfLen = cf ? String(cf.value||'').trim().length : 0;
+const bodyText = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 240);
+let err = '';
+const low = bodyText.toLowerCase();
+if (low.includes('过多') || low.includes('too many') || low.includes('rate')) err = 'rate_limit';
+else if (low.includes('invalid') || low.includes('不正确') || low.includes('无效') || low.includes('wrong')) err = 'invalid_code_or_input';
+else if (low.includes('expired') || low.includes('过期')) err = 'expired';
 return {
   email: !!emailInput,
   code: !!codeInput,
@@ -1745,7 +1794,9 @@ return {
   pw: !!pw,
   cfLen: cfLen,
   url: location.href,
-  hasProfile: !!(given && family && pw)
+  hasProfile: !!(given && family && pw),
+  err: err,
+  body: bodyText
 };
 """
                 )
@@ -1766,6 +1817,10 @@ return {
             if sig != last_state_sig:
                 self._lg(f"[*] UI fallback state={state}")
                 last_state_sig = sig
+            page_err = str((state or {}).get("err") or "").strip()
+            if page_err and page_err != last_page_err:
+                self._lg(f"[!] UI fallback page_err={page_err} body={(state or {}).get('body')}")
+                last_page_err = page_err
 
             # already left signup? check cookies early
             jar = self.export_cookies() or {}
@@ -1811,7 +1866,7 @@ function setVal(input, value) {
 }
 function buttonText(node) {
   return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
-    .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 const input = pick('input[type="email"], input[name="email"], input[autocomplete="email"], input[data-testid="email"]');
 if (!input) return 'no-email-input';
@@ -1838,7 +1893,8 @@ return 'email-submitted:' + buttonText(btn);
                     self._lg(f"[Debug] UI fallback email step: {e}")
 
             # Step 2: still on verification code page.
-            if code_val and state.get("code") and not has_profile and not code_done:
+            # Protocol may already have VerifyEmail; UI can lag. Confirm limited times, wait for profile.
+            if code_val and state.get("code") and not has_profile and (not code_done or code_confirm_tries < 2):
                 try:
                     step_r = page.run_js(
                         """
@@ -1865,11 +1921,11 @@ function setVal(input, value) {
   input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
   input.dispatchEvent(new Event('change', { bubbles: true }));
   input.blur();
-  return String(input.value||'').replace(/\\s+/g,'') === String(value||'').replace(/\\s+/g,'');
+  return String(input.value||'').replace(/\s+/g,'') === String(value||'').replace(/\s+/g,'');
 }
 function buttonText(node) {
   return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
-    .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
 }
 const input = pick('input[name="code"], input[name="emailValidationCode"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[data-testid="code"], input[type="text"], input[type="tel"]');
 if (!input) return 'no-code-input';
@@ -1877,10 +1933,18 @@ if (!setVal(input, code)) return 'code-fill-failed';
 const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'))
   .filter(n => isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true');
 const btn = buttons.find(n => {
-  const t = buttonText(n).replace(/\\s+/g, '').toLowerCase();
-  return t.includes('继续') || t.includes('下一步') || t.includes('验证') || t.includes('confirm') || t.includes('continue') || t.includes('next') || t.includes('verify');
-}) || buttons.find(n => String(n.getAttribute('type')||'').toLowerCase() === 'submit') || buttons[0] || null;
-if (!btn) return 'code-filled-no-btn';
+  const t = buttonText(n).replace(/\s+/g, '').toLowerCase();
+  return t.includes('继续') || t.includes('下一步') || t.includes('验证') || t.includes('confirm') || t.includes('continue') || t.includes('next') || t.includes('verify') || t.includes('确认邮箱') || t.includes('确认');
+}) || buttons.find(n => String(n.getAttribute('type')||'').toLowerCase() === 'submit') || null;
+if (!btn) {
+  try {
+    input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+    input.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+    return 'code-enter';
+  } catch (e) {
+    return 'code-filled-no-btn';
+  }
+}
 btn.focus();
 btn.click();
 return 'code-submitted:' + buttonText(btn);
@@ -1888,12 +1952,61 @@ return 'code-submitted:' + buttonText(btn);
                         code_val,
                     )
                     self._lg(f"[*] UI fallback code step={step_r}")
-                    if str(step_r).startswith("code-submitted") or str(step_r) == "code-filled-no-btn":
+                    if str(step_r).startswith("code-submitted") or str(step_r) in ("code-filled-no-btn", "code-enter"):
                         code_done = True
-                        time.sleep(1.5)
+                        code_confirm_tries += 1
+                        # longer wait for profile form after protocol VerifyEmail
+                        time.sleep(3.2 if code_confirm_tries == 1 else 2.0)
                         continue
                 except Exception as e:
                     self._lg(f"[Debug] UI fallback code step: {e}")
+
+            # If stuck after code confirm, try continue/next/Enter without re-sending email.
+            if code_done and not has_profile and not state.get("email") and code_confirm_tries >= 1 and code_confirm_tries <= 3:
+                try:
+                    cont_r = page.run_js(
+                        r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function buttonText(node) {
+  return [node.innerText, node.textContent, node.getAttribute('value'), node.getAttribute('aria-label')]
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+const buttons = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'))
+  .filter(n => isVisible(n) && !n.disabled && n.getAttribute('aria-disabled') !== 'true');
+const btn = buttons.find(n => {
+  const t = buttonText(n).replace(/\s+/g, '').toLowerCase();
+  if (t.includes('重新') || t.includes('resend') || t.includes('发送验证') || t.includes('sendcode')) return false;
+  return t.includes('继续') || t.includes('下一步') || t.includes('确认') || t.includes('验证') ||
+         t.includes('continue') || t.includes('next') || t.includes('confirm') || t.includes('verify');
+}) || null;
+if (!btn) {
+  const codeInput = Array.from(document.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]')).find(isVisible) || null;
+  if (codeInput) {
+    try {
+      codeInput.focus();
+      codeInput.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+      codeInput.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true}));
+      return 'enter-on-code:' + buttons.map(buttonText).filter(Boolean).slice(0, 8).join(' | ');
+    } catch (e) {}
+  }
+  return 'no-continue:' + buttons.map(buttonText).filter(Boolean).slice(0, 8).join(' | ');
+}
+btn.focus();
+btn.click();
+return 'continue:' + buttonText(btn);
+"""
+                    )
+                    self._lg(f"[*] UI fallback post-code continue={cont_r}")
+                    code_confirm_tries += 1
+                    time.sleep(1.6)
+                except Exception as e:
+                    self._lg(f"[Debug] UI fallback post-code continue: {e}")
 
             if state.get("given") and state.get("family") and state.get("pw") and not filled:
                 try:

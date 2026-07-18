@@ -1,4 +1,4 @@
-"""Hybrid Grok registration: protocol RPC + browser tokens.
+﻿"""Hybrid Grok registration: protocol RPC + browser tokens.
 
 Used by Web/CLI when config register_mode == "hybrid".
 
@@ -37,6 +37,10 @@ Changelog:
               识别 turnstile/业务错误，避免把唯一 live next-action 标死导致 no candidates。
               主流程仍是 注册→即时SSO→入池；pending 仅兜底。
 2026-07-18l: 重新启用 UI fallback 为最后兜底：协议 SignUp → browser-fetch → UI profile submit → pending_sso。
+- $12026-07-18r3: pending bad_password/auth_error re-register via hybrid (see pending_sso_recovery); main path still register→immediate SSO→pool; UI fallback last.
+- 2026-07-18n: pending_sso 登录页点击「使用邮箱登录」；UI fallback 验证码后继续推进/报错可见；speed 补丁保留。主路径仍 注册→即时SSO→入池。
+2026-07-18o: pending 两步登录(email→下一步→password)；UI fallback 验证码后更稳进 profile；主路径仍 注册→即时SSO→入池；pending 仅兜底。
+2026-07-18r: pending 二次补：提交后等待/CF 未过不跳转；密码错误走重新注册而非只删号。
               主路径不变：协议/browser-fetch 拿到 SSO 立刻 schedule_post 入池；UI 不抢主路径、不重复发信；
               仅在 protocol+browser-fetch 均无 SSO 时调用 submit_profile_and_wait_sso；仍无 SSO 才落盘 pending。
 """
@@ -1553,3 +1557,4 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None):
         "accounts_file": accounts_output_file,
         "stopped": bool(controller.should_stop()),
     }
+

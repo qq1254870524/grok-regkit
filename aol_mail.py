@@ -16,6 +16,7 @@ Changelog:
 - 2026-07-17c: 登录失败/注册成功后从账号池文件永久删除该行；内存+磁盘同步。
 - 2026-07-17b: login fail -> mark bad + next account; scan ALL IMAP folders.
 - 2026-07-17: initial AOL IMAP provider (imap.aol.com:993).
+- 2026-07-18m: speed — smaller IMAP top, less preflight/poll dump; keep ALL-folder scan + send+3s poll.
 """
 from __future__ import annotations
 
@@ -748,7 +749,7 @@ def get_email_and_token(config: dict, proxies=None, log_callback=None) -> Tuple[
     return pool.acquire()
 
 
-def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None, top: int = 15) -> dict:
+def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None, top: int = 10) -> dict:
     pool = get_pool(config, log_callback=log_callback)
     em, password = pool.resolve_credentials(email, token_blob)
     has_pw = bool(str(password or '').strip())
@@ -766,7 +767,7 @@ def preflight_mailbox(config, token_blob: str, email: str, *, log_callback=None,
             _log(log_callback, format_aol_login_error(em, exc, stage='preflight'))
             raise
         msgs = sess.fetch_recent(top_per_folder=int(top))
-        for i, msg in enumerate(msgs[:12]):
+        for i, msg in enumerate(msgs[:4]):  # 2026-07-18m speed
             xai = is_xai_related(msg.get("subject") or "", msg.get("body") or "", msg.get("from") or "")
             _log(
                 log_callback,
@@ -819,7 +820,7 @@ def get_oai_code(
         except Exception:
             return False
 
-    TOP = 40
+    TOP = 25  # 2026-07-18m speed: fewer messages per folder
     pool = get_pool(config, log_callback=log_callback)
     poll_started = _now()
     baseline_ts = float(since_ts) if since_ts else poll_started
@@ -849,7 +850,7 @@ def get_oai_code(
                 f"[*] AOL poll round={poll_round} email={em} count={len(msgs)} "
                 f"remain={max(0, deadline - _now()):.0f}s",
             )
-            dump_n = min(len(msgs), 12 if poll_round <= 2 else 6)
+            dump_n = min(len(msgs), 4 if poll_round <= 2 else 2)  # 2026-07-18m speed: less dump
             for i, msg in enumerate(msgs[:dump_n]):
                 xai = is_xai_related(msg.get("subject") or "", msg.get("body") or "", msg.get("from") or "")
                 _log(
