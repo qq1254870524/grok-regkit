@@ -1,0 +1,16 @@
+﻿# 18r18 还原点
+
+tag: stable-2026-07-19-dualsend-lock-18r18
+
+还原步骤：
+1. 从 packages/stable-2026-07-19-dualsend-lock-18r18/sources 覆盖：
+   - hybrid_register.py
+   - browser/token_harvester.py
+   - grok_register_ttk.py
+   - tools/matrix_cross_run.py
+   - aol_mail.py / outlook_mail.py（可选）
+2. 仅重启 8092（python -B web/server.py），勿杀 8010/8080/8317/8318
+3. 验证：GET http://127.0.0.1:8092/api/status
+4. 日志应出现 CreateEmail blocked_duplicate / actual_send=1 而非 actual_send=2
+
+本包不覆盖任何历史 Packages / Releases（含 18r16 及更早）。
