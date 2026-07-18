@@ -1,0 +1,11 @@
+﻿# 18r16 还原点
+
+tag: stable-2026-07-19-ratelimit-switch-18r16
+
+还原步骤：
+1. 从 packages/stable-2026-07-19-ratelimit-switch-18r16/sources 覆盖 hybrid_register.py 与 browser/token_harvester.py
+2. 可选覆盖 outlook_mail.py / aol_mail.py
+3. 仅重启 8092（python -B web/server.py），勿杀 8010/8080/8317/8318
+4. 验证：GET http://127.0.0.1:8092/api/status
+
+本包不覆盖任何历史 Packages / Releases。
