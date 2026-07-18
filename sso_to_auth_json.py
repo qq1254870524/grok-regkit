@@ -6,6 +6,9 @@ from __future__ import annotations
 Fused from Git-creat7/grokRegister-cpa (MIT) into grok-regkit.
 
 Changelog:
+- 2026-07-19r19: consent 非 allow(无 code) 拉黑该 Next-Action 并继续试更多候选；
+  深扫 JS chunks 不因 1 个 strong_id 早停；解析 redirect/query 中的 code；
+  识别 RSC soft-nav 非 allow 响应，避免永远卡在 0071fd1191ff 类死 action。
 - 2026-07-18r13: consent JS chunk discovery 默认直接 max=40 单阶段扫描（去掉 12→40 两阶段 expand）；
   保留 strong action id 早停；日志改为 "扫 max N"；不覆盖旧 package。
 - 2026-07-18r11: consent JS chunk discovery 改为两阶段扫描（12 个快速阶段，必要时扩展到 40 个）；
@@ -141,8 +144,24 @@ def _gen_pkce() -> tuple[str, str, str, str]:
 
 
 def _parse_consent_code(body: str) -> str | None:
-    """从 consent 提交的 text/x-component 响应里解析出 authorization code。"""
-    for line in body.split("\n"):
+    """从 consent 提交的 text/x-component 响应里解析出 authorization code。
+
+    兼容：
+    - JSON 对象含 code
+    - redirect URL / query 字符串 code=
+    - RSC soft-nav q= 参数内嵌 code
+    """
+    text = body or ""
+    for m in re.finditer(r"(?:[?&#]|^)code=([A-Za-z0-9._~+/-]+)", text):
+        code = urllib.parse.unquote(m.group(1) or "").strip()
+        if code and code.lower() not in ("null", "undefined", "none"):
+            # avoid matching response_type=code alone
+            start = m.start()
+            prefix = text[max(0, start - 20):start]
+            if "response_type=" in prefix:
+                continue
+            return code
+    for line in text.split("\n"):
         start = line.find("{")
         if start < 0:
             continue
@@ -150,11 +169,42 @@ def _parse_consent_code(body: str) -> str | None:
             data = json.loads(line[start:])
         except Exception:
             continue
-        if isinstance(data, dict) and data.get("code"):
-            if data.get("success") is False:
-                return None
-            return data.get("code")
+        if not isinstance(data, dict):
+            continue
+        if data.get("success") is False:
+            continue
+        if data.get("code"):
+            return str(data.get("code"))
+        for key in ("q", "url", "href", "redirect", "location"):
+            val = data.get(key)
+            if not isinstance(val, str) or not val:
+                continue
+            mm = re.search(r"(?:[?&#])code=([A-Za-z0-9._~+/-]+)", val)
+            if mm:
+                code = urllib.parse.unquote(mm.group(1) or "").strip()
+                if code:
+                    return code
     return None
+
+
+def _is_non_allow_consent_body(body: str) -> bool:
+    """True when response is clearly NOT consent-allow (RSC soft-nav / wrong action)."""
+    b = (body or "").strip()
+    if not b:
+        return True
+    low = b.lower()
+    if "incomplete envelope" in low or "invalid_argument" in low:
+        return True
+    if "server action not found" in low:
+        return True
+    if '"a":"$@' in b or '"a": "$@' in b:
+        if re.search(r"[?&#]code=", b) is None and '"code"' not in b:
+            return True
+    # authorize query echoed without issued auth code
+    if "response_type=code" in low and "client_id=" in low and "redirect_uri=" in low:
+        if re.search(r"(?:[?&#])code=", b) is None:
+            return True
+    return False
 
 
 def _extract_next_action_ids(html: str, *, include_hardcoded_fallback: bool = False) -> list[str]:
@@ -260,8 +310,12 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
                         added_here += 1
                         if prefer:
                             strong_ids += 1
-            # Early-stop only after real createServerReference/callServer ids (not mere consent words).
-            if strong_ids > 0 and added_here > 0 and fetched >= 3:
+            # 18r19: do NOT early-stop on first strong_id — wrong page actions
+            # (e.g. 0071fd1191ff soft-nav) often appear first. Prefer collecting
+            # several prefer ids or scanning enough scripts.
+            if strong_ids >= 3 and added_here > 0 and fetched >= 8:
+                break
+            if strong_ids >= 1 and fetched >= 25 and len(priority) + len(found) >= 3:
                 break
 
     if log:
@@ -405,18 +459,26 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
     code = None
     last_err = ""
     tried: set[str] = set()
-    # 最多 2 轮：第一轮 live/缓存；失败再重开 consent 扫 JS chunks。
-    for round_i in range(2):
+    # 最多 3 轮：快速路径 → 深扫 JS → 再深扫（排除已拉黑）。
+    for round_i in range(3):
         if round_i > 0:
-            log("  [*] consent 失败，重新进入 authorize/consent 并解析 Next-Action...")
+            log(
+                f"  [*] consent 失败 round={round_i}，重新进入 authorize/consent 并解析 Next-Action"
+                f"（已试 {len(tried)} 个，已拉黑 {len(_blacklisted_next_action_ids)}）..."
+            )
             r, final_url, action_ids = _open_consent(discover_actions=True)
             if r is None:
                 return None
+            action_ids = [
+                a for a in action_ids
+                if a not in tried and a not in _blacklisted_next_action_ids
+            ]
             if not action_ids:
-                log("  ❌ JS 扩展扫描仍无 live Next-Action；停止 consent 提交")
+                log("  ❌ JS 扩展扫描仍无新的 live Next-Action；停止 consent 提交")
                 break
+            log(f"  [*] round={round_i} 新候选 {len(action_ids)} 个（首个 {action_ids[0][:12]}...）")
 
-        for action_id in action_ids[:5]:
+        for action_id in action_ids[:12]:
             if action_id in tried:
                 continue
             if action_id in _blacklisted_next_action_ids:
@@ -456,14 +518,26 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                 last_err = f"consent HTTP {r.status_code}: {body[:200]}"
                 log(f"  ⚠️ {last_err}")
                 continue
-            code = _parse_consent_code(body)
+            try:
+                final_loc = str(getattr(r, "url", "") or "")
+            except Exception:
+                final_loc = ""
+            code = _parse_consent_code(body + "\n" + final_loc)
             if code:
                 _working_next_action_id = action_id
-                log(f"  [*] Next-Action {action_id[:12]}... 返回 authorization code")
+                log(f"  [*] Next-Action {action_id[:12]}... 返回 authorization code len={len(code)}")
                 break
-            # 200 但无 code：多半是别的 server action（如读用户信息），继续试
-            last_err = f"consent 未返回 code: {body[:180]}"
-            log(f"  ⚠️ Next-Action {action_id[:12]}... 非 allow 响应，继续试")
+            # 200 但无 code：拉黑，避免每轮卡在 0071fd1191ff soft-nav
+            last_err = f"consent 未返回 code: {body[:220]}"
+            non_allow = _is_non_allow_consent_body(body)
+            log(
+                f"  ⚠️ Next-Action {action_id[:12]}... 非 allow 响应"
+                f"{' (soft-nav/wrong-action)' if non_allow else ''}，拉黑并继续试"
+                f" body_head={body[:120]!r}"
+            )
+            _blacklisted_next_action_ids.add(action_id)
+            if str(_working_next_action_id or "").strip().lower() == action_id:
+                _working_next_action_id = ""
         if code:
             break
 

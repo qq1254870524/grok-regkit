@@ -3,6 +3,9 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 2026-07-19r19: 修 code_timeout 假阳性：actual_send>=1 时禁止 protocol-rescue，故邮件轮询必须用满 180s（不再 45s short window）；
+  short window 仅保留给「可协议救援」的虚假 browser_sent；日志明文打印真实 poll_timeout。
+  主路径不变：注册→即时SSO→入池；pending 仅兜底。矩阵 10061 重试见 tools/matrix_cross_run.py。
 - 2026-07-19r18: CreateEmail 并发双发锁（first-send-only）防 dual-code/验证码过多；保留 r17 switch cap / 明文日志 / rate-limit 换邮箱。
 - 2026-07-19r17: UI fallback 卡验证码页快速 abort；无信+限流文案立即换邮箱；UI timeout 协议已验证时 40s；
   code_timeout 明文日志；主路径仍 注册→即时SSO→入池；pending 仅兜底。
@@ -960,8 +963,23 @@ def register_one_hybrid(
             code = ""
             code_exc = None
             try:
-                # 18r14: shorter first window when browser claimed send so protocol rescue can run.
-                use_short = bool(browser_sent and not protocol_sent)
+                # 18r19: short window ONLY when protocol-rescue is still allowed.
+                # After dual-send lock (actual_send/net_hits>=1), rescue is blocked — must poll full 180s
+                # or code_timeout false-positives dominate (Outlook Graph often >45s).
+                can_protocol_rescue = (
+                    bool(browser_sent)
+                    and (not protocol_sent)
+                    and int(actual_send or 0) < 1
+                    and int(net_hits_n or 0) < 1
+                )
+                use_short = bool(can_protocol_rescue)
+                poll_timeout = 45 if use_short else 180
+                log(
+                    f"[hybrid] mail poll window email={email} poll_timeout={poll_timeout}s "
+                    f"use_short={int(use_short)} can_protocol_rescue={int(can_protocol_rescue)} "
+                    f"browser_sent={browser_sent} protocol_sent={protocol_sent} "
+                    f"actual_send={actual_send} net_hits={net_hits_n}"
+                )
                 try:
                     code = get_oai_code(
                         mail_token,
@@ -969,7 +987,7 @@ def register_one_hybrid(
                         log_callback=log,
                         cancel_callback=stop,
                         since_ts=send_ts,
-                        timeout=45 if use_short else 180,
+                        timeout=poll_timeout,
                     )
                 except TypeError:
                     code = get_oai_code(

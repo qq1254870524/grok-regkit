@@ -1,4 +1,6 @@
 """Browser-only token harvest for Castle / Turnstile (hybrid mode).
+2026-07-19r19: blocked_duplicate CreateEmail 不再返回假 JSON(会触发页面 [invalid_argument] protocol error: incomplete envelope)；
+              改为 AbortError/abort 静默取消第2+次请求，首发仍放行；consent 见 sso_to_auth_json 18r19。
 2026-07-19r18: CreateEmail first-send-only lock — block concurrent 2nd+ CreateEmail (dual-code/rate-limit root fix); first real request always allowed.
 2026-07-18g: scrape_next_action 优先 createUserAndSession 邻域，避免抓到 CreateEmail。
 2026-07-18i: 恢复主路径 scrape 回退：createUserAndSession → emailValidationCode+castleRequestToken → hook；
@@ -199,11 +201,15 @@ class BrowserTokenSession:
       url = (typeof input === 'string') ? input : (input && input.url) || '';
       const blockDup = noteCreateEmailRequest(url);
       if (blockDup) {
-        try { console.warn('[hybrid] CreateEmail blocked_duplicate', url); } catch (e) {}
-        return new Response('{"blocked_duplicate":true,"reason":"create_email_send_lock"}', {
-          status: 200,
-          headers: {'Content-Type': 'application/json'}
-        });
+        // 18r19: DO NOT return fake JSON/RSC body — React/Connect parses it as
+        // "[invalid_argument] protocol error: incomplete envelope" on the signup page.
+        // Abort silently so only the first real CreateEmail completes.
+        try { console.warn('[hybrid] CreateEmail blocked_duplicate abort', url); } catch (e) {}
+        try {
+          return Promise.reject(new DOMException('CreateEmail blocked_duplicate', 'AbortError'));
+        } catch (e) {
+          throw new Error('CreateEmail blocked_duplicate');
+        }
       }
       captureBody(init && init.body, url);
       captureHeaders(init && init.headers);
@@ -232,16 +238,17 @@ class BrowserTokenSession:
   XMLHttpRequest.prototype.send = function(body){
     try {
       if (noteCreateEmailRequest(this.__u)) {
-        try {
-          Object.defineProperty(this, 'status', {configurable:true, get:function(){return 200;}});
-          Object.defineProperty(this, 'readyState', {configurable:true, get:function(){return 4;}});
-          Object.defineProperty(this, 'responseText', {configurable:true, get:function(){return '{"blocked_duplicate":true}';}});
-        } catch (e) {}
+        // 18r19: abort XHR duplicate instead of fake JSON (avoids incomplete envelope UI toast)
+        try { console.warn('[hybrid] CreateEmail XHR blocked_duplicate abort', this.__u); } catch (e) {}
         try {
           const xhr = this;
+          Object.defineProperty(this, 'status', {configurable:true, get:function(){return 0;}});
+          Object.defineProperty(this, 'readyState', {configurable:true, get:function(){return 4;}});
+          Object.defineProperty(this, 'responseText', {configurable:true, get:function(){return '';}});
+          Object.defineProperty(this, 'response', {configurable:true, get:function(){return '';}});
           setTimeout(function(){
-            try { if (typeof xhr.onreadystatechange === 'function') xhr.onreadystatechange(); } catch (e) {}
-            try { if (typeof xhr.onload === 'function') xhr.onload(); } catch (e) {}
+            try { if (typeof xhr.onabort === 'function') xhr.onabort(); } catch (e) {}
+            try { if (typeof xhr.onerror === 'function') xhr.onerror(); } catch (e) {}
           }, 0);
         } catch (e) {}
         return;

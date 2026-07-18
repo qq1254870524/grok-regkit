@@ -3,6 +3,8 @@
 """Matrix cross-run orchestrator for grok-regkit web API.
 
 Changelog:
+- 2026-07-19r19: api()/wait_idle/run_one retry on URLError/10061/Connection refused with backoff;
+  empty log class=empty_log; OUT matrix_18r19_*; pairs with hybrid 180s poll when actual_send>=1.
 - 2026-07-19r18: CreateEmail dual-send lock via token_harvester; matrix OUT matrix_18r18_*
 - 2026-07-19r17: matrix logs FULL plaintext (no SSO/password redaction);
   OUT dir matrix_18r18_*; classify 验证码过多 as rate_limit/create_email_fail;
@@ -33,7 +35,7 @@ ROUNDS = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 JOB_TIMEOUT = int(sys.argv[2]) if len(sys.argv) > 2 else 720  # seconds per job
 PENDING_ROUNDS = max(2, min(ROUNDS, 10))
 
-OUT = BASE / "matrix_runs" / datetime.now().strftime("matrix_18r18_%Y%m%d_%H%M%S")
+OUT = BASE / "matrix_runs" / datetime.now().strftime("matrix_18r19_%Y%m%d_%H%M%S")
 OUT.mkdir(parents=True, exist_ok=True)
 SUMMARY = OUT / "summary.jsonl"
 REPORT = OUT / "REPORT.md"
@@ -78,23 +80,66 @@ def log(msg: str) -> None:
         f.write(line + "\n")
 
 
-def api(method: str, path: str, body: dict | None = None, timeout: int = 60):
+def _is_conn_refused(exc: BaseException) -> bool:
+    msg = f"{type(exc).__name__}: {exc}".lower()
+    return any(
+        k in msg
+        for k in (
+            "10061",
+            "connection refused",
+            "积极拒绝",
+            "winerror 10061",
+            "urlopen error",
+            "remotely closed",
+            "connectionreset",
+            "timed out",
+            "timeout",
+        )
+    ) and (
+        "10061" in msg
+        or "connection refused" in msg
+        or "积极拒绝" in msg
+        or "urlopen error" in msg
+        or "connectionreset" in msg
+        or "timed out" in msg
+        or "timeout" in msg
+    )
+
+
+def api(method: str, path: str, body: dict | None = None, timeout: int = 60, retries: int = 5):
+    """Call 8092 API with backoff on transient connection errors (10061 during brief restarts)."""
     data = None
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return resp.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace")
+    last_exc: BaseException | None = None
+    attempts = max(1, int(retries or 1))
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
         try:
-            payload = json.loads(raw) if raw else {"detail": str(e)}
-        except Exception:
-            payload = {"detail": raw[:500] or str(e)}
-        return e.code, payload
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return resp.status, json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw) if raw else {"detail": str(e)}
+            except Exception:
+                payload = {"detail": raw[:500] or str(e)}
+            return e.code, payload
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts or not _is_conn_refused(exc):
+                raise
+            delay = min(12.0, 1.5 * attempt)
+            log(
+                f"[api-retry] {method} {path} attempt={attempt}/{attempts} "
+                f"err={type(exc).__name__}: {exc} sleep={delay:.1f}s"
+            )
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"api failed {method} {path}")
 
 
 def classify(logs: str) -> str:
@@ -131,9 +176,12 @@ def classify(logs: str) -> str:
 def wait_idle(timeout: int = 30) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout:
-        code, st = api("GET", "/api/status")
-        if code == 200 and not st.get("running"):
-            return True
+        try:
+            code, st = api("GET", "/api/status", timeout=15, retries=3)
+            if code == 200 and not st.get("running"):
+                return True
+        except Exception as exc:
+            log(f"[wait_idle] status not ready: {type(exc).__name__}: {exc}")
         time.sleep(1)
     return False
 
@@ -229,13 +277,15 @@ def run_one(cell: dict, round_i: int) -> dict:
                 break
             time.sleep(4)
         logs = snapshot_logs(500)
-        # 18r17: NO redaction — full plaintext logs for diagnosis (user request)
+        # 18r17/r19: NO redaction — full plaintext logs for diagnosis (user request)
         (OUT / f"{name}_r{round_i:02d}.log").write_text(logs, encoding="utf-8")
         if not rec["class"]:
             if rec["ok"]:
                 rec["class"] = "success"
             elif rec["pending_sso"] > 0:
                 rec["class"] = "pending_sso"
+            elif not (logs or "").strip() or logs.startswith("<log fetch fail"):
+                rec["class"] = "empty_log"
             else:
                 rec["class"] = classify(logs)
         # if success counter 0 but log shows sso acquired
@@ -264,7 +314,7 @@ def write_report(rows: list[dict]) -> None:
     for r in rows:
         by_cell[r["cell"]].append(r)
     lines = [
-        f"# Matrix 18r17 Report",
+        f"# Matrix 18r19 Report",
         f"",
         f"- generated: {datetime.now().isoformat(timespec='seconds')}",
         f"- rounds_per_register_cell: {ROUNDS}",
