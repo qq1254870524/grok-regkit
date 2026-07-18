@@ -6,8 +6,6 @@ from __future__ import annotations
 Fused from Git-creat7/grokRegister-cpa (MIT) into grok-regkit.
 
 Changelog:
-- 2026-07-18r10: consent JS chunk scan budget 10s / max 12 scripts / timeout 8s;
-  prioritize working cache; log elapsed; faster fail to authcode retry path.
 - 2026-07-18c: consent 快速路径不再默认死哈希 401b73e...；404 拉黑并清空
   _working_next_action_id；优先 HTML live action，其次上次真正成功的 action，
   硬编码仅作最后 fallback；Round0 无 live 候选时直接扫 JS chunks，去掉
@@ -183,9 +181,7 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
     """从 consent 页引用的 /_next/static/chunks/*.js 解析 createServerReference 的 action id。
 
     HTML 内嵌的 40 位 hex 经常是错误候选（会 404）；真实 allow consent 在 JS 里。
-    18r10: hard budget — max 12 scripts / 8s per GET / 10s wall — avoid post-success CPA stalls.
     """
-    t0 = time.time()
     found: list[str] = []
     seen: set[str] = set()
     priority: list[str] = []  # consent/oauth 相关 chunk 里的 id 优先
@@ -200,11 +196,6 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
         else:
             found.append(v)
 
-    # 0) working cache first (if any) so ordered list is immediately useful
-    cached = str(_working_next_action_id or "").strip().lower()
-    if cached and cached not in _blacklisted_next_action_ids:
-        _add(cached, prefer=True)
-
     srcs = _SCRIPT_SRC_RE.findall(html or "")
     # 优先扫可能含 consent 逻辑的 chunk；其余也扫但限数量
     scored: list[tuple[int, str]] = []
@@ -215,48 +206,29 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
             continue
         if any(k in low for k in ("consent", "oauth", "auth", "login", "sign")):
             score += 5
-        if any(k in low for k in ("app", "page", "main", "layout")):
-            score += 1
         scored.append((score, src))
     scored.sort(key=lambda x: (-x[0], x[1]))
 
     fetched = 0
-    max_fetch = 12
-    budget_s = 10.0
-    per_timeout = 8
-    strong_hits = 0
+    max_fetch = 40
     for score, src in scored:
         if fetched >= max_fetch:
             break
-        if (time.time() - t0) >= budget_s:
-            if log:
-                log(f"  [*] consent JS scan budget hit elapsed={time.time()-t0:.1f}s fetched={fetched}")
-            break
-        # if we already have strong allow-ish ids, stop early
-        if strong_hits >= 2 and priority:
-            break
         full = src if src.startswith("http") else urllib.parse.urljoin(base_url.rstrip("/") + "/", src.lstrip("/"))
         try:
-            resp = session.get(full, impersonate="chrome", timeout=per_timeout)
+            resp = session.get(full, impersonate="chrome", timeout=15)
             text = str(resp.text or "")
         except Exception:
             continue
         fetched += 1
-        low_text = text.lower()
-        prefer = score > 0 or ("consent" in low_text and "oauth" in low_text)
+        prefer = score > 0 or ("consent" in text.lower() and "oauth" in text.lower())
         # 含 allow + createServerReference 的 chunk 更优先
         if "createServerReference" in text or "callServer" in text:
             prefer = True
-        if "allow" in low_text and ("consent" in low_text or "oauth" in low_text):
-            prefer = True
-            strong_hits += 1
         for m in _CREATE_SERVER_REF_RE.finditer(text):
             _add(m.group(1), prefer=prefer)
         for m in _CALL_SERVER_RE.finditer(text):
             _add(m.group(1), prefer=prefer)
-        # early exit once we have usable preferred ids
-        if prefer and priority and strong_hits >= 1 and len(priority) >= 1 and fetched >= 3:
-            break
 
     # HTML 弱信号放后
     for aid in _extract_next_action_ids(html, include_hardcoded_fallback=False):
@@ -266,11 +238,9 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
     # 过滤已拉黑的死哈希，避免扫 JS 后仍先打 404
     ordered = [x for x in ordered if x not in _blacklisted_next_action_ids]
     if log:
-        log(
-            f"  [*] 从 JS chunks 解析 Next-Action {len(ordered)} 个"
-            f"（扫 {fetched} 个脚本, elapsed={time.time()-t0:.1f}s, strong={strong_hits}）"
-        )
+        log(f"  [*] 从 JS chunks 解析 Next-Action {len(ordered)} 个（扫 {fetched} 个脚本）")
     return ordered
+
 
 def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
     """SSO cookie → token dict (access/refresh/expires_in)。
@@ -422,7 +392,7 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                 else:
                     break
 
-        for action_id in action_ids[:5]:
+        for action_id in action_ids[:8]:
             if action_id in tried:
                 continue
             if action_id in _blacklisted_next_action_ids:
@@ -440,7 +410,7 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                         "Next-Action": action_id,
                     },
                     impersonate="chrome",
-                    timeout=12,
+                    timeout=15,
                     allow_redirects=True,
                 )
             except Exception as e:

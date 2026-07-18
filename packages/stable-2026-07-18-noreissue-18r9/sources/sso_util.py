@@ -1,8 +1,4 @@
-"""Normalize xAI SSO cookies (set-cookie chain wrapper → session JWT).
-
-Changelog:
-- 2026-07-18r10: staged materialize logs + tighter per-URL waits.
-"""
+"""Normalize xAI SSO cookies (set-cookie chain wrapper → session JWT)."""
 from __future__ import annotations
 
 import base64
@@ -78,8 +74,6 @@ def materialize_sso_via_browser(page: Any, wrapper_or_sso: str, log=None, timeou
         return token
 
     success = unwrap_success_url(token) if is_wrapper_sso(token) else ""
-    t0 = time.time()
-    log(f"[sso] stage=inject wrapper_len={len(token)} has_success_url={bool(success)}")
     # inject cookie then open success or accounts
     try:
         page.run_js(
@@ -92,9 +86,8 @@ return true;
             """,
             token,
         )
-        log(f"[sso] stage=inject_ok elapsed={time.time()-t0:.1f}s")
     except Exception as e:
-        log(f"[sso] stage=inject_fail err={e}")
+        log(f"[sso] inject cookie: {e}")
 
     urls = []
     if success:
@@ -103,22 +96,20 @@ return true;
     urls.append("https://grok.com/")
 
     deadline = time.time() + timeout
-    for idx, url in enumerate(urls):
+    for url in urls:
         if time.time() >= deadline:
-            log(f"[sso] stage=deadline before url#{idx} elapsed={time.time()-t0:.1f}s")
             break
-        log(f"[sso] stage=navigate#{idx} url={url[:80]} elapsed={time.time()-t0:.1f}s")
         try:
             try:
-                page.get(url, timeout=min(20, max(8, int(deadline - time.time()))))
+                page.get(url, timeout=30)
             except TypeError:
                 page.get(url)
-            time.sleep(0.8)
+            time.sleep(1.2)
         except Exception as e:
-            log(f"[sso] stage=navigate_fail#{idx} url={url[:60]} err={e}")
+            log(f"[sso] navigate {url[:60]}: {e}")
             continue
         # poll cookies
-        for poll_i in range(8):
+        for _ in range(12):
             if time.time() >= deadline:
                 break
             try:
@@ -133,13 +124,9 @@ return true;
                     name = str(getattr(item, "name", "") or "")
                     value = str(getattr(item, "value", "") or "")
                 if name == "sso" and value and is_session_sso(value):
-                    log(
-                        f"[sso] stage=session_ok len={len(value)} via=nav#{idx} "
-                        f"poll={poll_i} elapsed={time.time()-t0:.1f}s"
-                    )
+                    log(f"[sso] materialized session len={len(value)}")
                     return value
-            time.sleep(0.4)
-        log(f"[sso] stage=nav_done#{idx} no_session_yet elapsed={time.time()-t0:.1f}s")
+            time.sleep(0.5)
 
     # last try: read any sso even if still wrapper
     try:

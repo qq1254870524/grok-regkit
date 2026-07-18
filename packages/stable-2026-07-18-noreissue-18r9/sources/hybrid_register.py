@@ -52,8 +52,6 @@ Changelog:
               AOL dual-code prefers Inbox; VerifyEmail can retry alt codes; shorter mint timeouts.
               Main path still register→immediate SSO→pool; UI last resort and never re-sends code.
 2026-07-18r8: CreateEmail freeze after first net hit; no hybrid re-click when browser_sent;
-2026-07-18r10: dual-code true-send lock (hook short-circuit) + CPA consent scan budget + staged SSO materialize logs;
-              CreateEmail status logs actual_send/blocked_dup; main path still register→immediate SSO→pool.
 2026-07-18r9: weak castle early-abort (no 32s 744 spam); mint windows 6s/4s; reuse CreateEmail IBYIll for SignUp SSO path; keep freeze-reclick dual-code fix.
               weak castle rejected; mint timeout 18s + retry once; alt-code UI stuck recovery.
               Main path still register→immediate SSO→pool; UI last; pending only after real success remove.
@@ -602,9 +600,8 @@ def register_one_hybrid(
             st = browser.create_email_status_via_browser()
             log(
                 f"[hybrid] CreateEmail UI click status={st.get('status')} seen={st.get('seen')} "
-                f"ok={st.get('ok')} net_hits={st.get('net_hits')} raw={st.get('net_hits_raw')} "
-                f"actual_send={st.get('actual_send_count')} blocked_dup={st.get('blocked_duplicate_count')} "
-                f"sent={st.get('sent')} reason={st.get('reason')} castle_len={len(castle)}"
+                f"ok={st.get('ok')} net_hits={st.get('net_hits')} sent={st.get('sent')} "
+                f"reason={st.get('reason')} castle_len={len(castle)}"
             )
             # Accept browser_sent only with strong evidence (2xx / ok / code-step).
             # seen_status_unknown alone previously caused 180s empty mail poll.
@@ -1498,51 +1495,30 @@ def register_one_hybrid(
                 )
 
                 if is_wrapper_sso(sso) or not is_session_sso(sso):
-                    t_mat = time.time()
-                    log(
-                        f"[hybrid] sso materialize stage=start wrapper_len={len(sso)} "
-                        f"is_wrapper={is_wrapper_sso(sso)} is_session={is_session_sso(sso)}"
-                    )
+                    log(f"[hybrid] sso looks like set-cookie wrapper len={len(sso)}; materialize…")
                     from grok_register_ttk import _get_page
 
                     page = _get_page()
                     sess_sso = ""
                     if page is not None:
-                        log("[hybrid] sso materialize stage=browser_nav timeout=28")
                         sess_sso = materialize_sso_via_browser(
-                            page, sso, log=log, timeout=28
-                        )
-                        log(
-                            f"[hybrid] sso materialize stage=browser_done "
-                            f"len={len(sess_sso or '')} ok={bool(sess_sso and is_session_sso(sess_sso))} "
-                            f"elapsed={time.time()-t_mat:.1f}s"
+                            page, sso, log=log, timeout=40
                         )
                     if not sess_sso or not is_session_sso(sess_sso):
-                        log("[hybrid] sso materialize stage=http_fallback")
                         jar = dict(browser.export_cookies() or {})
                         sess_sso = materialize_sso_via_http(
                             sso,
                             proxy=(proxy or "").strip(),
                             extra_cookies=jar,
                             log=log,
-                            timeout=18,
                         ) or sess_sso
-                        log(
-                            f"[hybrid] sso materialize stage=http_done "
-                            f"len={len(sess_sso or '')} ok={bool(sess_sso and is_session_sso(sess_sso))} "
-                            f"elapsed={time.time()-t_mat:.1f}s"
-                        )
                     if sess_sso and is_session_sso(sess_sso):
-                        log(
-                            f"[hybrid] session sso ready len={len(sess_sso)} "
-                            f"elapsed={time.time()-t_mat:.1f}s"
-                        )
+                        log(f"[hybrid] session sso ready len={len(sess_sso)}")
                         sso = sess_sso
                     else:
                         log(
                             f"[hybrid] WARN still wrapper/non-session sso len={len(sso)}; "
-                            f"CPA mint may fail until browser path works "
-                            f"elapsed={time.time()-t_mat:.1f}s"
+                            f"CPA mint may fail until browser path works"
                         )
             except Exception as e:
                 log(f"[hybrid] sso materialize: {e}")

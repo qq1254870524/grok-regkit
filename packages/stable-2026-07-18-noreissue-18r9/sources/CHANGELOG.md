@@ -1,15 +1,5 @@
 # CHANGELOG
 
-## 2026-07-18r10 / restore: stable-2026-07-18-matrix-18r10
-
-- dual-code 真发送锁：CreateEmail fetch/XHR 首次后 short-circuit；actual_send/blocked_dup 可观测；UI click send-lock。
-- CPA consent 加速：JS 扫描 10s/max12/timeout8s；cache-first。
-- SSO materialize 分段日志：stage=start/browser_nav/browser_done。
-- 主路径不变：注册 → 即时 SSO → 入池；pending 仅兜底。
-- 实跑 hybrid + SOCKS5 + AOL count=1：success=1 pending=0；wrapper 2477 → session 152；immediate SSO+pool ≈148s。
-- 补齐 packages/ 入仓：18r9 完整 sources（此前只有 RESTORE md）+ 18r10 新 package。
-- 不覆盖旧 restore tags。
-
 ## 2026-07-18r9 / restore: stable-2026-07-18-noreissue-18r9
 
 - hybrid 主路径保持：CreateEmail → VerifyEmail → protocol SignUp → 即时 materialize SSO → 入池；pending 仅兜底。

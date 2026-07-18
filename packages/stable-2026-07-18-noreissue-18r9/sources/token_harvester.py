@@ -10,8 +10,6 @@
 
 2026-07-18r7: 协议已 VerifyEmail 后禁止 open_signup/使用邮箱注册/email re-submit（根因双码）；
               prepare_profile 只确认验证码/等待 profile；UI fallback 有 code 时默认 block CreateEmail。
-2026-07-18r10: CreateEmail true-send lock (fetch/XHR short-circuit after first request);
-              status exposes actual_send_count/net_hits_raw; click path disables controls after fire.
 2026-07-18r9: mint_fresh_castle early-abort on repeated weak ~744 injected tokens; cap redrive/log flood; prefer reuse CreateEmail IBYIll over 32s empty mint.
 2026-07-18r8: CreateEmail net_hits>=1+2xx 后禁止二次 click；prepare ready 必须 given/pw/profile，
               仅 cf+code 不算 ready；UI stuck-on-code 可试 alt code；弱 castle(len<1000) 不当 fresh。
@@ -78,45 +76,6 @@ class BrowserTokenSession:
   window.__hybrid_next_action = window.__hybrid_next_action || '';
   window.__hybrid_create_email_ok = false;
   window.__hybrid_create_email_status = 0;
-  window.__hybrid_create_email_seen = window.__hybrid_create_email_seen || false;
-  window.__hybrid_create_email_inflight = false;
-  window.__hybrid_create_email_sent_once = false;
-  window.__hybrid_create_email_actual_sends = 0;
-  window.__hybrid_create_email_blocked = 0;
-  function isCreateEmailUrl(u) {
-    try { return String(u || '').includes('CreateEmailValidationCode'); } catch (e) { return false; }
-  }
-  function markCreateEmailRequest(url) {
-    if (!isCreateEmailUrl(url)) return 'pass';
-    if (window.__hybrid_create_email_sent_once || window.__hybrid_create_email_inflight) {
-      window.__hybrid_create_email_blocked = Number(window.__hybrid_create_email_blocked || 0) + 1;
-      return 'block';
-    }
-    window.__hybrid_create_email_inflight = true;
-    window.__hybrid_create_email_seen = true;
-    window.__hybrid_create_email_actual_sends = Number(window.__hybrid_create_email_actual_sends || 0) + 1;
-    return 'allow';
-  }
-  function markCreateEmailResponse(url, status, ok) {
-    if (!isCreateEmailUrl(url)) return;
-    window.__hybrid_create_email_status = Number(status || 0);
-    window.__hybrid_create_email_ok = !!ok;
-    window.__hybrid_create_email_inflight = false;
-    if (ok || (Number(status) >= 200 && Number(status) < 300)) {
-      window.__hybrid_create_email_sent_once = true;
-    }
-  }
-  function fakeCreateEmailResponse() {
-    try {
-      return new Response(JSON.stringify({ok:true, blocked_duplicate:true}), {
-        status: 200,
-        statusText: 'OK',
-        headers: {'Content-Type': 'application/json'}
-      });
-    } catch (e) {
-      return { ok: true, status: 200, json: async () => ({ok:true, blocked_duplicate:true}), text: async () => '{"ok":true}' };
-    }
-  }
   function pushNextAction(v) {
     try {
       const s = String(v || '').trim();
@@ -164,7 +123,7 @@ class BrowserTokenSession:
       else return;
       const u = String(url||'');
       window.__hybrid_net.push({url: u, len: s.length});
-      if (isCreateEmailUrl(u)) {
+      if (u.includes('CreateEmailValidationCode')) {
         window.__hybrid_create_email_seen = true;
       }
       if (s.includes('castleRequestToken')) {
@@ -197,12 +156,6 @@ class BrowserTokenSession:
     let url = '';
     try {
       url = (typeof input === 'string') ? input : (input && input.url) || '';
-      const gate = markCreateEmailRequest(url);
-      if (gate === 'block') {
-        try { captureBody(init && init.body, url); } catch (e) {}
-        markCreateEmailResponse(url, 200, true);
-        return fakeCreateEmailResponse();
-      }
       captureBody(init && init.body, url);
       captureHeaders(init && init.headers);
       if (input && typeof input === 'object') {
@@ -211,8 +164,9 @@ class BrowserTokenSession:
     } catch (e) {}
     const resp = await ofetch.apply(this, arguments);
     try {
-      if (isCreateEmailUrl(url)) {
-        markCreateEmailResponse(url, resp.status || 0, !!(resp.ok || (resp.status >= 200 && resp.status < 300)));
+      if (String(url).includes('CreateEmailValidationCode')) {
+        window.__hybrid_create_email_status = resp.status || 0;
+        window.__hybrid_create_email_ok = !!(resp.ok || (resp.status >= 200 && resp.status < 300));
       }
     } catch (e) {}
     return resp;
@@ -302,11 +256,6 @@ return {
                         "castle_len": int(raw.get("castle_len") or 0),
                         "net_hits": int(raw.get("net_hits") or 0),
                         "net_hits_raw": int(raw.get("net_hits_raw") or raw.get("net_hits") or 0),
-                        "net_hits_unique": int(raw.get("net_hits_unique") or raw.get("net_hits") or 0),
-                        "actual_send_count": int(raw.get("actual_send_count") or 0),
-                        "blocked_duplicate_count": int(raw.get("blocked_duplicate_count") or 0),
-                        "inflight": bool(raw.get("inflight")),
-                        "sent_once": bool(raw.get("sent_once")),
                         "net_urls": list(raw.get("net_urls") or []),
                     }
                 )
@@ -394,29 +343,6 @@ return {hasCode: !!hasCode, bodyCode: !!bodyCode, busy: busy, url: location.href
         email = str(email or "").strip()
         if not email:
             return "empty-email"
-
-        # 18r10: never dual-submit if network lock already fired CreateEmail.
-        try:
-            gate = page.run_js(
-                """
-return {
-  inflight: !!window.__hybrid_create_email_inflight,
-  sent_once: !!window.__hybrid_create_email_sent_once,
-  actual: Number(window.__hybrid_create_email_actual_sends||0),
-  seen: !!window.__hybrid_create_email_seen,
-  status: Number(window.__hybrid_create_email_status||0)
-};
-"""
-            )
-            if isinstance(gate, dict) and (
-                gate.get("sent_once")
-                or int(gate.get("actual") or 0) >= 1
-                or (gate.get("inflight") and int(gate.get("status") or 0) in (0, 200))
-            ):
-                self._lg(f"[*] UI CreateEmail click skipped (send-lock) gate={gate}")
-                return f"skip:send-lock:actual={gate.get('actual')}:status={gate.get('status')}"
-        except Exception as gate_exc:
-            self._lg(f"[Debug] CreateEmail send-lock probe: {gate_exc}")
 
         # Ensure we are on email-input step (not method chooser / CF / blank SPA)
         def _signup_email_state():
@@ -649,23 +575,6 @@ if (best && bestScore > 0) {
     }
   } catch (e) { clickHow = 'fallback-fail'; }
 }
-// 18r10: after one submit attempt, lock controls to reduce dual-submit races.
-try {
-  if (filledOk && clickHow !== 'none' && clickHow !== 'click-fail' && clickHow !== 'fallback-fail') {
-    window.__hybrid_create_email_ui_locked = true;
-    const lockNodes = Array.from(document.querySelectorAll('input, textarea, button, [role="button"]'));
-    for (const n of lockNodes) {
-      try {
-        if (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA') {
-          n.setAttribute('readonly', 'readonly');
-        } else {
-          n.setAttribute('disabled', 'disabled');
-          n.setAttribute('aria-disabled', 'true');
-        }
-      } catch (eLock) {}
-    }
-  }
-} catch (eLockAll) {}
 return {
   ok: filledOk && clickHow !== 'none' && clickHow !== 'click-fail' && clickHow !== 'fallback-fail',
   reason: filledOk ? ('filled+' + clickHow) : ('fill-mismatch+' + clickHow),
@@ -677,8 +586,7 @@ return {
   bestText: best ? ((best.innerText || best.textContent || best.value || '') + '').replace(/\\s+/g,' ').trim().slice(0,80) : '',
   ranked: ranked.slice(0, 8),
   url: location.href,
-  candidates: candidates.filter(c => c.visible).slice(0, 12),
-  ui_locked: !!window.__hybrid_create_email_ui_locked
+  candidates: candidates.filter(c => c.visible).slice(0, 12)
 };
                 """,
                 email,
@@ -895,10 +803,6 @@ window.__hybrid_net=[];
 window.__hybrid_create_email_ok=false;
 window.__hybrid_create_email_status=0;
 window.__hybrid_create_email_seen=false;
-window.__hybrid_create_email_inflight=false;
-window.__hybrid_create_email_sent_once=false;
-window.__hybrid_create_email_actual_sends=0;
-window.__hybrid_create_email_blocked=0;
 true;
 """
             )
@@ -939,9 +843,7 @@ true;
                 self._lg(
                     f"[*] CreateEmail freeze-reclick reason={st.get('reason')} "
                     f"status={status_n} seen={st.get('seen')} net_hits={net_hits} "
-                    f"raw={st.get('net_hits_raw')} actual_send={st.get('actual_send_count')} "
-                    f"blocked_dup={st.get('blocked_duplicate_count')} "
-                    f"sent={int(bool(st.get('sent')))} "
+                    f"raw={st.get('net_hits_raw')} sent={int(bool(st.get('sent')))} "
                     f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
                     f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
                 )
