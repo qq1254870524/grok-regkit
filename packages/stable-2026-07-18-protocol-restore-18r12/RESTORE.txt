@@ -1,0 +1,7 @@
+﻿Restore this package to working tree:
+  copy packages\stable-2026-07-18-protocol-restore-18r12\sources\hybrid_register.py .
+  copy packages\stable-2026-07-18-protocol-restore-18r12\sources\browser\token_harvester.py browser\
+  copy packages\stable-2026-07-18-protocol-restore-18r12\sources\pending_sso_recovery.py .
+  copy packages\stable-2026-07-18-protocol-restore-18r12\sources\web\server.py web\
+  copy packages\stable-2026-07-18-protocol-restore-18r12\sources\protocol\grpc_client.py protocol\
+Then restart only 8092 (python -B -m web.server).
