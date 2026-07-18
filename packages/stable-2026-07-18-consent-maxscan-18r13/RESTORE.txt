@@ -1,0 +1,7 @@
+﻿还原步骤（18r13 consent max-scan）
+
+1. 备份当前 C:\Users\zhang\grok-regkit\sso_to_auth_json.py
+2. 复制 packages/stable-2026-07-18-consent-maxscan-18r13/sources/sso_to_auth_json.py 覆盖权威源码
+3. 复制 sources/tests/test_18r11_regressions.py 到 tests/
+4. 仅重启 8092 web（不要杀 8010/8080/8317/8318）
+5. 观察 CPA 日志应出现：consent JS max-scan start limit=40，不应再出现 expand scan / fast phase
