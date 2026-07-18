@@ -6,8 +6,6 @@ from __future__ import annotations
 Fused from Git-creat7/grokRegister-cpa (MIT) into grok-regkit.
 
 Changelog:
-- 2026-07-19r20: consent 只扫到 soft-nav 单候选时强制扩扫并持久化 working Next-Action；
-  失败轮次优先注入磁盘 working id；CreateEmail 去重改共享 Promise 消 incomplete envelope。
 - 2026-07-19r19: consent 非 allow(无 code) 拉黑该 Next-Action 并继续试更多候选；
   深扫 JS chunks 不因 1 个 strong_id 早停；解析 redirect/query 中的 code；
   识别 RSC soft-nav 非 allow 响应，避免永远卡在 0071fd1191ff 类死 action。
@@ -72,55 +70,6 @@ NEXT_ACTION_ID = "401b73e22a5e68737d0037e1aa449fef82cd1b35fb"
 _working_next_action_id = ""
 # 进程内拉黑：404 / server action not found 的 action 不再优先重试。
 _blacklisted_next_action_ids: set[str] = set()
-
-# 跨进程/跨账号：上次真正返回 authorization code 的 consent Next-Action（写磁盘）。
-_CONSENT_WORKING_PATH = Path(__file__).resolve().with_name("consent_working_next_action.txt")
-
-
-def _consent_working_path() -> Path:
-    return _CONSENT_WORKING_PATH
-
-
-def _load_working_next_action() -> str:
-    global _working_next_action_id
-    cur = str(_working_next_action_id or "").strip().lower()
-    if cur and len(cur) >= 40 and cur not in _blacklisted_next_action_ids:
-        return cur
-    try:
-        p = _consent_working_path()
-        if p.is_file():
-            raw = p.read_text(encoding="utf-8", errors="ignore").strip().lower()
-            m = re.search(r"([0-9a-f]{40,44})", raw)
-            if m:
-                aid = m.group(1)
-                if aid not in _blacklisted_next_action_ids:
-                    _working_next_action_id = aid
-                    return aid
-    except Exception:
-        pass
-    return str(_working_next_action_id or "").strip().lower()
-
-
-def _save_working_next_action(action_id: str) -> None:
-    global _working_next_action_id
-    aid = str(action_id or "").strip().lower()
-    if len(aid) < 40:
-        return
-    _working_next_action_id = aid
-    try:
-        p = _consent_working_path()
-        p.write_text(aid + "\n", encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _prepend_unique(ids: list[str], action_id: str) -> list[str]:
-    aid = str(action_id or "").strip().lower()
-    if len(aid) < 40 or aid in _blacklisted_next_action_ids:
-        return ids
-    out = [aid] + [x for x in ids if x != aid]
-    return out
-
 _NEXT_ACTION_RE = re.compile(
     r'(?:\$ACTION_ID_|next-action["\']?\s*[:=]\s*["\']|["\'])([0-9a-f]{40,44})["\']',
     re.I,
@@ -375,65 +324,9 @@ def _discover_action_ids_from_js(session, html: str, base_url: str = "https://ac
 
     for aid in _extract_next_action_ids(html, include_hardcoded_fallback=False):
         _add(aid, prefer=False)
-
-    # 18r20: only soft-nav / single candidate is the live failure mode.
-    # Force an extended pass with no early-stop thresholds when under-discovered.
-    if (len(priority) + len(found)) < 2:
-        if log:
-            log(
-                f"  [*] consent JS under-discovered ids={len(priority)+len(found)}; "
-                f"extended scan limit=80 budget=45s"
-            )
-        # clear early-stop by raising thresholds via a second scan helper
-        def _scan_extended() -> None:
-            nonlocal fetched, strong_ids
-            # temporarily disable early break conditions by scanning remaining only
-            ext_limit = 80
-            ext_budget = 45.0
-            for score, _pos, src in scored:
-                if fetched >= ext_limit or (time.time() - t0) >= ext_budget:
-                    break
-                full = src if src.startswith("http") else urllib.parse.urljoin(base_url.rstrip("/") + "/", src.lstrip("/"))
-                if full in fetched_urls:
-                    continue
-                fetched_urls.add(full)
-                try:
-                    resp = session.get(full, impersonate="chrome", timeout=per_timeout)
-                    text = str(resp.text or "")
-                except Exception:
-                    continue
-                fetched += 1
-                low_text = text.lower()
-                context_prefer = score > 0 or ("consent" in low_text and "oauth" in low_text)
-                if "allow" in low_text and ("consent" in low_text or "oauth" in low_text):
-                    context_prefer = True
-                for regex in (_CREATE_SERVER_REF_RE, _CALL_SERVER_RE):
-                    for match in regex.finditer(text):
-                        lo = max(0, match.start() - 240)
-                        hi = min(len(text), match.end() + 240)
-                        context = text[lo:hi].lower()
-                        prefer = context_prefer or any(
-                            k in context
-                            for k in ("consent", "allow", "oauth2/consent", '"action":"allow"')
-                        )
-                        if _add(match.group(1), prefer=prefer):
-                            if prefer:
-                                strong_ids += 1
-        _scan_extended()
-        for aid in _extract_next_action_ids(html, include_hardcoded_fallback=False):
-            _add(aid, prefer=False)
-
     ordered = priority + [x for x in found if x not in priority]
-    # Prefer last known-good working action even if not in this HTML/JS pass.
-    cached = _load_working_next_action()
-    if cached:
-        ordered = _prepend_unique(ordered, cached)
     if log:
-        log(
-            f"  [*] 从 JS chunks 解析 Next-Action {len(ordered)} 个"
-            f"（max扫 {fetched}/{total_limit} 个脚本, elapsed={time.time()-t0:.1f}s, "
-            f"strong_ids={strong_ids}, working={cached[:12]+'...' if cached else '-'}）"
-        )
+        log(f"  [*] 从 JS chunks 解析 Next-Action {len(ordered)} 个（max扫 {fetched}/{total_limit} 个脚本, elapsed={time.time()-t0:.1f}s, strong_ids={strong_ids}）")
     return ordered
 
 def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
@@ -517,14 +410,15 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                 if action_id not in action_ids:
                     action_ids.append(action_id)
             # 2) 上次真正成功的 working id（非硬编码死哈希）
-            cached = _load_working_next_action()
+            cached = str(_working_next_action_id or "").strip().lower()
             if (
                 cached
                 and cached not in _blacklisted_next_action_ids
                 and cached != str(NEXT_ACTION_ID or "").strip().lower()
+                and cached not in action_ids
             ):
-                # 成功缓存放最前：已知可工作（磁盘+内存）
-                action_ids = _prepend_unique(action_ids, cached)
+                # 成功缓存放最前：已知可工作
+                action_ids.insert(0, cached)
             log(
                 f"  [*] consent 快速路径 Next-Action {len(action_ids)} 个"
                 f"（HTML/缓存；跳过 JS chunks；已拉黑 {len(_blacklisted_next_action_ids)}）"
@@ -544,9 +438,6 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
         log("  ❌ 未解析到 live Next-Action；拒绝提交已知失效 hardcoded fallback")
         return None
     else:
-        cached0 = _load_working_next_action()
-        if cached0:
-            action_ids = _prepend_unique(action_ids, cached0)
         log(f"  [*] consent Next-Action 候选 {len(action_ids)} 个（首个 {action_ids[0][:12]}...）")
 
     # 2) 提交 consent（allow），拿 authorization code
@@ -582,10 +473,6 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                 a for a in action_ids
                 if a not in tried and a not in _blacklisted_next_action_ids
             ]
-            # 18r20: inject disk working even when JS only rediscovers soft-nav
-            cached = _load_working_next_action()
-            if cached and cached not in tried and cached not in _blacklisted_next_action_ids:
-                action_ids = _prepend_unique(action_ids, cached)
             if not action_ids:
                 log("  ❌ JS 扩展扫描仍无新的 live Next-Action；停止 consent 提交")
                 break
@@ -637,7 +524,7 @@ def sso_to_token(sso_cookie: str, proxy: str = "", log=print) -> dict | None:
                 final_loc = ""
             code = _parse_consent_code(body + "\n" + final_loc)
             if code:
-                _save_working_next_action(action_id)
+                _working_next_action_id = action_id
                 log(f"  [*] Next-Action {action_id[:12]}... 返回 authorization code len={len(code)}")
                 break
             # 200 但无 code：拉黑，避免每轮卡在 0071fd1191ff soft-nav

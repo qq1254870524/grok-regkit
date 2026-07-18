@@ -1,3 +1,17 @@
+﻿# CHANGELOG
+
+## 2026-07-19r20 / restore: stable-2026-07-19-consent-working-18r20
+
+- **consent 失败（仅 1 个 Next-Action soft-nav）**：工作 Next-Action 持久化到 `consent_working_next_action.txt`（404454…），每轮 prepend；候选不足时扩展 JS 扫描。
+- **incomplete envelope / 注册按钮 AbortError**：`token_harvester` CreateEmail 重复请求 share-first 首个 Promise，不再 reject 半截 envelope。
+- **SignUp 200 sso_len=0**：`hybrid_register` 在协议候选失败后 remint+再试一次（18r20-retry-first-after-nosso）。
+- 实跑：matrix hybrid×direct×outlook r4/r6 success；CPA `mint_method=authcode_pkce` + working 404454…；probe SUCCESS ~3.9s。
+- 不覆盖旧 packages（另存 `consent-envelope-18r19` / `consent-working-18r20`）。
+
+## 2026-07-19r19 / restore: stable-2026-07-19-consent-envelope-18r19
+
+- 邮件轮询 180s + matrix 10061 API retry；consent/envelope 初版（后续 18r20 加固 working action 持久化）。
+
 ## 2026-07-18 18r11 — CPA consent/device-code 与 pending SSO 修复
 
 - consent Next-Action 改为两阶段 JS chunk 扫描：快速 12 个，无有效 action 时扩展至 40 个。
@@ -69,4 +83,5 @@
 
 ### Package
 - Local package dir: `C:\Users\zhang\Desktop\codex_aidate_tmp\packages\stable-2026-07-18-matrix-uifallback`
+
 

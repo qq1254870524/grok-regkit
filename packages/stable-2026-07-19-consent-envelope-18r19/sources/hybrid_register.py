@@ -3,12 +3,8 @@
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
-- 2026-07-19r19: 修 code_timeout 假阳性：actual_send>=1 时禁止 protocol-rescue，故邮件轮询必须用满 180s（不再 45s short window）；
-  short window 仅保留给「可协议救援」的虚假 browser_sent；日志明文打印真实 poll_timeout。
-  主路径不变：注册→即时SSO→入池；pending 仅兜底。矩阵 10061 重试见 tools/matrix_cross_run.py。
 - 2026-07-19r18: CreateEmail 并发双发锁（first-send-only）防 dual-code/验证码过多；保留 r17 switch cap / 明文日志 / rate-limit 换邮箱。
 - 2026-07-19r17: UI fallback 卡验证码页快速 abort；无信+限流文案立即换邮箱；UI timeout 协议已验证时 40s；
-# 2026-07-19r20: SignUp 200/sso_len=0 时多候选+强制 remint 再试，避免过早 UI stuck burn
   code_timeout 明文日志；主路径仍 注册→即时SSO→入池；pending 仅兜底。
 - 2026-07-18r16: 检测 CreateEmail「验证码过多」于 protocol strings + browser UI 正文；
   限流后 burn_mailbox_to_pending 并从池删除，同一 register_one 内立即换下一邮箱(最多8次)；
@@ -964,23 +960,8 @@ def register_one_hybrid(
             code = ""
             code_exc = None
             try:
-                # 18r19: short window ONLY when protocol-rescue is still allowed.
-                # After dual-send lock (actual_send/net_hits>=1), rescue is blocked — must poll full 180s
-                # or code_timeout false-positives dominate (Outlook Graph often >45s).
-                can_protocol_rescue = (
-                    bool(browser_sent)
-                    and (not protocol_sent)
-                    and int(actual_send or 0) < 1
-                    and int(net_hits_n or 0) < 1
-                )
-                use_short = bool(can_protocol_rescue)
-                poll_timeout = 45 if use_short else 180
-                log(
-                    f"[hybrid] mail poll window email={email} poll_timeout={poll_timeout}s "
-                    f"use_short={int(use_short)} can_protocol_rescue={int(can_protocol_rescue)} "
-                    f"browser_sent={browser_sent} protocol_sent={protocol_sent} "
-                    f"actual_send={actual_send} net_hits={net_hits_n}"
-                )
+                # 18r14: shorter first window when browser claimed send so protocol rescue can run.
+                use_short = bool(browser_sent and not protocol_sent)
                 try:
                     code = get_oai_code(
                         mail_token,
@@ -988,7 +969,7 @@ def register_one_hybrid(
                         log_callback=log,
                         cancel_callback=stop,
                         since_ts=send_ts,
-                        timeout=poll_timeout,
+                        timeout=45 if use_short else 180,
                     )
                 except TypeError:
                     code = get_oai_code(
@@ -1659,45 +1640,6 @@ def register_one_hybrid(
                             break
                 except Exception as prot_live_exc:
                     log(f"[hybrid] protocol live re-scrape block error: {prot_live_exc}")
-
-            # 18r20-retry-first-after-nosso: 200 RSC shell often intermittent; remint + retry best action once
-            if (not sso) and (not protocol_network_dead) and candidates:
-                try:
-                    act0 = candidates[0]
-                    log(
-                        f"[hybrid] 18r20 SignUp no-sso retry: remint castle + retry action={act0[:20]}..."
-                    )
-                    castle_retry = _mint_castle_for_try(99)
-                    if not castle_retry or len(castle_retry) < 1000:
-                        castle_retry = castle2 or ''
-                    # prefer CreateEmail long castle if remint weak
-                    try:
-                        oldc = browser.read_captured_castle() or ""
-                        if oldc.startswith("IBYIll") and len(oldc) >= 1000 and (
-                            not castle_retry or len(castle_retry) < 1000 or not str(castle_retry).startswith("IBYIll")
-                        ):
-                            castle_retry = oldc
-                            log(f"[hybrid] 18r20 reuse CreateEmail castle len={len(oldc)}")
-                    except Exception:
-                        pass
-                    t_try = time.time()
-                    r3 = _do_signup(act0, castle_retry or castle2)
-                    sso = _extract_sso(r3)
-                    body_txt = str(r3.get("text") or "")
-                    log(
-                        f"[hybrid] 18r20 no-sso retry status={r3.get('status')} sso_len={len(sso)} "
-                        f"elapsed={time.time()-t_try:.1f}s body={body_txt[:160]!r}"
-                    )
-                    if not sso:
-                        _log_signup_diag(99, r3, path="protocol/curl-18r20-retry")
-                    if sso:
-                        try:
-                            save_next_action_to_capture(act0, log)
-                        except Exception:
-                            pass
-                except Exception as retry_exc:
-                    log(f"[hybrid] 18r20 no-sso retry fail: {retry_exc}")
-
 
             log(
                 f"[hybrid] sign-up final status={r3.get('status')} sso_len={len(sso)} "

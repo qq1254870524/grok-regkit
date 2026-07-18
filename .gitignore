@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -12,6 +12,7 @@ accounts_local/
 mail_credentials.txt
 *.txt
 !requirements.txt
+!consent_working_next_action.txt
 
 config.json
 config.local.json
@@ -52,3 +53,4 @@ outlook_token_cache.json
 outlook_accounts.txt
 aol_accounts.txt
 capture_out/
+
