@@ -1220,19 +1220,12 @@ def mint_with_browser(
     set_runtime_proxy(resolved or None)
     success = False
     try:
-        last_err: BaseException | None = None
-        sess = None
-        for attempt in range(1, 4):
-            try:
-                sess = request_device_code(proxy=resolved or None, log=log)
-                last_err = None
-                break
-            except BaseException as e:  # noqa: BLE001
-                last_err = e
-                log(f"request_device_code attempt {attempt}/3 failed: {e}")
-                _sleep(1.5 * attempt)
-        if sess is None:
-            raise last_err or RuntimeError("request_device_code failed")
+        # request_device_code owns classified retries; do not multiply them here.
+        try:
+            sess = request_device_code(proxy=resolved or None, log=log)
+        except BaseException as e:  # noqa: BLE001
+            log(f"request_device_code failed after internal retries: {type(e).__name__}: {e}")
+            raise
         log(
             f"device user_code={sess.user_code} expires_in={sess.expires_in} "
             f"proxy={proxy_log_label(resolved) or '(none)'}"

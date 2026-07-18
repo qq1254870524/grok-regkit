@@ -6,6 +6,7 @@ Endpoints from https://auth.x.ai/.well-known/openid-configuration
 from __future__ import annotations
 
 import json
+import random
 import ssl
 import time
 import urllib.error
@@ -36,6 +37,17 @@ def _proxy_handler(proxy: str | None = None) -> urllib.request.ProxyHandler | No
         return None
     return urllib.request.ProxyHandler({"http": p, "https": p})
 
+
+
+def _safe_proxy_label(proxy: str | None) -> str:
+    p = resolve_proxy(proxy)
+    if not p:
+        return "direct"
+    try:
+        u = urllib.parse.urlsplit(p)
+        return f"{u.scheme or 'proxy'}://{u.hostname or 'proxy'}{f':{u.port}' if u.port else ''}"
+    except Exception:
+        return "proxy"
 
 def _ssl_context() -> ssl.SSLContext | None:
     """Use certifi's CA bundle when available.
@@ -179,61 +191,62 @@ class OAuthDeviceError(RuntimeError):
 
 
 def request_device_code(
-    *,
-    client_id: str = CLIENT_ID,
-    scope: str = SCOPE,
-    timeout: float = 30.0,
-    proxy: str | None = None,
-    log: LogFn | None = None,
+    *, client_id: str = CLIENT_ID, scope: str = SCOPE, timeout: float = 30.0,
+    proxy: str | None = None, log: LogFn | None = None, network_attempts: int = 4,
+    allow_direct_fallback: bool = False,
 ) -> DeviceCodeSession:
-    """Request device code; back off on HTTP 429 / slow_down rate limits."""
+    """Request a device code with classified network retries."""
     log = log or _noop_log
-    status, body = 0, {}
-    for attempt in range(1, 6):
-        status, body = _post_form(
-            DEVICE_CODE_URL,
-            {"client_id": client_id, "scope": scope},
-            timeout=timeout,
-            proxy=proxy,
-            retries=1,
-            retry_sleep=1.0,
-        )
+    routes: list[str | None] = [proxy] + ([None] if proxy and allow_direct_fallback else [])
+    status: int = 0
+    body: dict[str, Any] | str = {}
+    last_exc: BaseException | None = None
+    rate_attempt = 0
+    for route_i, route in enumerate(routes, 1):
+        label = _safe_proxy_label(route)
+        for attempt in range(1, max(1, int(network_attempts)) + 1):
+            started = time.monotonic()
+            try:
+                status, body = _post_form(DEVICE_CODE_URL, {"client_id": client_id, "scope": scope}, timeout=timeout, proxy=route, retries=0)
+            except BaseException as exc:  # noqa: BLE001
+                last_exc = exc
+                transient = _is_transient_net_error(exc)
+                log(f"device-code request endpoint=auth.x.ai/oauth2/device/code route={label} attempt={attempt}/{network_attempts} elapsed={time.monotonic()-started:.2f}s error={type(exc).__name__} transient={transient}")
+                if not transient:
+                    raise OAuthDeviceError(f"device code network error ({type(exc).__name__}): {exc}") from exc
+                if attempt >= max(1, int(network_attempts)):
+                    break
+                time.sleep(min(1.0 * (2 ** (attempt - 1)) + random.uniform(0.05, 0.35), 8.0))
+                continue
+            log(f"device-code response endpoint=auth.x.ai/oauth2/device/code route={label} attempt={attempt}/{network_attempts} status={status} elapsed={time.monotonic()-started:.2f}s")
+            if status == 200 and isinstance(body, dict):
+                last_exc = None
+                break
+            err = str(body.get("error") or body.get("error_description") or "") if isinstance(body, dict) else ""
+            if status == 429 or "slow_down" in err.lower() or "rate" in err.lower():
+                rate_attempt += 1
+                if rate_attempt >= 5:
+                    raise OAuthDeviceError(f"device code rate limit persisted after {rate_attempt} attempts")
+                wait = min(15 * rate_attempt, 60)
+                log(f"device code rate-limited (HTTP {status}), sleep {wait}s then retry")
+                time.sleep(wait)
+                continue
+            raise OAuthDeviceError(f"device code request failed HTTP {status}: {body!r}")
         if status == 200 and isinstance(body, dict):
             break
-        # Rate limit from auth.x.ai when minting many accounts in a row
-        err = ""
-        if isinstance(body, dict):
-            err = str(body.get("error") or body.get("error_description") or "")
-        if status == 429 or "slow_down" in err.lower() or "rate" in err.lower():
-            wait = min(15 * attempt, 90)
-            log(f"device code rate-limited (HTTP {status}), sleep {wait}s then retry {attempt}/5")
-            time.sleep(wait)
-            continue
-        raise OAuthDeviceError(f"device code request failed HTTP {status}: {body!r}")
-    else:
-        raise OAuthDeviceError(f"device code request failed HTTP {status}: {body!r}")
+        if route_i < len(routes):
+            log("device-code proxy route exhausted; retry official OAuth endpoint via direct route")
     if status != 200 or not isinstance(body, dict):
+        if last_exc is not None:
+            raise OAuthDeviceError(f"device code network retries exhausted: {type(last_exc).__name__}: {last_exc}") from last_exc
         raise OAuthDeviceError(f"device code request failed HTTP {status}: {body!r}")
     device_code = str(body.get("device_code") or "").strip()
     user_code = str(body.get("user_code") or "").strip()
     if not device_code or not user_code:
-        raise OAuthDeviceError(f"device code response missing fields: {body}")
+        raise OAuthDeviceError("device code response missing required fields")
     vuri = str(body.get("verification_uri") or "https://accounts.x.ai/oauth2/device").strip()
-    vcomplete = str(
-        body.get("verification_uri_complete") or f"{vuri}?user_code={user_code}"
-    ).strip()
-    expires_in = int(body.get("expires_in") or 1800)
-    interval = max(int(body.get("interval") or 5), 1)
-    return DeviceCodeSession(
-        device_code=device_code,
-        user_code=user_code,
-        verification_uri=vuri,
-        verification_uri_complete=vcomplete,
-        expires_in=expires_in,
-        interval=interval,
-        raw=body,
-    )
-
+    vcomplete = str(body.get("verification_uri_complete") or f"{vuri}?user_code={user_code}").strip()
+    return DeviceCodeSession(device_code, user_code, vuri, vcomplete, int(body.get("expires_in") or 1800), max(int(body.get("interval") or 5), 1), body)
 
 def poll_device_token(
     device_code: str,
