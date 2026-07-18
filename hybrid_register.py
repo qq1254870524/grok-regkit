@@ -1,8 +1,12 @@
-"""Hybrid Grok registration: protocol RPC + browser tokens.
+"""
+18r28g / 18r28f: code fetch uses grok_register_ttk.resolve_mailbox_provider (domain-first);
+  pending login fail skips second login click (pending_sso_recovery).
+Hybrid Grok registration: protocol RPC + browser tokens.
 
 Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
+- 18r28e: mailbox provider 按邮箱域名优先（outlook/* 不走 AOL preflight）；forced_email preflight 失败立即返回，不再同号空转 20 次；配合 pending 登录失败立刻改注册。
 - 2026-07-19r26: browser SSO nudge 不再在仍含「完成注册」表单时跳转 grok.com（避免打断注册）
 - 2026-07-19r25: NSFW socks fail -> direct fallback; Outlook early_no_new 110s
 - 2026-07-19r24c: hybrid get_email_and_token 传入 log_callback，避免 Outlook acquire/preflight 静默卡住无日志。
@@ -23,6 +27,7 @@ Changelog:
   限流后 burn_mailbox_to_pending 并从池删除，同一 register_one 内立即换下一邮箱(最多8次)；
   actual_send>=1 后禁止 protocol-rescue/二次 re-click 防双发；
   失败/验证码超时仍 burn→pending_sso；成功→hybrid+删池；日志明文无脱敏。
+18r28d: mail_token lookup from outlook_token_cache + fix resolve_credentials misuse; rate_limit burn keeps mail_token
 18r28b: _lookup_mail_token_from_pool for forced_email re-register
 18r27: pending 行可带 mail_token(b64)；register_one_hybrid 支持 forced_email/mail_token/xai_password
 供 pending auth_error 原号重注册；burn 时写入 mail_token 避免二次补丢 IMAP 凭据。
@@ -491,12 +496,13 @@ def handle_create_email_rate_limited(
     log: Callable[[str], None] | None = None,
     source: str = "unknown",
     evidence: str = "",
+    mail_token: str = "",
 ) -> dict:
     """Burn mailbox to pending_sso and return PENDING so job can switch / stats stay clear."""
     if log:
         log(
             f"[hybrid] CreateEmail RATE_LIMITED source={source} email={email} "
-            f"password={password!r} evidence={evidence}"
+            f"password={password!r} evidence={evidence} mail_token_len={len(str(mail_token or ''))}"
         )
     try:
         burn_mailbox_to_pending(
@@ -547,12 +553,51 @@ def burn_mailbox_to_pending(
 
 
 
-def _lookup_mail_token_from_pool(email: str, log=None) -> str:
-    """Find IMAP/Graph mail_token for email from AOL/Outlook pools or config blobs.
 
+def _mailbox_provider_is_aol(email: str, configured_provider: str = "") -> bool:
+    """Route mailbox by email domain first; global provider only for ambiguous domains.
+
+    Bug 18r28d: when UI email source=AOL, forced Outlook re-register incorrectly called
+    aol_mail.preflight -> "AOL missing password for xxx@outlook.com".
+    """
+    em = str(email or "").strip().lower()
+    prov = str(configured_provider or "").strip().lower()
+    aol_suffixes = (
+        "@aol.com", "@aim.com", "@verizon.net", "@love.com",
+        "@ygm.com", "@games.com", "@wow.com",
+    )
+    outlook_suffixes = (
+        "@outlook.com", "@hotmail.com", "@live.com", "@msn.com",
+        "@office365.com", "@outlook.jp", "@outlook.fr", "@hotmail.co.uk",
+    )
+    if em.endswith(aol_suffixes):
+        return True
+    if em.endswith(outlook_suffixes):
+        return False
+    try:
+        import aol_mail as _am
+        if _am.is_aol_provider(prov):
+            return True
+    except Exception:
+        pass
+    if prov in {"aol", "aol_mail", "aol.com", "aim", "verizon_aol"}:
+        return True
+    if prov in {"outlook", "microsoft", "hotmail", "graph", "ms", "outlook_mail"}:
+        return False
+    return False
+
+
+def _lookup_mail_token_from_pool(email: str, log=None) -> str:
+    """Find IMAP/Graph mail_token for email from pools, outlook_token_cache, config, files.
+
+    18r28d: recover Graph tokens from outlook_token_cache.json even after burn-remove;
+    do NOT call AolAccountPool.resolve_credentials(email) (needs token_blob).
     18r28b: pending re-register needs original mailbox credentials; older pending
     lines may lack the 4th b64 mail_token field, so recover from live pools.
     """
+    import json as _json
+    from pathlib import Path as _Path
+
     em = str(email or "").strip().lower()
     if not em:
         return ""
@@ -568,26 +613,36 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
         except Exception:
             return ""
 
-    def _from_outlook_account(acc) -> str:
+    def _outlook_blob_from_acc(acc) -> str:
         try:
             if isinstance(acc, dict):
-                e = str(acc.get("email") or acc.get("user") or "").strip().lower()
-                if e and e != em:
-                    return ""
-                tok = acc.get("token") or acc.get("mail_token") or acc.get("refresh_token") or acc.get("password") or ""
-                if isinstance(tok, dict):
-                    import json as _json
-                    return _json.dumps(tok, ensure_ascii=False)
-                extra = acc.get("totp") or acc.get("client_id") or acc.get("secret") or ""
-                tok = str(tok or "").strip()
-                if tok and extra:
-                    return f"{tok}----{extra}"
-                return tok
-            pw = str(getattr(acc, "password", "") or getattr(acc, "refresh_token", "") or "").strip()
-            totp = str(getattr(acc, "totp_secret", "") or getattr(acc, "client_id", "") or "").strip()
-            if pw and totp:
-                return f"{pw}----{totp}"
-            return pw
+                data = {
+                    "email": str(acc.get("email") or acc.get("user") or em),
+                    "access_token": str(acc.get("access_token") or ""),
+                    "refresh_token": str(acc.get("refresh_token") or acc.get("token") or acc.get("mail_token") or ""),
+                    "access_expires_at": acc.get("access_expires_at") or 0,
+                    "client_id": str(acc.get("client_id") or ""),
+                    "password": str(acc.get("password") or ""),
+                    "totp_secret": str(acc.get("totp_secret") or acc.get("totp") or ""),
+                }
+            else:
+                data = {
+                    "email": str(getattr(acc, "email", "") or em),
+                    "access_token": str(getattr(acc, "access_token", "") or ""),
+                    "refresh_token": str(getattr(acc, "refresh_token", "") or ""),
+                    "access_expires_at": getattr(acc, "access_expires_at", 0) or 0,
+                    "client_id": str(getattr(acc, "client_id", "") or ""),
+                    "password": str(getattr(acc, "password", "") or ""),
+                    "totp_secret": str(getattr(acc, "totp_secret", "") or ""),
+                }
+            # Prefer Graph token JSON when refresh/access present.
+            if data.get("refresh_token") or data.get("access_token"):
+                return _json.dumps(data, ensure_ascii=False)
+            if data.get("password") and data.get("totp_secret"):
+                return _json.dumps(data, ensure_ascii=False)
+            if data.get("password"):
+                return _json.dumps(data, ensure_ascii=False)
+            return ""
         except Exception:
             return ""
 
@@ -599,41 +654,96 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
             if sep in s and "@" in s.split(sep, 1)[0]:
                 parts = [x.strip() for x in s.split(sep) if str(x).strip()]
                 if len(parts) >= 2 and parts[0].lower() == em:
-                    return "----".join(parts[1:])
+                    rest = parts[1:]
+                    # If looks like email----client_id----refresh or email----refresh
+                    if len(rest) >= 2 and len(rest[0]) == 36 and "-" in rest[0] and len(rest[1]) > 40:
+                        return _json.dumps(
+                            {"email": em, "client_id": rest[0], "refresh_token": rest[1]},
+                            ensure_ascii=False,
+                        )
+                    if len(rest) == 1 and len(rest[0]) > 40:
+                        return _json.dumps(
+                            {"email": em, "refresh_token": rest[0]},
+                            ensure_ascii=False,
+                        )
+                    if len(rest) >= 2 and em.endswith(("@outlook.com", "@hotmail.com", "@live.com", "@msn.com")):
+                        data = {
+                            "email": em,
+                            "password": rest[0],
+                            "totp_secret": rest[1].replace(" ", ""),
+                        }
+                        if len(rest) >= 3 and len(rest[2]) == 36:
+                            data["client_id"] = rest[2]
+                        return _json.dumps(data, ensure_ascii=False)
+                    # AOL / generic: password----totp
+                    return "----".join(rest)
         if s.lower().startswith(em + ":"):
             return s.split(":", 1)[1].strip()
         return None
 
-    # AOL pool object
+    # 1) outlook_token_cache.json (survives pool burn)
+    try:
+        cache_paths = [
+            _Path(__file__).resolve().parent / "outlook_token_cache.json",
+            _Path(__file__).resolve().parent / "data" / "outlook_token_cache.json",
+        ]
+        try:
+            import grok_register_ttk as _eng
+
+            cfg = getattr(_eng, "config", {}) or {}
+            cf = str(cfg.get("outlook_token_cache") or "").strip()
+            if cf:
+                cache_paths.insert(0, _Path(cf) if _Path(cf).is_absolute() else (_Path(__file__).resolve().parent / cf))
+        except Exception:
+            pass
+        for cp in cache_paths:
+            if not cp.is_file():
+                continue
+            try:
+                blob = _json.loads(cp.read_text(encoding="utf-8", errors="replace"))
+            except Exception as e:
+                lg(f"[hybrid] outlook_token_cache read fail {cp}: {e}")
+                continue
+            if not isinstance(blob, dict):
+                continue
+            entry = blob.get(em) or blob.get(email) or blob.get(str(email or "").strip())
+            if not entry and isinstance(blob, dict):
+                for k, v in blob.items():
+                    if str(k).strip().lower() == em and isinstance(v, dict):
+                        entry = v
+                        break
+            if isinstance(entry, dict) and (entry.get("refresh_token") or entry.get("access_token")):
+                data = {
+                    "email": em,
+                    "access_token": str(entry.get("access_token") or ""),
+                    "refresh_token": str(entry.get("refresh_token") or ""),
+                    "access_expires_at": entry.get("access_expires_at") or 0,
+                    "client_id": str(entry.get("client_id") or ""),
+                }
+                tok = _json.dumps(data, ensure_ascii=False)
+                lg(f"[hybrid] mail_token from outlook_token_cache email={em} file={cp.name} rt_len={len(data['refresh_token'])}")
+                return tok
+    except Exception as exc:
+        lg(f"[hybrid] outlook_token_cache lookup skip: {exc}")
+
+    # 2) AOL pool object (iterate accounts ONLY — resolve_credentials needs token_blob)
     try:
         import aol_mail as _am
         import grok_register_ttk as engine
+
         pool = None
         try:
             pool = _am.get_pool(getattr(engine, "config", None), force_reload=True)
         except TypeError:
-            pool = _am.get_pool(force_reload=True)
+            try:
+                pool = _am.get_pool(force_reload=True)
+            except Exception as e:
+                lg(f"[hybrid] aol get_pool: {e}")
+                pool = None
         except Exception as e:
             lg(f"[hybrid] aol get_pool: {e}")
             pool = None
         if pool is not None:
-            # resolve_credentials(email) if available
-            if hasattr(pool, "resolve_credentials"):
-                try:
-                    cred = pool.resolve_credentials(em)
-                    if cred:
-                        if isinstance(cred, (tuple, list)) and len(cred) >= 2:
-                            pw = str(cred[1] or "")
-                            totp = str(cred[2] if len(cred) > 2 else "")
-                            if pw and totp:
-                                return f"{pw}----{totp}"
-                            if pw:
-                                return pw
-                        tok = _from_aol_account(cred)
-                        if tok:
-                            return tok
-                except Exception as e:
-                    lg(f"[hybrid] aol resolve_credentials: {e}")
             accs = getattr(pool, "accounts", None) or []
             for acc in list(accs):
                 ae = str(getattr(acc, "email", "") or "").strip().lower()
@@ -645,10 +755,11 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
     except Exception as exc:
         lg(f"[hybrid] aol pool lookup skip: {exc}")
 
-    # Outlook pool
+    # 3) Outlook live pool
     try:
         import outlook_mail as _om
         import grok_register_ttk as engine
+
         pool = None
         try:
             pool = _om.get_pool(getattr(engine, "config", None), force_reload=True)
@@ -661,14 +772,6 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
             lg(f"[hybrid] outlook get_pool: {e}")
             pool = None
         if pool is not None:
-            if hasattr(pool, "resolve_credentials"):
-                try:
-                    cred = pool.resolve_credentials(em)
-                    tok = _from_outlook_account(cred) if cred is not None else ""
-                    if tok:
-                        return tok
-                except Exception as e:
-                    lg(f"[hybrid] outlook resolve_credentials: {e}")
             accs = getattr(pool, "accounts", None) or getattr(pool, "items", None) or []
             if isinstance(accs, dict):
                 accs = list(accs.values())
@@ -676,23 +779,24 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
                 if isinstance(acc, dict):
                     ae = str(acc.get("email") or acc.get("user") or "").strip().lower()
                     if ae == em:
-                        tok = _from_outlook_account(acc)
+                        tok = _outlook_blob_from_acc(acc)
                         if tok:
-                            lg(f"[hybrid] mail_token from outlook dict email={em}")
+                            lg(f"[hybrid] mail_token from outlook dict pool email={em}")
                             return tok
                 else:
                     ae = str(getattr(acc, "email", "") or "").strip().lower()
                     if ae == em:
-                        tok = _from_outlook_account(acc)
+                        tok = _outlook_blob_from_acc(acc)
                         if tok:
-                            lg(f"[hybrid] mail_token from outlook acc email={em}")
+                            lg(f"[hybrid] mail_token from outlook pool email={em}")
                             return tok
     except Exception as exc:
         lg(f"[hybrid] outlook pool lookup skip: {exc}")
 
-    # config blobs + files
+    # 4) config blobs
     try:
         import grok_register_ttk as engine
+
         cfg = getattr(engine, "config", {}) or {}
         for key in ("aol_accounts", "outlook_accounts", "aol_account_list", "outlook_account_list", "email_accounts"):
             blob = cfg.get(key) or ""
@@ -705,7 +809,8 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
     except Exception as exc:
         lg(f"[hybrid] config pool lookup skip: {exc}")
 
-    root_dir = Path(__file__).resolve().parent
+    # 5) on-disk account files
+    root_dir = _Path(__file__).resolve().parent
     for name in (
         "aol_accounts.txt",
         "outlook_accounts.txt",
@@ -724,7 +829,10 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
                     return t
         except Exception:
             pass
+
+    lg(f"[hybrid] mail_token lookup MISS email={em}")
     return ""
+
 
 
 def register_one_hybrid(
@@ -866,12 +974,12 @@ def register_one_hybrid(
 
                     prov = str(_gep() or "").strip().lower()
                     em_l = (email or "").lower()
-                    is_aol = False
-                    try:
-                        import aol_mail as _am
-                        is_aol = _am.is_aol_provider(prov) or em_l.endswith(("@aol.com", "@aim.com"))
-                    except Exception:
-                        is_aol = em_l.endswith(("@aol.com", "@aim.com"))
+                    # 18r28e: domain-first; never route @outlook to AOL because global source=AOL
+                    is_aol = _mailbox_provider_is_aol(email, prov)
+                    log(
+                        f"[hybrid] mailbox preflight route email={email} "
+                        f"is_aol={int(is_aol)} configured_provider={prov or '-'}"
+                    )
                     if is_aol:
                         import aol_mail as am
                         pre = am.preflight_mailbox(
@@ -897,7 +1005,7 @@ def register_one_hybrid(
                     break
                 except Exception as pre_exc:
                     em_l2 = (email or "").lower()
-                    is_aol_fail = em_l2.endswith(("@aol.com", "@aim.com"))
+                    is_aol_fail = _mailbox_provider_is_aol(email, "")
                     category = 'unknown'
                     auth_path = 'unknown'
                     permanent = False
@@ -981,6 +1089,17 @@ def register_one_hybrid(
                             )
                     except Exception as rel_pre:
                         log(f"[hybrid] pre-login release email: {rel_pre}")
+                    # 18r28e: forced_email is a specific pending mailbox — do NOT spin 20 times
+                    if force_em:
+                        log(
+                            f"[hybrid] forced_email preflight failed once email={email} "
+                            f"category={category} — abort re-register (keep pending)"
+                        )
+                        return _result(
+                            STATUS_FAIL,
+                            email=email,
+                            detail=f"forced_email_preflight_fail:{category}:{pre_exc}",
+                        )
                     email, mail_token = "", ""
                     continue
             else:
@@ -1080,6 +1199,7 @@ def register_one_hybrid(
                     log=log,
                     source="browser_ui",
                     evidence=ui_rl_ev or "ui_rate_limited_flag",
+                    mail_token=mail_token,
                 )
             if raw_sent and not has_send_evidence:
                 log(
@@ -1175,7 +1295,8 @@ def register_one_hybrid(
                         log=log,
                         source="protocol_create_email",
                         evidence=rl_ev,
-                    )
+                    mail_token=mail_token,
+                )
                 if r1["status"] >= 400:
                     body_hint = ""
                     try:
@@ -1302,7 +1423,8 @@ def register_one_hybrid(
                             log=log,
                             source="protocol_rescue",
                             evidence=rl_ev_r,
-                        )
+                    mail_token=mail_token,
+                )
                     if int(r_rescue.get("status") or 0) < 400:
                         protocol_sent = True
                         send_ts = time.time()
@@ -1358,7 +1480,8 @@ def register_one_hybrid(
                             log=log,
                             source="code_timeout_scan",
                             evidence=rl_ev or ui_body_chk or str(code_exc or ""),
-                        )
+                    mail_token=mail_token,
+                )
                 except Exception as rl_exc:
                     log(f"[hybrid] code_timeout rate-limit check err: {rl_exc}")
                 try:

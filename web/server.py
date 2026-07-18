@@ -603,6 +603,7 @@ def _run_job(count: int, job_kind: str = "register") -> None:
             for _mod_name in (
                 "aol_mail",
                 "outlook_mail",
+                "grok_register_ttk",
                 "browser.token_harvester",
                 "hybrid_register",
                 "pending_sso_recovery",

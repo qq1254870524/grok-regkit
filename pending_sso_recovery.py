@@ -1,25 +1,19 @@
 """
+Pending SSO recovery helpers for grok-regkit hybrid.
+
+18r28g: CF-stuck after first submit = inject Turnstile ONLY (no re-login click);
+18r28f: login fail -> IMMEDIATE hybrid re-register (NO second login click / NO re-fill login);
+  pair with grok_register_ttk.resolve_mailbox_provider so Outlook code fetch
+  is not misrouted to AOL when UI email_provider=aol.
+18r28e: fix sleep_with_cancel in _ensure_signin_turnstile; login fail after 1 Turnstile retry -> IMMEDIATE re-register (no more login clicks/refill);
+  no-sso/sign-in stuck also fail_reason=need_reregister; outer always routes need_reregister/auth_error to hybrid.
+18r28d: force_fresh Turnstile + pre-rereg mail_token from outlook_token_cache on refill/auth-error/cf-stuck (no stale already-passed short-circuit).
 18r28c: reload hybrid_register before forced re-register; server hot-reload hybrid
-18r28b: fill no auto-click; generic auth_error one Turnstile retry; hybrid mail_token pool lookup
 18r28b: fill credentials WITHOUT auto-click login; one submit only after Turnstile OK; hybrid mail_token pool lookup
 18r28: pending SSO sign-in MUST solve/inject Cloudflare Turnstile before login submit
 and on CF stuck/re-fill; never blind re-click login while challenge pending.
-18r24b: pending fail rotates account to end of accounts_registered_pending_sso.txt so count=1 matrix no longer stuck on same head (e.g. doron28).
+18r24b: pending fail rotates account to end of accounts_registered_pending_sso.txt so count=1 matrix no longer stuck on same head row.
 18r24: pending-sso sign-in prefers ?email=true deep-link; after 2 empty social-btn clicks force email form URL.
-Pending SSO recovery helpers for grok-regkit hybrid.
-
-2026-07-18e: pool-empty stop support helpers + pending_sso secondary recovery.
-
-2026-07-18g: pending sign-in 直达、等待真实输入框、禁点“您正在登录/Loading”。
-2026-07-18n: pending 登录页先点「使用邮箱登录」再等 email/password；配合 speed 补丁；日志不脱敏。
-2026-07-18o: xAI 两步登录：email 就绪后先填邮箱点「下一步/继续」，再等 password；ready 仅在 email+pw 都在时成立；日志 email next / pw ready。
-2026-07-18p: 登录后抓 page_err/body；登录成功后主动打开 grok.com 固化 cookie；document.cookie 兜底；仍停 sign-in 时重填重点登录。
-2026-07-18q: 全域 cookies(all_domains) + CDP Network.getAllCookies 收 SSO；登录后即使仍在 sign-in 也轮询 accounts/grok 固化；submit 后 form.requestSubmit/Enter 双保险；详细 page body/url 日志。
-2026-07-18r: 登录提交后强制等待 12s/URL变化/loading消失再 re-fill，禁止 1s 内连点打断；Cloudflare/captcha/challenge 未过完不跳 grok；仅确认离开 sign-in 后才固化 cookie；bad_password/account_missing 明确失败后移出 pending 并走重新注册(hybrid)，不是只删号；CF 未过完不跳 grok；网络/loading 日志细化。
-2026-07-18r2: 修复页面标题「您正在登录」被误判为 loading 导致永久空等；loading 仅认 aria-busy/disabled/纯 spinner 文案。
-2026-07-18r6: accounts_registered_pending_sso 仅在 SSO 恢复成功或 hybrid 重注册成功后移出；auth_error/bad_password 不再提前删除，避免重注册失败丢数据。
-2026-07-18r11: pending SSO 浏览器直接启动并进入 sign-in，不再以 sign-up 页面作为 bootstrap；意外落到 sign-up 立即纠正。
-2026-07-18r3: 识别页面 An error occurred/登录失败 为 auth_error；移出 pending 后走 hybrid 重新注册（不是只删号）；rate_limit 不直接重注册。
 """
 from __future__ import annotations
 
@@ -484,14 +478,29 @@ def _ensure_signin_turnstile(
     *,
     reason: str = "pre-submit",
     timeout: float = 75.0,
+    force_fresh: bool = False,
 ) -> dict:
     """Solve Cloudflare Turnstile on sign-in and inject token into the login form.
 
     This is mandatory for many xAI sign-in sessions; blind login clicks loop forever
     when CF is pending and no token is attached.
+
+    force_fresh=True (18r28d): never reuse already-present token — clear and solve again.
+    Use after failed submit / refill / CF stuck / generic An error occurred.
     """
     stop = stop or (lambda: False)
-    out: dict[str, Any] = {"ok": False, "reason": reason, "token_len": 0, "method": ""}
+    try:
+        from grok_register_ttk import sleep_with_cancel as _swc
+    except Exception:
+        def _swc(sec, _stop=None):
+            import time as _t
+            end = _t.time() + float(sec or 0)
+            while _t.time() < end:
+                if _stop and _stop():
+                    break
+                _t.sleep(min(0.2, max(0.0, end - _t.time())))
+    sleep_with_cancel = _swc
+    out: dict[str, Any] = {"ok": False, "reason": reason, "token_len": 0, "method": "", "force_fresh": bool(force_fresh)}
     if page is None:
         out["detail"] = "no_page"
         return out
@@ -500,14 +509,30 @@ def _ensure_signin_turnstile(
         return out
 
     probe0 = _probe_signin_turnstile(page)
-    log(f"[pending-sso] turnstile probe before solve reason={reason} {probe0}")
-    try:
-        if int(probe0.get("tokLen") or 0) >= 80:
-            out.update({"ok": True, "token_len": int(probe0.get("tokLen") or 0), "method": "already-present"})
-            log(f"[pending-sso] turnstile already present len={out['token_len']} reason={reason}")
-            return out
-    except Exception:
-        pass
+    log(f"[pending-sso] turnstile probe before solve reason={reason} force_fresh={bool(force_fresh)} {probe0}")
+    if force_fresh:
+        try:
+            page.run_js(
+                """
+try { window.__hybrid_turnstile = ''; window.__hybrid_turnstile_status = 'cleared_for_fresh'; } catch (e) {}
+try {
+  document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], input[name="cf_turnstile_response"]').forEach(n => { try { n.value=''; n.dispatchEvent(new Event('input',{bubbles:true})); } catch (e) {} });
+} catch (e) {}
+try { if (window.turnstile && turnstile.reset) turnstile.reset(); } catch (e) {}
+return true;
+"""
+            )
+            log(f"[pending-sso] turnstile cleared for force_fresh reason={reason}")
+        except Exception as clr_exc:
+            log(f"[pending-sso] turnstile clear fail reason={reason}: {clr_exc}")
+    else:
+        try:
+            if int(probe0.get("tokLen") or 0) >= 80:
+                out.update({"ok": True, "token_len": int(probe0.get("tokLen") or 0), "method": "already-present"})
+                log(f"[pending-sso] turnstile already present len={out['token_len']} reason={reason}")
+                return out
+        except Exception:
+            pass
 
     token = ""
     # Prefer BrowserTokenSession helper (inject widget + turnstilePatch path).
@@ -1361,51 +1386,28 @@ return {
                                 or "something went wrong" in body_l
                             )
                         )
-                        if generic_auth and not locals().get("_auth_ts_retried"):
-                            _auth_ts_retried = True
-                            try:
-                                log("[pending-sso] generic auth_error -> one fresh Turnstile retry before fail")
-                                ts_r = _ensure_signin_turnstile(
-                                    page, browser, log, stop, reason="auth-error-retry", timeout=70.0
-                                )
-                                try:
-                                    fill_state2 = page.run_js(fill_js, email, password) or {}
-                                    log(f"[pending-sso] auth-error-retry refill={fill_state2}")
-                                except Exception as fe:
-                                    log(f"[pending-sso] auth-error-retry refill fail: {fe}")
-                                try:
-                                    tok2 = _read_page_turnstile_token(page)
-                                    if len(tok2) >= 80:
-                                        _inject_turnstile_token(page, tok2)
-                                except Exception:
-                                    pass
-                                click_r = _click_signin_submit(page)
-                                log(
-                                    f"[pending-sso] auth-error-retry submit turnstile_ok={ts_r.get('ok')} "
-                                    f"token_len={ts_r.get('token_len')} click={click_r}"
-                                )
-                                submit_ts = time.time()
-                                last_err = ""
-                                page_err = ""
-                                sleep_with_cancel(2.5, stop)
-                                continue
-                            except Exception as re_exc:
-                                log(f"[pending-sso] auth-error-retry fail: {re_exc}")
-                        if page_err in {"bad_password", "account_missing"}:
-                            return result(
-                                STATUS_FAIL,
-                                email=email,
-                                detail=f"sign-in page_err={page_err}",
-                                remove_pending=True,
-                                fail_reason=page_err,
+                        # 18r28e: at most ONE fresh-Turnstile login retry; then leave sign-in
+                        # immediately for hybrid re-register. Never keep clicking 登录.
+                        # 18r28f: ANY login page_err after first submit -> IMMEDIATE re-register.
+                        # Do NOT click 登录 again (user: 登录失败改走注册，不要又重新登录).
+                        # First login already solved Turnstile; second login only burns time / CF.
+                        if page_err in {"bad_password", "account_missing", "auth_error", "need_reregister"}:
+                            log(
+                                f"[pending-sso] page_err={page_err} -> IMMEDIATE re-register "
+                                f"(NO second login click) email={email} body={body[:240]}"
                             )
-                        if page_err == "auth_error" and locals().get("_auth_ts_retried"):
+                            _block_login_refill = True
+                            _auth_ts_retried = True
                             return result(
                                 STATUS_FAIL,
                                 email=email,
                                 detail=f"sign-in page_err={page_err}",
                                 remove_pending=True,
-                                fail_reason=page_err,
+                                fail_reason=(
+                                    page_err
+                                    if page_err in {"bad_password", "account_missing"}
+                                    else "auth_error"
+                                ),
                             )
 
                     cookie_doc = str(pst.get("cookie") or "")
@@ -1427,30 +1429,23 @@ return {
                         last_cf_solve_ts = now
                         log(f"[pending-sso] active turnstile solve try={cf_solve_tries}/4 (cf stuck)")
                         ts_cf = _ensure_signin_turnstile(
-                            page, browser, log, stop, reason=f"cf-stuck-{cf_solve_tries}", timeout=70.0
+                            page, browser, log, stop, reason=f"cf-stuck-{cf_solve_tries}", timeout=70.0, force_fresh=True
                         )
                         if ts_cf.get("ok"):
-                            # Re-fill credentials (CF widget may reset fields) then submit once.
+                            # 18r28g: after FIRST login submit, NEVER click login again.
+                            # Only re-inject Turnstile token and wait for page auto-advance.
+                            # If still stuck, outer 10s rule returns auth_error -> hybrid re-register.
                             try:
-                                fill_state = page.run_js(fill_js, email, password) or {}
-                                log(f"[pending-sso] re-fill after cf turnstile: {fill_state}")
-                            except Exception as fr_exc:
-                                log(f"[pending-sso] re-fill after cf turnstile fail: {fr_exc}")
-                            try:
-                                # fill_js already clicks; inject token again then extra submit.
-                                _inject_turnstile_token(
-                                    page,
-                                    _read_page_turnstile_token(page),
+                                tok = _read_page_turnstile_token(page)
+                                inj = _inject_turnstile_token(page, tok)
+                                log(
+                                    f"[pending-sso] cf turnstile inject-only (no re-login click) "
+                                    f"try={cf_solve_tries} tok_len={len(tok or '')} inj={inj}"
                                 )
-                            except Exception:
-                                pass
-                            try:
-                                boost2 = _click_signin_submit(page)
-                                log(f"[pending-sso] submit after cf turnstile: {boost2}")
-                            except Exception as sb_exc:
-                                log(f"[pending-sso] submit after cf turnstile fail: {sb_exc}")
-                            post_submit_quiet_until = time.time() + 12.0
-                            submit_ts = time.time()
+                            except Exception as inj_exc:
+                                log(f"[pending-sso] cf turnstile inject-only fail: {inj_exc}")
+                            # Do not reset submit_ts; keep first-submit clock for IMMEDIATE re-register.
+                            post_submit_quiet_until = time.time() + 8.0
                     sleep_with_cancel(1.5, stop)
                     continue
 
@@ -1506,57 +1501,24 @@ return {
                         sleep_with_cancel(1.2, stop)
                         continue
 
-                    # Allow re-fill only after quiet window + 10s since last refill, max 3.
-                    # 18r28: if page looks idle on sign-in, solve Turnstile then submit (has_cf may be false-negative).
-                    can_refill = (
-                        refill_tries < 3
-                        and (now - last_refill_ts) >= 10.0
-                        and (now - submit_ts) >= 12.0
-                        and (not is_loading)
-                    )
-                    if can_refill:
-                        try:
-                            st = page.run_js(wait_inputs_js) or {}
-                        except Exception:
-                            st = {}
-                        if isinstance(st, dict) and st.get("ready"):
-                            refill_tries += 1
-                            last_refill_ts = now
-                            post_submit_quiet_until = now + 14.0
-                            try:
-                                log(f"[pending-sso] re-fill path try={refill_tries}: solve turnstile first")
-                                ts_rf = _ensure_signin_turnstile(
-                                    page,
-                                    browser,
-                                    log,
-                                    stop,
-                                    reason=f"refill-{refill_tries}",
-                                    timeout=70.0,
-                                )
-                                fill_state = page.run_js(fill_js, email, password) or {}
-                                log(f"[pending-sso] re-fill/sign-in try={refill_tries} after_wait {fill_state} turnstile_ok={ts_rf.get('ok')} token_len={ts_rf.get('token_len')}")
-                                # fill_js clicks once; reinject token (click may race widget) and submit again.
-                                try:
-                                    tok2 = ""
-                                    try:
-                                        tok2 = _read_page_turnstile_token(page)
-                                    except Exception:
-                                        tok2 = ""
-                                    if len(tok2) >= 80:
-                                        _inject_turnstile_token(page, tok2)
-                                except Exception:
-                                    pass
-                                try:
-                                    boost_rf = _click_signin_submit(page)
-                                    log(f"[pending-sso] re-fill submit boost={boost_rf}")
-                                except Exception as b_exc:
-                                    log(f"[pending-sso] re-fill submit boost fail: {b_exc}")
-                                submit_ts = now
-                            except Exception as refill_exc:
-                                log(f"[pending-sso] re-fill fail: {refill_exc}")
-                            sleep_with_cancel(2.0, stop)
-                            continue
-
+                    # 18r28f: NEVER re-click 登录 after the first Turnstile-backed submit.
+                    # Idle sign-in without SSO = credential/session fail -> hybrid re-register.
+                    # (Old re-fill path caused: login fail then login again then login again.)
+                    if (now - submit_ts) >= 10.0 and not sso and not is_loading:
+                        # If CF challenge UI is actively up without token, solve once then ONE submit only when never submitted? 
+                        # First submit already happened; do not login again.
+                        log(
+                            f"[pending-sso] still on sign-in after first submit "
+                            f"elapsed={now-submit_ts:.1f}s cf={cf_seen} -> IMMEDIATE re-register "
+                            f"(NO re-fill login) email={email}"
+                        )
+                        return result(
+                            STATUS_FAIL,
+                            email=email,
+                            detail="sign-in stuck after first submit -> re-register",
+                            remove_pending=True,
+                            fail_reason="auth_error",
+                        )
                     # DO NOT jump to grok while still stuck on sign-in without leaving once.
                     if (not visited_accounts) and (now - submit_ts) >= 55 and harvest_rounds >= 25:
                         visited_accounts = True
@@ -1583,7 +1545,26 @@ return {
                 except Exception:
                     pst = {}
                 log(f"[pending-sso] no sso after sign-in email={email} last_fill={fill_state} last_page={pst}")
-                return result(STATUS_FAIL, email=email, detail=f"no sso after sign-in page={pst}")
+                # 18r28e: login could not mint SSO -> outer must re-register, not only rotate pending
+                fr = "auth_error"
+                try:
+                    body_n = str((pst or {}).get("body") or "")
+                    err_n = str((pst or {}).get("err") or "")
+                    if err_n in {"bad_password", "account_missing"}:
+                        fr = err_n
+                    elif "错误的邮箱地址或密码" in body_n or (
+                        "密码" in body_n and ("错误" in body_n or "不正确" in body_n)
+                    ):
+                        fr = "bad_password"
+                except Exception:
+                    pass
+                return result(
+                    STATUS_FAIL,
+                    email=email,
+                    detail=f"no sso after sign-in page={pst}",
+                    remove_pending=True,
+                    fail_reason=fr,
+                )
 
             try:
                 from protocol.sso_util import (
@@ -1726,7 +1707,14 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                     fail_reason = "bad_password"
                 elif "account_missing" in low or "page_err=account_missing" in low:
                     fail_reason = "account_missing"
-                elif "auth_error" in low or "page_err=auth_error" in low or "an error occurred" in low:
+                elif (
+                    "auth_error" in low
+                    or "page_err=auth_error" in low
+                    or "an error occurred" in low
+                    or "no sso after sign-in" in low
+                    or "turnstile_retry_failed" in low
+                    or "after_turnstile_retry" in low
+                ):
                     fail_reason = "auth_error"
             if controller.should_stop() or status == STATUS_STOPPED:
                 log("[*] 当前 pending 恢复因停止请求中断，统计保持不变")
@@ -1740,10 +1728,18 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                     rotate_pending_sso_account_to_end(email, log=log)
                 except Exception as rot_exc:
                     log(f"[pending] rotate after fail error: {rot_exc}")
-                # 密码错误/账号不存在/auth_error：走 hybrid 重注册。
+                # 18r28e: 登录失败（含 no-sso）一律改走 hybrid 重注册，禁止再回到登录死循环。
                 # 关键：accounts_registered_pending_sso 仅在最终成功后才移出；
                 # 若重注册失败仍保留原 pending，避免数据丢失。
-                if fail_reason in {"bad_password", "account_missing", "auth_error"} or res.get("remove_pending"):
+                need_rereg = (
+                    fail_reason in {"bad_password", "account_missing", "auth_error", "need_reregister"}
+                    or res.get("remove_pending")
+                    or ("no sso after sign-in" in detail.lower())
+                    or ("sign-in page_err" in detail.lower())
+                )
+                if need_rereg:
+                    if not fail_reason:
+                        fail_reason = "auth_error"
                     log(
                         f"[pending-sso] {fail_reason or 'auth_fail'} -> 暂保留 pending，"
                         f"改走注册流程 email={email}（成功后再移出）"
@@ -1754,7 +1750,16 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                             import hybrid_register as _hr
                             importlib.reload(_hr)
                             register_one_hybrid = _hr.register_one_hybrid
-                            log(f"[pending-sso] re-register via hybrid start (reason={fail_reason or detail})")
+                            log(
+                                f"[pending-sso] login failed -> STOP further sign-in; "
+                                f"re-register via hybrid start (reason={fail_reason or detail}) email={email}"
+                            )
+                            # Close pending sign-in browser before hybrid opens a fresh signup session
+                            try:
+                                engine.stop_browser(log_callback=log)
+                                log("[pending-sso] closed sign-in browser before hybrid re-register")
+                            except Exception as sb_exc:
+                                log(f"[pending-sso] stop sign-in browser before rereg: {sb_exc}")
                             re_accounts = Path(accounts_output_file)
                             # also keep a dedicated re-register success sink
                             try:
@@ -1764,22 +1769,45 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None):
                             # 18r27: always re-register the SAME pending mailbox (not a fresh pool pull).
                             forced_mail_token = str(item.get("mail_token") or "").strip()
                             forced_xai_password = str(password or "").strip()
-                            log(
-                                f"[pending-sso] re-register forced_email={email} "
-                                f"mail_token_len={len(forced_mail_token)} "
-                                f"xai_password_len={len(forced_xai_password)} "
-                                f"note={str(item.get('note') or '')}"
-                            )
-                            rr = register_one_hybrid(
-                                log=log,
-                                proxy=proxy,
-                                should_stop=controller.should_stop,
-                                accounts_file=re_accounts,
-                                post_success=True,
-                                forced_email=email,
-                                forced_mail_token=forced_mail_token,
-                                forced_xai_password=forced_xai_password,
-                            )
+                            if not forced_mail_token:
+                                try:
+                                    from hybrid_register import _lookup_mail_token_from_pool as _lt
+                                    forced_mail_token = str(_lt(email, log=log) or "").strip()
+                                    log(
+                                        f"[pending-sso] pre-rereg mail_token lookup "
+                                        f"email={email} len={len(forced_mail_token)}"
+                                    )
+                                except Exception as lkp_exc:
+                                    log(f"[pending-sso] pre-rereg mail_token lookup fail: {lkp_exc}")
+                                    forced_mail_token = ""
+                            if not forced_mail_token:
+                                log(
+                                    f"[pending-sso] skip forced re-register missing mail_token "
+                                    f"email={email} (kept in pending; no IMAP/Graph creds)"
+                                )
+                                rr = {
+                                    "status": "fail",
+                                    "ok": False,
+                                    "email": email,
+                                    "detail": "skip_reregister_no_mail_token",
+                                }
+                            else:
+                                log(
+                                    f"[pending-sso] re-register forced_email={email} "
+                                    f"mail_token_len={len(forced_mail_token)} "
+                                    f"xai_password_len={len(forced_xai_password)} "
+                                    f"note={str(item.get('note') or '')}"
+                                )
+                                rr = register_one_hybrid(
+                                    log=log,
+                                    proxy=proxy,
+                                    should_stop=controller.should_stop,
+                                    accounts_file=re_accounts,
+                                    post_success=True,
+                                    forced_email=email,
+                                    forced_mail_token=forced_mail_token,
+                                    forced_xai_password=forced_xai_password,
+                                )
                             rr = normalize_result(rr)
                             rr_status = rr.get("status")
                             rr_email = str(rr.get("email") or "").strip()

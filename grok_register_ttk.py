@@ -5,6 +5,8 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-19r28f: get_oai_code domain/token-first routing (Outlook not misrouted to AOL when UI source=AOL);
+  fix CreateEmail-sent then "AOL missing password for @outlook.com" code fetch fail.
 - 2026-07-18a: Sub2API create-success is import success; verify fail warns only unless require_verify_success.
 - 2026-07-17g: Sub2API import now uses the current sso_tokens array contract and
   performs a direct per-account usability test before reporting the pool entry usable.
@@ -3075,6 +3077,66 @@ def get_email_and_token(api_key=None, log_callback=None):
 
 
 
+
+def resolve_mailbox_provider(email: str = "", configured: str = "", token_blob: str = "") -> str:
+    """Route mailbox ops by email domain / token shape first, then global config.
+
+    18r28f: when UI email_provider=aol, Outlook forced re-register still must use Graph.
+    Previously get_oai_code only looked at get_email_provider() and called aol_mail,
+    raising "AOL missing password for user@outlook.com" after CreateEmail already sent.
+    """
+    em = str(email or "").strip().lower()
+    conf = str(configured or "").strip().lower()
+    tb = str(token_blob or "").strip()
+    aol_suffixes = (
+        "@aol.com", "@aim.com", "@verizon.net", "@love.com",
+        "@ygm.com", "@games.com", "@wow.com",
+    )
+    outlook_suffixes = (
+        "@outlook.com", "@hotmail.com", "@live.com", "@msn.com",
+        "@office365.com", "@outlook.jp", "@outlook.fr", "@hotmail.co.uk",
+    )
+    if em.endswith(outlook_suffixes):
+        return "outlook"
+    if em.endswith(aol_suffixes):
+        return "aol"
+    if tb.startswith("{") and (
+        "access_token" in tb or "refresh_token" in tb or '"client_id"' in tb
+    ):
+        return "outlook"
+    if "----" in tb:
+        left, right = tb.split("----", 1)
+        left_l = left.strip().lower()
+        right_s = right.strip()
+        if "@" in left_l and (
+            left_l.endswith(outlook_suffixes)
+            or "refresh" in right_s.lower()
+            or right_s.startswith("M.")
+            or len(right_s) > 80
+        ):
+            return "outlook"
+    if not conf:
+        try:
+            conf = str(get_email_provider() or "").strip().lower()
+        except Exception:
+            conf = ""
+    try:
+        if outlook_mail is not None and outlook_mail.is_outlook_provider(conf):
+            return "outlook"
+    except Exception:
+        pass
+    try:
+        if aol_mail is not None and aol_mail.is_aol_provider(conf):
+            return "aol"
+    except Exception:
+        pass
+    if conf in {"outlook", "microsoft", "hotmail", "graph", "ms", "outlook_mail"}:
+        return "outlook"
+    if conf in {"aol", "aol_mail", "aol.com", "aim", "verizon_aol"}:
+        return "aol"
+    return conf or "outlook"
+
+
 def get_oai_code(
     dev_token,
     email,
@@ -3087,7 +3149,21 @@ def get_oai_code(
     ignore_existing=True,
     **kwargs,
 ):
-    provider = get_email_provider()
+    # 18r28f: domain/token-first routing (do not trust global provider alone)
+    configured = ""
+    try:
+        configured = str(get_email_provider() or "")
+    except Exception:
+        configured = ""
+    provider = resolve_mailbox_provider(email, configured=configured, token_blob=dev_token)
+    if log_callback:
+        try:
+            log_callback(
+                f"[mail] get_oai_code route email={email} provider={provider} "
+                f"configured={configured or '-'} token_len={len(str(dev_token or ''))}"
+            )
+        except Exception:
+            pass
     if public_email is not None and public_email.is_public_provider(provider):
         proxies = get_proxies() or None
         try:
