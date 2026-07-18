@@ -1,0 +1,5 @@
+﻿RESTORE
+1. Copy files back to grok-regkit root preserving paths
+2. Restart only web/server.py on 8092
+3. Do not kill 8010/8080/8317/8318
+4. Matrix: python -B tools\matrix_cross_run.py 10 720
