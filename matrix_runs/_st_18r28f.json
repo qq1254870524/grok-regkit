@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "running": true,
+  "success": 0,
+  "fail": 0,
+  "pending_sso": 0,
+  "skipped": 0,
+  "target": 2,
+  "job_kind": "pending_sso_recovery",
+  "last_accounts_file": "C:\\Users\\zhang\\grok-regkit\\accounts_pending_sso_recovered_20260719_053040.txt",
+  "started_at": 1784410532.3999484,
+  "finished_at": null,
+  "error": "",
+  "session_success": 0,
+  "session_fail": 1,
+  "session_pending_sso": 0,
+  "session_skipped": 0,
+  "phase": "verify_code",
+  "last_event": "[*] turnstile sitekey=0x4AAAAAAAhr9JGVDZbr...",
+  "updated_at": 1784410639.6076598,
+  "jobs_started": 2,
+  "jobs_finished": 1
+}

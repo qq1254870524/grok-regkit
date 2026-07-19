@@ -1,0 +1,12 @@
+{
+  "g2a_local_token_json": 189,
+  "g2a_local_emails": 189,
+  "g2a_remote": 191,
+  "sub2api_total": 188,
+  "cpa_files": 186,
+  "success_txt_emails": 61,
+  "pending_sso_emails": 49,
+  "success_txt_not_in_token": [],
+  "success_txt_not_in_token_count": 0,
+  "pending_also_in_token_count": 0
+}

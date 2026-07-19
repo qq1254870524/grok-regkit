@@ -1,0 +1,30 @@
+start {'ok': True, 'started': True, 'count': 2, 'workers': 2}
+12:21:36 run=True phase=starting ok=0 fail=0 pend=0 event=job start kind=register count=2
+12:21:44 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=cortese.judith@aol.com auth=IMAP password/app-password
+12:21:52 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=esmee.serra@aol.com auth=IMAP password/app-password
+12:22:00 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=exd9gorr@aol.com auth=IMAP password/app-password
+12:22:08 run=True phase=create_email ok=0 fail=0 pend=0 event=[w1] [browser] open signup page for this account
+12:22:24 run=True phase=create_email ok=0 fail=0 pend=0 event=[w2] [*] 已点击「使用邮箱注册」按钮: 使用邮箱注册 使用邮箱注册
+12:22:32 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[w2] [*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=kotjata163@aol.com auth=IMAP password/app-password
+12:22:40 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[w2] [+] AOL IMAP login OK email=kotjata163@aol.com typ=OK data=[b'[CAPABILITY IMAP4rev1 ID MOVE NAMESPACE XYMHIGHESTMODSEQ UIDPLUS LITERAL+ CHILDREN UNSELECT X-MSG-EXT OBJECTID ID
+12:22:48 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[w2] [*] AOL IMAP folder=Inbox fetched=5 top=5
+12:22:56 run=True phase=waiting_code ok=0 fail=0 pend=0 event=[w2] [*] AOL IMAP folder=Sent fetched=4 top=5
+12:23:04 run=True phase=verify_code ok=0 fail=0 pend=0 event=[w2] [*] turnstile sitekey=0x4AAAAAAAhr9JGVDZbr...
+12:23:20 run=True phase=signup ok=0 fail=0 pend=0 event=[w2] [hybrid] sign-up try 1/1 path=protocol/curl logs err timed out
+wrote C:\Users\zhang\grok-regkit\matrix_runs\_smoke2_18r30.txt
+phase=sso ok=0 fail=0 pend=0 event=[w2] [sso] stage=navigate#0 url=https://auth.grokusercontent.com/set-cookie?q=eyJhbGciOiJIUzI1NiJ9.eyJjb25maWciO elapsed=0.0s
+12:23:36 run=True phase=sso ok=0 fail=0 pend=0 event=[w2] [sso] stage=navigate#0 url=https://auth.grokusercontent.com/set-cookie?q=eyJhbGciOiJIUzI1NiJ9.eyJjb25maWciO elapsed=0.0s
+12:23:52 run=True phase=finished ok=1 fail=0 pend=0 event=[w2] [*] hybrid worker exit
+12:24:00 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [cpa] try authcode mint (referrer=grok-build, fused from grokRegister-cpa)
+12:24:08 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [cpa] try authcode mint (referrer=grok-build, fused from grokRegister-cpa)
+12:24:16 run=True phase=create_email ok=1 fail=0 pend=0 event=[w1] [Debug] 当前URL: https://accounts.x.ai/sign-up?redirect=grok-com
+12:24:32 run=True phase=create_email ok=1 fail=0 pend=0 event=[w1] [*] 浏览器网络模式: 代理
+12:24:48 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [cpa] device-code request endpoint=auth.x.ai/oauth2/device/code route=socks5h://154.198.33.57:9093 attempt=1/4 elapsed=1.44s error=URLError transient=True
+12:24:56 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [cpa] device-code request endpoint=auth.x.ai/oauth2/device/code route=socks5h://154.198.33.57:9093 attempt=3/4 elapsed=1.45s error=URLError transient=True
+12:25:04 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [*] Sub2API 入池开始 email=kotjata163@aol.com endpoint=/api/v1/admin/grok/sso-to-oauth groups=[3] sso_len=152 is_session=1 is_wrapper=0 payload_keys=['session_id'] session_id_pref
+12:25:20 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [bg] 后处理完成: kotjata163@aol.com
+12:25:36 run=True phase=post_process ok=1 fail=0 pend=0 event=[w2] [bg] 后处理完成: kotjata163@aol.com
+12:25:52 run=False phase=finished ok=1 fail=1 pend=0 event=[*] 混合任务结束。成功 1 | 失败 1 | pending_sso 0 | 跳过(池空) 0 | workers=2
+FINISHED {'ok': True, 'running': False, 'success': 1, 'fail': 1, 'pending_sso': 0, 'skipped': 0, 'target': 2, 'job_kind': 'register', 'last_accounts_file': 'C:\\Users\\zhang\\grok-regkit\\accounts_hybrid_20260719_122136.txt', 'started_at': 1784434896.018984, 'finished_at': 1784435149.448111, 'error': '', 'session_success': 1, 'session_fail': 1, 'session_pending_sso': 0, 'session_skipped': 0, 'phase': 'finished', 'last_event': '[*] 混合任务结束。成功 1 | 失败 1 | pending_sso 0 | 跳过(池空) 0 | workers=2', 'updated_at': 1784435149.448111, 'jobs_started': 1, 'jobs_finished': 1}
+logs err timed out
+wrote C:\Users\zhang\grok-regkit\matrix_runs\_smoke2_18r30.txt

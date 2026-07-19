@@ -1,0 +1,103 @@
+{
+  "ts": "2026-07-19T12:38:18",
+  "running": true,
+  "phase": "waiting_code",
+  "event": "[w2] [+] AOL code ok email=morel.herve@aol.com code=590-N0Z subject=SpaceXAI confirmation code: 590-N0Z from=SpaceXAI <noreply@x.ai> source=IMAP/Inbox alt_count=0",
+  "session_success": 4,
+  "matrix_alive": true,
+  "summary_rows": 104,
+  "ok_rows": 87,
+  "classes": {
+    "success": 87,
+    "empty_log": 3,
+    "pending_sso": 2,
+    "early_no_new_mail": 4,
+    "runner_exception": 1,
+    "sso_timeout": 3,
+    "profile_fill_fail": 1,
+    "unknown": 1,
+    "email_login_fail": 2
+  },
+  "cells": {
+    "hybrid__direct__outlook": {
+      "rounds_done": 10,
+      "ok": 10,
+      "classes": {
+        "success": 10
+      }
+    },
+    "hybrid__direct__aol": {
+      "rounds_done": 10,
+      "ok": 10,
+      "classes": {
+        "success": 10
+      }
+    },
+    "hybrid__socks5_list__outlook": {
+      "rounds_done": 10,
+      "ok": 9,
+      "classes": {
+        "success": 9,
+        "pending_sso": 1
+      }
+    },
+    "hybrid__socks5_list__aol": {
+      "rounds_done": 10,
+      "ok": 10,
+      "classes": {
+        "success": 10
+      }
+    },
+    "browser__direct__outlook": {
+      "rounds_done": 10,
+      "ok": 7,
+      "classes": {
+        "success": 7,
+        "early_no_new_mail": 3
+      }
+    },
+    "browser__direct__aol": {
+      "rounds_done": 10,
+      "ok": 10,
+      "classes": {
+        "success": 10
+      }
+    },
+    "browser__socks5_list__outlook": {
+      "rounds_done": 10,
+      "ok": 6,
+      "classes": {
+        "success": 6,
+        "pending_sso": 1,
+        "early_no_new_mail": 1,
+        "sso_timeout": 2
+      }
+    },
+    "browser__socks5_list__aol": {
+      "rounds_done": 10,
+      "ok": 8,
+      "classes": {
+        "profile_fill_fail": 1,
+        "success": 8,
+        "unknown": 1
+      }
+    },
+    "pending_sso_recovery__socks5_list": {
+      "rounds_done": 10,
+      "ok": 9,
+      "classes": {
+        "success": 9,
+        "sso_timeout": 1
+      }
+    },
+    "pending_sso_recovery__direct": {
+      "rounds_done": 10,
+      "ok": 8,
+      "classes": {
+        "success": 8,
+        "email_login_fail": 2
+      }
+    }
+  },
+  "report_ready": true
+}

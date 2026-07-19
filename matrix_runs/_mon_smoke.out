@@ -1,0 +1,2 @@
+poll 0 running= True phase= waiting_code ok= 0 fail= 0 pending= 0 event= [*] AOL IMAP LIST folders count=6 all=['Archive', 'Bulk', 'Draft', 'Inbox', 'Sent', 'Trash']
+logs err [WinError 10054] 远程主机强迫关闭了一个现有的连接。

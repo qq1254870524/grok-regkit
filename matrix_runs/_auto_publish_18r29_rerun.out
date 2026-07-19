@@ -1,0 +1,123 @@
+[2026-07-19T11:48:30] waiting REPORT
+[2026-07-19T11:48:30] REPORT found
+[2026-07-19T11:48:34] package C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-singlethread-18r29.zip size=223681
+[2026-07-19T11:48:34] RUN git add -A outlook_mail.py hybrid_register.py grok_register_ttk.py sub2api_client.py tools/matrix_cross_run.py tools/reconcile_pools.py tools/_backfill_sub2api_18r29k.py CHANGELOG.md STABLE_VERSION.md MATRIX_REPORT.md packages/stable-2026-07-19-matrix-singlethread-18r29 packages/stable-2026-07-19-matrix-singlethread-18r29.zip
+[2026-07-19T11:48:34] ERR ble-2026-07-19-matrix-singlethread-18r29/aol_mail.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/grok_register_ttk.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/hybrid_register.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/requirements.txt', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/sub2api_client.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/tools/matrix_cross_run.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/web/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-singlethread-18r29/web/server.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_backfill_sub2api_18r29k.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/reconcile_pools.py', CRLF will be replaced by LF the next time Git touches it
+
+[2026-07-19T11:48:34] RUN git status -sb
+[2026-07-19T11:48:34] py
+?? tools/_eta_loop_18r29.py
+?? tools/_final_guardian_18r29.py
+?? tools/_find_browser_mode.py
+?? tools/_fix_build_list.py
+?? tools/_fix_pending_file_18r24b.py
+?? tools/_fix_pending_header_18r28f.py
+?? tools/_fix_post_tag.py
+?? tools/_fix_pub_tag.py
+?? tools/_fix_weak_rounds.py
+?? tools/_gate280.py
+?? tools/_gate360.py
+?? tools/_gate_hybrid_hsa_18r29.py
+?? tools/_gate_pack2.py
+?? tools/_hour_monitor_18r29.py
+?? tools/_inspect_18r29.py
+?? tools/_long_monitor_18r29.py
+?? tools/_long_sample_18r29.py
+?? tools/_long_wait_18r29.py
+?? tools/_matrix_18r28g.py
+?? tools/_milestone_watch_18r29.py
+?? tools/_monitor_loop_18r29.py
+?? tools/_monitor_loop_18r29b.py
+?? tools/_patch_18r24.py
+?? tools/_patch_18r24b_reload.py
+?? tools/_patch_18r25_nsfw_outlook.py
+?? tools/_patch_18r25_reload.py
+?? tools/_patch_18r28e.py
+?? tools/_patch_18r28f_mail_route.py
+?? tools/_patch_18r28f_norefill.py
+?? tools/_patch_18r28f_pending.py
+?? tools/_patch_18r28f_reload.py
+?? tools/_patch_18r28g_cf.py
+?? tools/_patch_browser_burn_18r29b.py
+?? tools/_patch_browser_burn_18r29b2.py
+?? tools/_patch_email_log.py
+?? tools/_patch_pending_18r24.py
+?? tools/_patch_pending_rotate_18r24b.py
+?? tools/_poll_18r28f.py
+?? tools/_poll_18r28g.py
+?? tools/_poll_18r28g2.py
+?? tools/_probe_socks5_18r29.py
+?? tools/_progress_pack2_18r29.py
+?? tools/_progress_pack_18r29.py
+?? tools/_publish_companions_18r29.py
+?? tools/_pulse_18r29_now.py
+?? tools/_read_dispatch.py
+?? tools/_sleep120.py
+?? tools/_snap_keys.py
+?? tools/_snap_now.py
+?? tools/_snap_once_18r29.py
+?? tools/_snap_progress_18r29.py
+?? tools/_snap_wait_18r29.py
+?? tools/_stall_watch_18r29.py
+?? tools/_status_18r29_now.py
+?? tools/_supervise_18r29.py
+?? tools/_supervise_18r29b.py
+?? tools/_tick_status_18r29.py
+?? tools/_unattended_guardian_18r29.py
+?? tools/_wait3m_18r29.py
+?? tools/_wait_flag.py
+?? tools/_wait_report_18r29.py
+?? tools/_watch_18r28e.py
+?? tools/_watch_18r28e_live.py
+?? tools/_watch_18r28f2.py
+?? tools/_watch_18r28f_live.py
+?? tools/_watch_18r29.py
+
+[2026-07-19T11:48:34] RUN git commit -m release(18r29): single-thread matrix stable + outlook 1078 permanent burn
+[2026-07-19T11:48:34] read matrix stable + outlook 1078 permanent burn
+ 30 files changed, 20742 insertions(+), 205 deletions(-)
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29.zip
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/CHANGELOG.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/MATRIX_18r29_REPORT.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/MATRIX_18r29_summary.jsonl
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/MATRIX_REPORT.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/PACKAGE_META.json
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/README.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/RESTORE_NOTES.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/STABLE_VERSION.md
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/aol_mail.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/cpa_export.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/grok_register_ttk.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/hybrid_register.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/outlook_mail.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/requirements.txt
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/sub2api_client.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/tools/matrix_cross_run.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/web/__init__.py
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/web/index.html
+ create mode 100644 packages/stable-2026-07-19-matrix-singlethread-18r29/web/server.py
+ create mode 100644 tools/_backfill_sub2api_18r29k.py
+ create mode 100644 tools/reconcile_pools.py
+
+[2026-07-19T11:48:34] RUN git tag stable-2026-07-19-matrix-singlethread-18r29
+[2026-07-19T11:48:34] RUN git push mygithub HEAD:main
+[2026-07-19T11:48:38] ERR To https://github.com/qq1254870524/grok-regkit.git
+   f548687..e7d1034  HEAD -> main
+
+[2026-07-19T11:48:38] RUN git push mygithub stable-2026-07-19-matrix-singlethread-18r29
+[2026-07-19T11:48:42] ERR To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-matrix-singlethread-18r29 -> stable-2026-07-19-matrix-singlethread-18r29
+
+[2026-07-19T11:48:42] RUN gh release create stable-2026-07-19-matrix-singlethread-18r29 C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-singlethread-18r29.zip --repo qq1254870524/grok-regkit --title stable-2026-07-19-matrix-singlethread-18r29 --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_release_notes_18r29.md
+[2026-07-19T11:48:46] https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-matrix-singlethread-18r29
+
+[2026-07-19T11:48:46] DONE publish attempt

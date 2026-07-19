@@ -1,0 +1,5 @@
+18r30 matrix start cells=8 rounds=10 workers=2
+report=C:\Users\zhang\grok-regkit\matrix_runs\matrix_18r30_20260719_123545.jsonl
+
+===== CELL hybrid__direct__aol workers=2 count=10 =====
+start {'ok': True, 'started': True, 'count': 10, 'workers': 2}

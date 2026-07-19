@@ -1,0 +1,167 @@
+[2026-07-19T05:01:57] === release 18r28c start ===
+[2026-07-19T05:01:57] $ C:\Python312\python.exe -B -m py_compile pending_sso_recovery.py hybrid_register.py web/server.py
+[2026-07-19T05:01:58] built C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-nsfw-direct-18r25.zip size=209161
+[2026-07-19T05:01:58] built C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-sso-hold-signup-18r26.zip size=209283
+[2026-07-19T05:01:58] built C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-forced-rereg-18r27.zip size=209195
+[2026-07-19T05:01:58] built C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-pending-turnstile-18r28c.zip size=209479
+[2026-07-19T05:01:58] $ git add -A -- hybrid_register.py grok_register_ttk.py pending_sso_recovery.py web/server.py web/index.html outlook_mail.py aol_mail.py browser/token_harvester.py sub2api_client.py tools/start_web8092_hidden.ps1 tools/matrix_rerun_weak_18r24.py packages/
+[2026-07-19T05:01:59] aced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/grok_register_ttk.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/hybrid_register.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/outlook_mail.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/pending_sso_recovery.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/sub2api_client.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/tools/matrix_rerun_weak_18r24.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/tools/start_web8092_hidden.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/web/index.html', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-sso-hold-signup-18r26/web/server.py', CRLF will be replaced by LF the next time Git touches it
+
+[2026-07-19T05:01:59] $ git status --porcelain
+[2026-07-19T05:01:59] ct-18r25/web/index.html
+A  packages/stable-2026-07-19-nsfw-direct-18r25/web/server.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c.zip
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/CHANGELOG.md
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/MATRIX_REPORT.md
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/RESTORE.md
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/aol_mail.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/grok_register_ttk.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/hybrid_register.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/outlook_mail.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/pending_sso_recovery.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/sub2api_client.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/tools/matrix_rerun_weak_18r24.py
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/tools/start_web8092_hidden.ps1
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/web/index.html
+A  packages/stable-2026-07-19-pending-turnstile-18r28c/web/server.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26.zip
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/CHANGELOG.md
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/MATRIX_REPORT.md
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/RESTORE.md
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/aol_mail.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/grok_register_ttk.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/hybrid_register.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/outlook_mail.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/pending_sso_recovery.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/sub2api_client.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/tools/matrix_rerun_weak_18r24.py
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/tools/start_web8092_hidden.ps1
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/web/index.html
+A  packages/stable-2026-07-19-sso-hold-signup-18r26/web/server.py
+M  pending_sso_recovery.py
+M  web/server.py
+?? logs/
+?? matrix_runs/
+?? tools/_fix_build_list.py
+?? tools/_fix_pending_file_18r24b.py
+?? tools/_fix_post_tag.py
+?? tools/_fix_weak_rounds.py
+?? tools/_patch_18r24.py
+?? tools/_patch_18r24b_reload.py
+?? tools/_patch_18r25_nsfw_outlook.py
+?? tools/_patch_18r25_reload.py
+?? tools/_patch_email_log.py
+?? tools/_patch_pending_18r24.py
+?? tools/_patch_pending_rotate_18r24b.py
+
+[2026-07-19T05:01:59] $ git commit -m 18r28c: pending SSO Turnstile before login + fill_only + auth_error retry; hybrid mail_token pool lookup; hot-reload hybrid on pending job
+[2026-07-19T05:01:59] fw-direct-18r25/web/server.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c.zip
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/CHANGELOG.md
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/MATRIX_REPORT.md
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/RESTORE.md
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/aol_mail.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/grok_register_ttk.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/hybrid_register.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/outlook_mail.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/pending_sso_recovery.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/sub2api_client.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/tools/matrix_rerun_weak_18r24.py
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/tools/start_web8092_hidden.ps1
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/web/index.html
+ create mode 100644 packages/stable-2026-07-19-pending-turnstile-18r28c/web/server.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26.zip
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/CHANGELOG.md
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/MATRIX_REPORT.md
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/RESTORE.md
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/aol_mail.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/grok_register_ttk.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/hybrid_register.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/outlook_mail.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/pending_sso_recovery.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/sub2api_client.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/tools/matrix_rerun_weak_18r24.py
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/tools/start_web8092_hidden.ps1
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/web/index.html
+ create mode 100644 packages/stable-2026-07-19-sso-hold-signup-18r26/web/server.py
+
+[2026-07-19T05:01:59] $ git push mygithub main
+[2026-07-19T05:02:03] To https://github.com/qq1254870524/grok-regkit.git
+   15cf90a..63b9951  main -> main
+
+[2026-07-19T05:02:03] $ git tag -l stable-2026-07-19-nsfw-direct-18r25
+[2026-07-19T05:02:03] $ git tag -a stable-2026-07-19-nsfw-direct-18r25 -m 18r25 NSFW proxy fail -> direct fallback; Outlook early_no_new 110s; 8092 hot-reload mail modules
+[2026-07-19T05:02:03] $ git push mygithub stable-2026-07-19-nsfw-direct-18r25
+[2026-07-19T05:02:06] To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-nsfw-direct-18r25 -> stable-2026-07-19-nsfw-direct-18r25
+
+[2026-07-19T05:02:06] $ gh release view stable-2026-07-19-nsfw-direct-18r25 -R qq1254870524/grok-regkit
+[2026-07-19T05:02:08] release not found
+
+[2026-07-19T05:02:08] $ gh release create stable-2026-07-19-nsfw-direct-18r25 C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-nsfw-direct-18r25.zip -R qq1254870524/grok-regkit --title stable-2026-07-19-nsfw-direct-18r25 --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_notes_stable-2026-07-19-nsfw-direct-18r25.md --latest=false
+[2026-07-19T05:02:12] https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-nsfw-direct-18r25
+
+[2026-07-19T05:02:12] release created stable-2026-07-19-nsfw-direct-18r25
+[2026-07-19T05:02:12] $ git tag -l stable-2026-07-19-sso-hold-signup-18r26
+[2026-07-19T05:02:12] $ git tag -a stable-2026-07-19-sso-hold-signup-18r26 -m 18r26 browser SSO hold: never leave signup form while profile fields present; pure signing-in dwell before grok nudge
+[2026-07-19T05:02:12] $ git push mygithub stable-2026-07-19-sso-hold-signup-18r26
+[2026-07-19T05:02:16] To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-sso-hold-signup-18r26 -> stable-2026-07-19-sso-hold-signup-18r26
+
+[2026-07-19T05:02:16] $ gh release view stable-2026-07-19-sso-hold-signup-18r26 -R qq1254870524/grok-regkit
+[2026-07-19T05:02:17] release not found
+
+[2026-07-19T05:02:17] $ gh release create stable-2026-07-19-sso-hold-signup-18r26 C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-sso-hold-signup-18r26.zip -R qq1254870524/grok-regkit --title stable-2026-07-19-sso-hold-signup-18r26 --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_notes_stable-2026-07-19-sso-hold-signup-18r26.md --latest=false
+[2026-07-19T05:02:22] https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-sso-hold-signup-18r26
+
+[2026-07-19T05:02:22] release created stable-2026-07-19-sso-hold-signup-18r26
+[2026-07-19T05:02:22] $ git tag -l stable-2026-07-19-forced-rereg-18r27
+[2026-07-19T05:02:22] $ git tag -a stable-2026-07-19-forced-rereg-18r27 -m 18r27 pending auth_error/bad_password re-register SAME email with optional b64 mail_token field; burn writes mail_token
+[2026-07-19T05:02:22] $ git push mygithub stable-2026-07-19-forced-rereg-18r27
+[2026-07-19T05:02:25] To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-forced-rereg-18r27 -> stable-2026-07-19-forced-rereg-18r27
+
+[2026-07-19T05:02:25] $ gh release view stable-2026-07-19-forced-rereg-18r27 -R qq1254870524/grok-regkit
+[2026-07-19T05:02:27] release not found
+
+[2026-07-19T05:02:27] $ gh release create stable-2026-07-19-forced-rereg-18r27 C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-forced-rereg-18r27.zip -R qq1254870524/grok-regkit --title stable-2026-07-19-forced-rereg-18r27 --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_notes_stable-2026-07-19-forced-rereg-18r27.md --latest=false
+[2026-07-19T05:02:31] https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-forced-rereg-18r27
+
+[2026-07-19T05:02:31] release created stable-2026-07-19-forced-rereg-18r27
+[2026-07-19T05:02:31] $ git tag -l stable-2026-07-19-pending-turnstile-18r28c
+[2026-07-19T05:02:31] $ git tag -a stable-2026-07-19-pending-turnstile-18r28c -m 18r28/18r28c pending SSO MUST solve+inject Cloudflare Turnstile before login submit; fill credentials without auto-click; CF-stuck/re-fill solve Turnstile; generic An error occurred one fresh Turnstil
+[2026-07-19T05:02:31] $ git push mygithub stable-2026-07-19-pending-turnstile-18r28c
+[2026-07-19T05:02:35] To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-pending-turnstile-18r28c -> stable-2026-07-19-pending-turnstile-18r28c
+
+[2026-07-19T05:02:35] $ gh release view stable-2026-07-19-pending-turnstile-18r28c -R qq1254870524/grok-regkit
+[2026-07-19T05:02:36] release not found
+
+[2026-07-19T05:02:36] $ gh release create stable-2026-07-19-pending-turnstile-18r28c C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-pending-turnstile-18r28c.zip -R qq1254870524/grok-regkit --title stable-2026-07-19-pending-turnstile-18r28c --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_notes_stable-2026-07-19-pending-turnstile-18r28c.md --latest=false
+[2026-07-19T05:02:40] https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-pending-turnstile-18r28c
+
+[2026-07-19T05:02:40] release created stable-2026-07-19-pending-turnstile-18r28c
+[2026-07-19T05:02:40] === release 18r28c done ===
+[2026-07-19T05:02:40] $ gh release list -R qq1254870524/grok-regkit -L 12
+[2026-07-19T05:02:42] stable-2026-07-19-pending-turnstile-18r28c		stable-2026-07-19-pending-turnstile-18r28c	2026-07-18T21:02:41Z
+stable-2026-07-19-forced-rereg-18r27		stable-2026-07-19-forced-rereg-18r27	2026-07-18T21:02:32Z
+stable-2026-07-19-sso-hold-signup-18r26		stable-2026-07-19-sso-hold-signup-18r26	2026-07-18T21:02:23Z
+stable-2026-07-19-nsfw-direct-18r25		stable-2026-07-19-nsfw-direct-18r25	2026-07-18T21:02:13Z
+stable-2026-07-19-consent-working-18r20	Latest	stable-2026-07-19-consent-working-18r20	2026-07-18T18:09:38Z
+stable-2026-07-19-mailpoll180-18r19		stable-2026-07-19-mailpoll180-18r19	2026-07-18T17:53:39Z
+stable-2026-07-19-dualsend-lock-18r18		stable-2026-07-19-dualsend-lock-18r18	2026-07-18T17:15:03Z
+stable-2026-07-19-ratelimit-switch-18r16		stable-2026-07-19-ratelimit-switch-18r16	2026-07-18T16:50:09Z
+stable-2026-07-18-consent-maxscan-18r13		stable-2026-07-18-consent-maxscan-18r13	2026-07-18T15:07:17Z
+stable-2026-07-18-protocol-restore-18r12		stable-2026-07-18-protocol-restore-18r12	2026-07-18T15:06:28Z
+stable-2026-07-18-matrix-uifallback		stable-2026-07-18-matrix-uifallback	2026-07-17T23:54:02Z
+stable-2026-07-18 (known-good)		stable-2026-07-18	2026-07-17T18:52:37Z
+

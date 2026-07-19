@@ -1,0 +1,24 @@
+12:32:31 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=gasconbrendan@aol.com auth=IMAP password/app-password
+12:32:39 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=morel.herve@aol.com auth=IMAP password/app-password
+12:32:47 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=selfishgirl_1988@aol.com auth=IMAP password/app-password
+12:32:55 run=True ok=0 fail=0 pend=0 phase=create_email ev=[w1] [browser] open signup page for this account
+12:33:03 run=True ok=0 fail=0 pend=0 phase=create_email ev=[w1] [browser] open signup page for this account
+12:33:11 run=True ok=0 fail=0 pend=0 phase=create_email ev=[w2] [*] 已点击「使用邮箱注册」按钮: 使用邮箱注册 使用邮箱注册
+12:33:19 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[w2] [*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=cortese.judith@aol.com auth=IMAP password/app-password
+12:33:27 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[w2] [*] AOL IMAP connect host=imap.aol.com port=993 timeout=30s email=cortese.judith@aol.com auth=IMAP password/app-password
+12:33:35 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[w1] [*] AOL IMAP folder=Inbox fetched=5 top=5
+12:33:43 run=True ok=0 fail=0 pend=0 phase=waiting_code ev=[w2] [+] AOL code ok email=cortese.judith@aol.com code=VNL-9BV subject=SpaceXAI confirmation code: VNL-9BV from=SpaceXAI <noreply@x.ai> source=IMAP/Inbox alt_count=0
+12:33:51 run=True ok=0 fail=0 pend=0 phase=verify_code ev=[w2] [*] turnstile sitekey=0x4AAAAAAAhr9JGVDZbr...
+12:33:59 run=True ok=0 fail=0 pend=0 phase=create_email ev=[w1] [hybrid] resolving next-action after turnstile…
+12:34:07 run=True ok=0 fail=0 pend=0 phase=sso ev=[w2] [sso] stage=navigate#0 url=https://auth.grokusercontent.com/set-cookie?q=eyJhbGciOiJIUzI1NiJ9.eyJjb25maWciO elapsed=0.0s
+12:34:15 run=True ok=0 fail=0 pend=0 phase=sso ev=[w2] [sso] stage=navigate#0 url=https://auth.grokusercontent.com/set-cookie?q=eyJhbGciOiJIUzI1NiJ9.eyJjb25maWciO elapsed=0.0s
+12:34:23 run=True ok=0 fail=0 pend=0 phase=sso ev=[w2] [sso] stage=navigate#0 url=https://auth.grokusercontent.com/set-cookie?q=eyJhbGciOiJIUzI1NiJ9.eyJjb25maWciO elapsed=0.0s
+12:34:31 run=True ok=1 fail=0 pend=0 phase=finished ev=[w1] [*] hybrid worker exit
+12:34:39 run=True ok=2 fail=0 pend=0 phase=post_process ev=[*] 等待后处理队列… 剩余约 2（CPA/NSFW 后台中）
+12:34:47 run=True ok=2 fail=0 pend=0 phase=post_process ev=[*] 等待后处理队列… 剩余约 2（CPA/NSFW 后台中）
+12:34:55 run=True ok=2 fail=0 pend=0 phase=post_process ev=[w2] [nsfw] try path=proxy proxy=yes
+12:35:03 run=True ok=2 fail=0 pend=0 phase=post_process ev=[w2] [cpa] mint 间隔保护: 等待 8.0s (gap=25.0s)
+12:35:11 run=True ok=2 fail=0 pend=0 phase=post_process ev=[w2] [cpa] try authcode mint (referrer=grok-build, fused from grokRegister-cpa)
+12:35:19 run=True ok=2 fail=0 pend=0 phase=post_process ev=[w2] [*] Sub2API OAuth 入池后等待 5.0s 再做可用性验证 account_id=718
+12:35:27 run=False ok=2 fail=0 pend=0 phase=finished ev=[*] 混合任务结束。成功 2 | 失败 0 | pending_sso 0 | 跳过(池空) 0 | workers=2
+FINAL {"ok": true, "running": false, "success": 2, "fail": 0, "pending_sso": 0, "skipped": 0, "target": 2, "job_kind": "register", "last_accounts_file": "C:\\Users\\zhang\\grok-regkit\\accounts_hybrid_20260719_123223.txt", "started_at": 1784435543.1049876, "finished_at": 1784435721.0411649, "error": "", "session_success": 2, "session_fail": 0, "session_pending_sso": 0, "session_skipped": 0, "phase": "finished", "last_event": "[*] 混合任务结束。成功 2 | 失败 0 | pending_sso 0 | 跳过(池空) 0 | workers=2", "updated_at": 1784435721.0411649, "jobs_started": 1, "jobs_finished": 1}

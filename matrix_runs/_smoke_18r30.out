@@ -1,0 +1,9 @@
+18r30 matrix start cells=1 rounds=2 workers=2
+report=C:\Users\zhang\grok-regkit\matrix_runs\matrix_18r30_20260719_121329.jsonl
+
+===== CELL hybrid__socks5_list__aol workers=2 count=2 =====
+start {'ok': True, 'started': True, 'count': 2, 'workers': 2}
+result {'cell': 'hybrid__socks5_list__aol', 'mode': 'hybrid', 'proxy': 'socks5_list', 'email': 'aol', 'workers': 2, 'count': 2, 'success': 0, 'fail': 0, 'pending_sso': 0, 'skipped': 0, 'error': '', 'last_event': '', 'finished_at': None, 'ts': '2026-07-19T12:18:33'}
+pending start {'ok': True, 'started': True, 'count': 2, 'workers': 2, 'job_kind': 'pending_sso_recovery'}
+DONE C:\Users\zhang\grok-regkit\matrix_runs\matrix_18r30_20260719_121329_summary.json
+MD C:\Users\zhang\grok-regkit\matrix_runs\MATRIX_18r30_20260719_121329.md

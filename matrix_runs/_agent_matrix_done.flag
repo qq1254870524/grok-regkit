@@ -1,0 +1,27 @@
+ts=11:49:11 tick=48
+phase=finished running=False s/f/p=13/2/0
+last=[*] pending_sso 恢复结束。成功 0 | 失败 1 | pending_sso 0 | 跳过(池空) 0
+rows=104 cells_ge10=10 report=True done=True
+---BOARD---
+browser__direct__aol: 10/10 ok=10 {'success': 10}
+browser__direct__outlook: 10/10 ok=7 {'success': 7, 'early_no_new_mail': 3}
+browser__socks5_list__aol: 10/10 ok=8 {'profile_fill_fail': 1, 'success': 8, 'unknown': 1}
+browser__socks5_list__outlook: 10/10 ok=6 {'success': 6, 'pending_sso': 1, 'early_no_new_mail': 1, 'sso_timeout': 2}
+hybrid__direct__aol: 10/10 ok=10 {'success': 10}
+hybrid__direct__outlook: 10/10 ok=10 {'success': 10}
+hybrid__socks5_list__aol: 10/10 ok=10 {'success': 10}
+hybrid__socks5_list__outlook: 10/10 ok=9 {'success': 9, 'pending_sso': 1}
+pending_sso_recovery__direct: 10/10 ok=8 {'success': 8, 'email_login_fail': 2}
+pending_sso_recovery__socks5_list: 10/10 ok=9 {'success': 9, 'sso_timeout': 1}
+---CONSOLE---
+[11:36:03] [pending_sso_recovery__direct] r4/10 ok=True class=success s=1 f=0 p=0 t=156.7s err=
+[11:38:14] [pending_sso_recovery__direct] r5/10 ok=True class=success s=1 f=0 p=0 t=128.7s err=
+[11:41:01] [pending_sso_recovery__direct] r6/10 ok=True class=success s=1 f=0 p=0 t=164.8s err=
+[11:43:51] [pending_sso_recovery__direct] r7/10 ok=True class=success s=1 f=0 p=0 t=168.9s err=
+[11:46:42] [pending_sso_recovery__direct] r8/10 ok=True class=success s=1 f=0 p=0 t=168.8s err=
+[11:47:41] [pending_sso_recovery__direct] r9/10 ok=False class=email_login_fail s=0 f=1 p=0 t=56.4s err=
+[11:48:27] [pending_sso_recovery__direct] r10/10 ok=False class=email_login_fail s=0 f=1 p=0 t=44.2s err=
+[11:48:29] DONE total=100 ok=87 fail=13 report=C:\Users\zhang\grok-regkit\matrix_runs\matrix_18r29_20260719_070041\REPORT.md
+
+publish_wait j=0 zip=True tag_check...
+tag=stable-2026-07-19-matrix-singlethread-18r29

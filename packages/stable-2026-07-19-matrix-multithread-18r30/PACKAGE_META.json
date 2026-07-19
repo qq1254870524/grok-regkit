@@ -1,0 +1,14 @@
+{
+  "tag": "stable-2026-07-19-matrix-multithread-18r30",
+  "created": "2026-07-19T12:38:33",
+  "kind": "multithread",
+  "workers_ui": true,
+  "baseline_singlethread": "stable-2026-07-19-matrix-singlethread-18r29",
+  "notes": [
+    "Web regWorkers + API workers",
+    "SOCKS5 per-worker bind pool[(w-1)%n]",
+    "email preflight sample + auth-only",
+    "mail ALL folders top=5",
+    "stop reg does not kill companion services"
+  ]
+}

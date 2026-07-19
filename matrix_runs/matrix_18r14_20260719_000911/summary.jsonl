@@ -1,0 +1,2 @@
+{"cell": "hybrid__direct__outlook", "round": 1, "kind": "register", "started": "2026-07-19T00:09:11", "ok": false, "success": 0, "fail": 0, "pending_sso": 1, "skipped": 0, "error": "", "class": "pending_sso", "elapsed_s": 257.3, "finished": "2026-07-19T00:13:28"}
+{"cell": "hybrid__direct__outlook", "round": 2, "kind": "register", "started": "2026-07-19T00:13:30", "ok": false, "success": 0, "fail": 0, "pending_sso": 1, "skipped": 0, "error": "", "class": "pending_sso", "elapsed_s": 261.4, "finished": "2026-07-19T00:17:52"}
