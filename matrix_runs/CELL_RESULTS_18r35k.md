@@ -1,32 +1,31 @@
 ﻿# Matrix cell results 2026-07-20 (18r35k live validation)
 
-Version under test: **stable-2026-07-20-matrix-hotfix-18r35k** (`edfaca0` / docs `eb807ca`)
+Version: **stable-2026-07-20-matrix-hotfix-18r35k** + validation package **stable-2026-07-20-matrix-validation-18r35k-live**
 
-## Prior session (carried)
+## Register matrix
 | cell | result |
 |------|--------|
-| browser × direct × outlook count=6 w=3 | **6/0/0** instant SSO |
-| hybrid × socks5 × outlook count=4 w=2 | **2/0/2** pending (Outlook early_no_new_mail → burn + pending mail_token) |
-| pending_sso recover (18r35j) | 4/2 then fixed queue |
+| browser×direct×outlook (prior) | **6/0/0** |
+| hybrid×socks5×outlook (prior) | **2/0/2** pending (early_no_new_mail) |
+| hybrid×direct×aol | **4/0/0** |
+| hybrid×socks5×aol | **4/0/0** |
+| browser×direct×aol | **4/0/0** |
+| browser×socks5×aol | **4/0/0** |
+| hybrid×direct×outlook | **3/0/1** pending (mailbox empty → burn+pending; 0 RATE_LIMIT) |
 
-## This session
+## pending_sso recover
 | cell | result |
 |------|--------|
-| hybrid × direct × aol count=4 w=2 | **4/0/0** |
-| hybrid × socks5_list × aol count=4 w=2 | **4/0/0** Sub2 ~1094 |
-| browser × direct × aol count=4 w=2 | **4/0/0** Sub2 ~1097–1098 |
-| browser × socks5_list × aol count=4 w=2 | **4/0/0** Sub2 ~1102 |
-| pending_sso recover count=6 w=3 | **6/0/0** (Turnstile before login; fail→re-register not re-login loop) |
+| recover count=6 w=3 | **6/0/0** |
 
-## Totals this session (register+recover counted by job)
-- AOL register jobs: **16 success / 0 fail / 0 pending_sso**
+## Totals (this continuous agent session after 18r35k)
+- AOL register: **16 success / 0 fail / 0 pending**
+- Outlook hybrid direct: **3 success / 0 fail / 1 pending**
 - pending recover: **6 success / 0 fail**
 - **RATE_LIMIT / 验证码过多 hard fail: 0**
-- Main path intact: register → instant SSO (sso_len≈2477) → NSFW → G2A → CPA authcode → Sub2 OAuth
-- reconcile missing=0 observed after hybrid jobs
-- Sub2 verify may 403 once on brand-new account then pass on retry (account kept)
+- Main path OK: register → instant SSO → G2A/CPA/Sub2
+- Gateways kept up: 8092/8010/8080/8317/8318
 
-## Notes
-- CreateEmail global gate 4.0s + skip re-click anti double-send active
-- Outlook no-mail still burn/switch; do not change register main path for delivery
-- Stop registration only via /api/stop; gateways 8010/8080/8317/8318/8092 kept up
+## Releases (no overwrite)
+- https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-20-matrix-hotfix-18r35k
+- https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-20-matrix-validation-18r35k-live

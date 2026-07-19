@@ -40,3 +40,7 @@ register success → **instant SSO** → NSFW → Grok2API → CPA OIDC → Sub2
 - matrix_runs/CELL_RESULTS_18r35k.md
 - matrix_runs/NOTE_rate_limit_create_email_18r35k.md (prior)
 - source zip of current tree (secrets excluded by .gitignore)
+
+### Post-release outlook cell
+- hybrid×direct×outlook count=4 w=2: **3/0/1** pending (early_no_new_mail class; 0 RATE_LIMIT)
+
