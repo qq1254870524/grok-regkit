@@ -55,4 +55,4 @@
 - `pending_sso_recovery__socks5_list`: ok=9/10 classes={'success': 9, 'sso_timeout': 1}
 
 - summary_rows=104 global_classes={'success': 87, 'empty_log': 3, 'pending_sso': 2, 'early_no_new_mail': 4, 'runner_exception': 1, 'sso_timeout': 3, 'profile_fill_fail': 1, 'unknown': 1, 'email_login_fail': 2}
-- marked=2026-07-19T11:48:33
+- marked=2026-07-19T11:48:50
