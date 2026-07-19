@@ -38,3 +38,13 @@ xAI CreateEmail rate limit on **email and/or egress IP**, not IMAP failure. Miti
 
 ## Upgrade
 Pull/tag this release on running host; restart **only** grok-regkit web (8092). Keep Sub2API/Grok2API/CPA/CLIProxy running.
+
+## Live validation update
+| cell | result |
+|------|--------|
+| browser × direct × outlook count=6 w=3 | **6/0/0** instant SSO path OK |
+| hybrid × socks5_list × outlook count=4 w=2 | **2 success / 0 fail / 2 pending_sso** |
+| pending notes | 2× Outlook early_no_new_mail (Graph no post-send xAI mail) → burn pool + pending_sso with mail_token; **0** CreateEmail 验证码过多 |
+| protocol | hybrid sign-up curl next-action 7f7f6cee... status=200 sso_len=2477 on both successes |
+
+Commit: edfaca0
