@@ -1,22 +1,29 @@
-# 18r35 Progress Board
+﻿# PROGRESS BOARD 18r35k — live matrix validation 2026-07-20
 
-Updated: 2026-07-20 05:04:57
+## Status: VALIDATED + RELEASE NOTES PACKAGE
 
-- matrix_alive: False
-- cells_done: 6/8 (+pending_sso_recovery)
-- current: run=True phase=waiting_code ok=2 fail=0 pend=0 target=4
-- session: 8/0/0
-- jobs: 1/2
-- last_event: [w1] [*] Outlook Graph folder mode=priority keys=['inbox', 'junkemail', 'deleteditems']
-- pulse: 05:04:55 running=True phase=waiting_code ok=2 fail=0 pend=0 target=4 mode=hybrid proxy=socks5_list email=outlook workers=2 | [w2] [*] Outlook Graph via direct ok folder=inbox count=5
+### Gateways (kept running)
+- 8092 grok-regkit web OK
+- 8010 Grok2API OK
+- 8080 Sub2API OK
+- 8317/8318 CPA/CLIProxy OK
 
-## Completed cells
+### Session totals (api/status after runs)
+- session_success ≈ 30
+- session_fail = 0
+- session_pending_sso = 2 (legacy outlook empty-mail from prior hybrid socks cell)
+- jobs_finished = 7 this continuous session
 
-| cell | success | fail | pending |
-|---|---:|---:|---:|
-| `hybrid__direct__aol` | 39 | 1 | 0 |
-| `hybrid__direct__outlook` | 5 | 0 | 35 |
-| `hybrid__socks5_list__aol` | 35 | 2 | 3 |
-| `hybrid__socks5_list__outlook` | 6 | 0 | 34 |
-| `browser__direct__aol` | 0 | 40 | 0 |
-| `browser__direct__outlook` | 0 | 40 | 0 |
+### Cells
+1. hybrid×direct×aol 4/0/0
+2. hybrid×socks×aol 4/0/0
+3. browser×direct×aol 4/0/0
+4. browser×socks×aol 4/0/0
+5. pending_sso recover 6/0/0
+(+ prior outlook cells)
+
+### RATE_LIMIT hard fails: 0
+
+### Release
+- Existing hotfix tag kept: stable-2026-07-20-matrix-hotfix-18r35k
+- New validation package tag: stable-2026-07-20-matrix-validation-18r35k-live
