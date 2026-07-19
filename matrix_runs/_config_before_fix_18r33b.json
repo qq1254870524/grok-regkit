@@ -1,0 +1,8 @@
+{
+  "register_mode": "browser",
+  "proxy_mode": "direct",
+  "email_provider": "aol",
+  "workers": 2,
+  "thread_count": 2,
+  "register_count": 100
+}

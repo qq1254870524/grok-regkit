@@ -532,7 +532,7 @@ class ContinuousEmailPreflight:
         self.config = config if isinstance(config, dict) else {}
         self.log = log or (lambda _m: None)
         self.top = max(1, int(top or 5))
-        self.warm_ahead = max(2, int(warm_ahead or 6))
+        self.warm_ahead = max(1, int(warm_ahead or 1))
         self.interval_sec = max(0.2, float(interval_sec or 0.8))
         self.ttl_sec = max(60.0, float(ttl_sec or 600.0))
         self._stop = threading.Event()
@@ -691,8 +691,11 @@ def start_continuous_preflight(
         warm_ahead = int(c.get("email_preflight_warm_ahead") or 0)
     except Exception:
         warm_ahead = 0
+    # 0/negative => auto from workers; positive => user web-defined cap (1..200)
     if warm_ahead <= 0:
         warm_ahead = max(6, min(40, w * 4))
+    else:
+        warm_ahead = max(1, min(200, warm_ahead))
     try:
         interval = float(c.get("email_preflight_interval_sec") or 0.8)
     except Exception:

@@ -1,0 +1,27 @@
+{
+  "auto": true,
+  "ts": "2026-07-20T02:28:06.321980",
+  "status": {
+    "ok": true,
+    "running": false,
+    "success": 1,
+    "fail": 38,
+    "pending_sso": 0,
+    "skipped": 0,
+    "target": 40,
+    "job_kind": "register",
+    "last_accounts_file": "C:\\Users\\zhang\\grok-regkit\\accounts_20260720_021706.txt",
+    "started_at": 1784484907.0224118,
+    "finished_at": 1784485640.9502244,
+    "error": "",
+    "session_success": 89,
+    "session_fail": 121,
+    "session_pending_sso": 76,
+    "session_skipped": 0,
+    "phase": "finished",
+    "last_event": "[*] 多线程任务结束。成功 1 | 失败 38 | pending_sso 0",
+    "updated_at": 1784485640.9502244,
+    "jobs_started": 8,
+    "jobs_finished": 8
+  }
+}

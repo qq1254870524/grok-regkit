@@ -364,6 +364,21 @@
               <input id="regWorkers" type="number" min="1" max="32" value="1" />
             </div>
             <div class="field">
+              <div class="label">邮箱预热数量 warm_ahead</div>
+              <div class="hint" style="font-size:11px;color:var(--muted);margin:0 0 4px">后台持续预登录保持的热邮箱个数。<b>0=自动</b>（max(6, min(40, workers×4))）；可自定义如 8/16/24，不固定死。网页保存后下次任务/预热线程生效。</div>
+              <input id="emailPreflightWarmAhead" type="number" min="0" max="200" value="0" />
+            </div>
+            <div class="field">
+              <div class="label">邮箱预检 limit（启动抽样）</div>
+              <div class="hint" style="font-size:11px;color:var(--muted);margin:0 0 4px">任务启动时最多预检多少个邮箱（坏号剔除）。与上面 warm_ahead 独立。</div>
+              <input id="emailPreflightLimit" type="number" min="0" max="200" value="12" />
+            </div>
+            <div class="field span-2">
+              <div class="label">邮箱预热开关</div>
+              <label class="check-row"><input id="emailPreflightOnStart" type="checkbox" checked /> 任务启动时预检邮箱（email_preflight_on_start）</label>
+              <label class="check-row" style="margin-top:6px"><input id="emailPreflightContinuous" type="checkbox" checked /> 后台持续预登录（按 warm_ahead 维持热邮箱，不满就继续登录）</label>
+            </div>
+            <div class="field">
               <div class="label">注册模式</div>
               <select id="registerMode" title="全浏览器更稳；混合更快（协议+短浏览器）">
                 <option value="browser" selected>全浏览器</option>
@@ -1203,6 +1218,10 @@
         register_count: parseInt($('regCount').value, 10) || 1,
         workers: Math.max(1, Math.min(32, parseInt(($('regWorkers')?.value || '1'), 10) || 1)),
         thread_count: Math.max(1, Math.min(32, parseInt(($('regWorkers')?.value || '1'), 10) || 1)),
+        email_preflight_warm_ahead: Math.max(0, Math.min(200, parseInt(($('emailPreflightWarmAhead')?.value || '0'), 10) || 0)),
+        email_preflight_limit: Math.max(0, Math.min(200, parseInt(($('emailPreflightLimit')?.value || '12'), 10) || 0)),
+        email_preflight_on_start: !!$('emailPreflightOnStart')?.checked,
+        email_preflight_continuous: !!$('emailPreflightContinuous')?.checked,
         register_mode: ($('registerMode')?.value || 'browser'),
         grok2api_auto_add_local: $('grok2api_auto_add_local').checked,
         grok2api_auto_add_remote: $('grok2api_auto_add_remote').checked,
@@ -1300,6 +1319,10 @@
       setVal('post_success_async', c.post_success_async !== false);
       setVal('regCount', c.register_count || 1);
       setVal('regWorkers', c.workers || c.thread_count || 1);
+      setVal('emailPreflightWarmAhead', (c.email_preflight_warm_ahead != null ? c.email_preflight_warm_ahead : 0));
+      setVal('emailPreflightLimit', (c.email_preflight_limit != null ? c.email_preflight_limit : 12));
+      setVal('emailPreflightOnStart', c.email_preflight_on_start !== false);
+      setVal('emailPreflightContinuous', c.email_preflight_continuous !== false);
       setVal('registerMode', (c.register_mode === 'hybrid' ? 'hybrid' : 'browser'));
       setVal('grok2api_auto_add_local', !!c.grok2api_auto_add_local);
       setVal('grok2api_auto_add_remote', !!c.grok2api_auto_add_remote);

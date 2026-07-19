@@ -980,6 +980,22 @@ async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(
     _require_auth(x_access_key)
     engine.load_config()
     updates = body.model_dump(exclude_unset=True)
+    # 18r33c: while job running, ignore critical keys so UI/other tools cannot thrash matrix cell
+    JOB_LOCKED_CONFIG_KEYS = (
+        "register_mode", "proxy_mode", "email_provider", "workers", "thread_count",
+        "register_count", "proxy", "proxy_list",
+    )
+    with _job_lock:
+        job_running = bool(_job_state.get("running"))
+    if job_running:
+        blocked = [k for k in list(updates.keys()) if k in JOB_LOCKED_CONFIG_KEYS]
+        for k in blocked:
+            updates.pop(k, None)
+        if blocked:
+            _append_log(
+                f"[!] put_config ignored locked keys while job running: {','.join(blocked)} "
+                f"(preserve active job cell settings)"
+            )
     for key, value in updates.items():
         if key in SECRET_FIELDS and isinstance(value, str):
             stripped = value.strip()

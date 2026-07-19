@@ -1,0 +1,27 @@
+{
+  "paused_at": "2026-07-20T00:33:30",
+  "final_status": {
+    "ok": true,
+    "running": false,
+    "success": 3,
+    "fail": 0,
+    "pending_sso": 4,
+    "skipped": 0,
+    "target": 100,
+    "job_kind": "register",
+    "last_accounts_file": "C:\\Users\\zhang\\grok-regkit\\accounts_hybrid_20260720_002438.txt",
+    "started_at": 1784478278.325358,
+    "finished_at": 1784478796.4820466,
+    "error": "",
+    "session_success": 3,
+    "session_fail": 0,
+    "session_pending_sso": 4,
+    "session_skipped": 0,
+    "phase": "finished",
+    "last_event": "[*] 混合任务结束。成功 3 | 失败 0 | pending_sso 4 | 跳过(池空) 0 | workers=2",
+    "updated_at": 1784478796.4820466,
+    "jobs_started": 1,
+    "jobs_finished": 1
+  },
+  "note": "current job finished; all matrix paused; services left running"
+}

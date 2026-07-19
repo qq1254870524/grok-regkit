@@ -1,9 +1,9 @@
 {
-  "ts": "2026-07-19T21:44:56",
+  "ts": "2026-07-20T02:27:56",
   "running": false,
   "phase": "finished",
-  "event": "[*] 混合任务结束。成功 97 | 失败 0 | pending_sso 3 | 跳过(池空) 0 | workers=2",
-  "session_success": 136,
+  "event": "[*] 多线程任务结束。成功 1 | 失败 38 | pending_sso 0",
+  "session_success": 89,
   "matrix_alive": true,
   "summary_rows": 104,
   "ok_rows": 87,

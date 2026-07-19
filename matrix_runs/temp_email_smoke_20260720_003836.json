@@ -1,0 +1,112 @@
+[
+  {
+    "ok": true,
+    "provider": "boomlify",
+    "email": "ud1d1c0f8@sql.vezra.store",
+    "message_count": 0,
+    "elapsed": 4.69
+  },
+  {
+    "ok": true,
+    "provider": "linshi",
+    "email": "toivter124@swagpapa.com",
+    "message_count": 0,
+    "elapsed": 3.3
+  },
+  {
+    "ok": true,
+    "provider": "linshiyouxiang",
+    "email": "f17va51@pdf-cutter.com",
+    "message_count": 0,
+    "elapsed": 3.1
+  },
+  {
+    "ok": true,
+    "provider": "mail.tm",
+    "email": "71gyj88l47@web-library.net",
+    "message_count": 0,
+    "elapsed": 5.15
+  },
+  {
+    "ok": true,
+    "provider": "mailtm",
+    "email": "r0vyqehoid@web-library.net",
+    "message_count": 0,
+    "elapsed": 5.02
+  },
+  {
+    "ok": true,
+    "provider": "temp-mail.io",
+    "email": "ea1s4wku72h@bwmyga.com",
+    "message_count": 0,
+    "elapsed": 4.43
+  },
+  {
+    "ok": true,
+    "provider": "temp-mail.org",
+    "email": "cejade6290@gicont.com",
+    "message_count": 0,
+    "elapsed": 4.41
+  },
+  {
+    "ok": true,
+    "provider": "tempmail.lol",
+    "email": "cuttler445871@be.icodetensor.com",
+    "message_count": 0,
+    "elapsed": 3.62
+  },
+  {
+    "ok": true,
+    "provider": "tempmail.plus",
+    "email": "gwx30z0bikgck@mailbox.in.ua",
+    "message_count": 0,
+    "elapsed": 4.36
+  },
+  {
+    "ok": true,
+    "provider": "tempmail_io",
+    "email": "5zi9133kq4x@bltiwd.com",
+    "message_count": 0,
+    "elapsed": 3.87
+  },
+  {
+    "ok": true,
+    "provider": "tempmail_lol",
+    "email": "caraviello44587d@sb.gardianwaves.org",
+    "message_count": 0,
+    "elapsed": 3.42
+  },
+  {
+    "ok": true,
+    "provider": "tempmail_org",
+    "email": "focoko9043@diarshop.com",
+    "message_count": 0,
+    "elapsed": 4.16
+  },
+  {
+    "ok": true,
+    "provider": "tempmail_plus",
+    "email": "g39dxrytqtfc1@fexbox.org",
+    "message_count": 0,
+    "elapsed": 3.85
+  },
+  {
+    "provider": "duckmail",
+    "ok": true,
+    "email": "ycvidprkg7@duckmail.sbs",
+    "token_len": 263,
+    "elapsed": 5.88
+  },
+  {
+    "provider": "yyds",
+    "ok": false,
+    "error": "YYDS API Key 或 JWT 未配置",
+    "elapsed": 0.0
+  },
+  {
+    "provider": "cloudflare",
+    "ok": false,
+    "error": "Cloudflare API Base 未配置",
+    "elapsed": 0.0
+  }
+]

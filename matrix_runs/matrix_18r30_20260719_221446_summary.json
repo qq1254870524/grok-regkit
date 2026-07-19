@@ -1,0 +1,41 @@
+[
+  {
+    "cell": "hybrid__direct__outlook",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:16:17"
+  },
+  {
+    "cell": "hybrid__socks5_list__aol",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:17:48"
+  },
+  {
+    "cell": "hybrid__socks5_list__outlook",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:19:19"
+  },
+  {
+    "cell": "browser__direct__aol",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:20:49"
+  },
+  {
+    "cell": "browser__direct__outlook",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:22:20"
+  },
+  {
+    "cell": "browser__socks5_list__aol",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:23:51"
+  },
+  {
+    "cell": "browser__socks5_list__outlook",
+    "error": "HTTP Error 409: Conflict",
+    "ts": "2026-07-19T22:25:22"
+  },
+  {
+    "cell": "pending_sso_recovery",
+    "error": "HTTP Error 409: Conflict"
+  }
+]

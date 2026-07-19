@@ -5,6 +5,7 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-19r31-g2a-keyfix: 修复 grok2api_remote_app_key 错误导致远端入池 401 静默失败；后处理/远端入池前热重载 config.json；401/403 明确报错且不重试、不误走全量覆盖。
 - 2026-07-19r30-lossfix: 后处理 Sub2 失败重试；任务结束 wait 加长 + 自动对账补齐 G2A/CPA/hybrid 缺号；减少 Sub2 比 G2A 少号。
 - 2026-07-19r29k: 后处理顺序改为 NSFW→G2A→CPA→Sub2API；Sub2API 优先用刚 mint 的 CPA OAuth JSON 直导入，
   失败再 SSO→OAuth；失败写入 sub2api_import_pending.jsonl 便于回填；日志打印三池计数对照。
@@ -178,7 +179,7 @@ DEFAULT_CONFIG = {
     "email_preflight_limit": 12,
     # continuous background pre-login (warm queue ahead of workers)
     "email_preflight_continuous": True,
-    "email_preflight_warm_ahead": 0,  # 0 => max(6, workers*4)
+    "email_preflight_warm_ahead": 0,  # 0=auto max(6,min(40,workers*4)); >0 = web UI fixed warm count
     "email_preflight_warm_ttl_sec": 600,
     "email_preflight_interval_sec": 0.8,
     # register_mode: browser (full UI) | hybrid (protocol + short browser tokens)
@@ -1761,6 +1762,11 @@ def add_token_to_grok2api_remote_pool(
     token = _normalize_sso_token(raw_token)
     if not token:
         return False
+    # 长跑 matrix/web 进程热重载，避免 config.json 已改 app_key 但内存仍用旧值导致 401
+    try:
+        load_config()
+    except Exception:
+        pass
     base = str(config.get("grok2api_remote_base", "") or "").strip().rstrip("/")
     app_key = str(config.get("grok2api_remote_app_key", "") or "").strip()
     pool_name = str(config.get("grok2api_pool_name", "ssoBasic") or "ssoBasic").strip() or "ssoBasic"
@@ -1768,6 +1774,14 @@ def add_token_to_grok2api_remote_pool(
         if log_callback:
             log_callback("[Debug] 号池远端未配置 base/app_key，跳过")
         return False
+    if app_key.lower() in ("grok2api", "app_key", "your_app_key", "changeme", "admin"):
+        msg = (
+            f"[!] G2A 远端 app_key 仍是占位字面量 {app_key!r}，"
+            "请改为 G2A data/config.toml 的真实 app_key，否则 /tokens/add 会 401"
+        )
+        if log_callback:
+            log_callback(msg)
+        raise RuntimeError(msg)
     headers = {"Content-Type": "application/json"}
     query = {"app_key": app_key}
     pool_map = {"ssoBasic": "basic", "ssoSuper": "super"}
@@ -1817,10 +1831,20 @@ def add_token_to_grok2api_remote_pool(
                 status_code = getattr(getattr(add_exc, "response", None), "status_code", None)
                 if status_code is None:
                     # DummyResponse / requests-style raise_for_status strings
-                    for code in (502, 503, 504, 429):
+                    for code in (401, 403, 404, 502, 503, 504, 429):
                         if str(code) in err_s:
                             status_code = code
                             break
+                if status_code in (401, 403) or " 401" in err_s or "401 " in err_s or " 403" in err_s:
+                    msg = (
+                        f"[!] G2A 远端鉴权失败 status={status_code} endpoint={endpoint}。"
+                        "请核对 config.json 的 grok2api_remote_app_key 是否等于 "
+                        "G2A data/config.toml 的 app_key（不是 api_key / 字面量 grok2api）。"
+                        f" 原始错误: {err_s[:160]}"
+                    )
+                    if log_callback:
+                        log_callback(msg)
+                    raise RuntimeError(msg) from add_exc
                 retryable = status_code in (429, 502, 503, 504) or any(
                     x in err_s.lower() for x in ("502", "503", "504", "429", "bad gateway", "timeout", "connection")
                 )
@@ -1945,6 +1969,10 @@ def _post_success_worker_loop():
         email = job.get("email") or ""
         sso = job.get("sso") or ""
         try:
+            try:
+                load_config()
+            except Exception:
+                pass
             log(f"[bg] 后处理开始: {email}")
             if job.get("do_nsfw"):
                 log(f"[bg] 开启 NSFW: {email}")
@@ -4254,10 +4282,20 @@ def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=Non
     deadline = time.time() + timeout
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        page = _get_page() or page
+        if page is None:
+            try:
+                page = refresh_active_page()
+            except Exception:
+                page = None
+        if page is None:
+            sleep_with_cancel(0.4, cancel_callback)
+            continue
         if log_callback:
             log_callback("[Debug] 尝试查找“使用邮箱注册”按钮...")
 
-        clicked = page.run_js(r"""
+        try:
+            clicked = page.run_js(r"""
 function isVisible(node) {
     if (!node) return false;
     const style = window.getComputedStyle(node);
@@ -4296,6 +4334,23 @@ if (!target) {
 target.click();
 return candidates[0].text || true;
         """)
+        except Exception as _ce_exc:
+            em = str(_ce_exc)
+            if (
+                ("NoneType" in em and "run_js" in em)
+                or "页面被刷新" in em
+                or "PageDisconnected" in em
+                or "与页面的连接已断开" in em
+            ):
+                if log_callback:
+                    log_callback(f"[!] click_email page disconnected: {_ce_exc}")
+                try:
+                    page = refresh_active_page()
+                except Exception:
+                    page = _get_page()
+                sleep_with_cancel(0.5, cancel_callback)
+                continue
+            raise
 
         if clicked:
             if log_callback:
@@ -4364,7 +4419,14 @@ def wait_cloudflare_passthrough(timeout=45, log_callback=None, cancel_callback=N
     reported = False
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        refresh_active_page()
+        page = None
+        try:
+            page = refresh_active_page()
+        except Exception:
+            page = _get_page()
+        if page is None:
+            sleep_with_cancel(1, cancel_callback)
+            continue
         if not page_is_cloudflare_challenge(page):
             if reported and log_callback:
                 log_callback("[*] Cloudflare 挑战已通过")
@@ -4395,7 +4457,8 @@ if (btn) btn.click();
         except Exception:
             pass
         sleep_with_cancel(2, cancel_callback)
-    return not page_is_cloudflare_challenge(page)
+    page = _get_page()
+    return (not page_is_cloudflare_challenge(page)) if page is not None else False
 
 
 def refresh_cliproxy_and_restart_browser(log_callback=None):
@@ -4598,7 +4661,18 @@ def fill_email_and_submit(timeout=75, log_callback=None, cancel_callback=None):
     not_ready_since = None
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        filled = page.run_js(
+        page = _get_page()
+        if page is None:
+            try:
+                page = refresh_active_page()
+            except Exception:
+                page = None
+        if page is None:
+            sleep_with_cancel(0.5, cancel_callback)
+            continue
+
+        try:
+            filled = page.run_js(
             """
 const email = arguments[0];
 function isVisible(node) {
@@ -4695,6 +4769,27 @@ return {
             """,
             email,
         )
+        except Exception as _fe_exc:
+            em = str(_fe_exc)
+            if (
+                ("NoneType" in em and "run_js" in em)
+                or "页面被刷新" in em
+                or "PageDisconnected" in em
+                or "与页面的连接已断开" in em
+            ):
+                if log_callback:
+                    log_callback(f"[!] fill_email page disconnected: {_fe_exc}")
+                try:
+                    refresh_active_page()
+                except Exception:
+                    try:
+                        restart_browser(log_callback=log_callback)
+                        open_signup_page(log_callback=log_callback, cancel_callback=cancel_callback)
+                    except Exception:
+                        pass
+                sleep_with_cancel(0.8, cancel_callback)
+                continue
+            raise
         state = filled.get("state") if isinstance(filled, dict) else filled
         if isinstance(filled, dict):
             last_snapshot = filled
@@ -4898,6 +4993,9 @@ return 'enter';
 
 def fill_code_and_submit(email, dev_token, timeout=180, log_callback=None, cancel_callback=None):
     def _resend_code():
+        page = _get_page()
+        if page is None:
+            return False
         page.run_js(
             r"""
 const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
@@ -4924,7 +5022,18 @@ return false;
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
-        filled = page.run_js(
+        page = _get_page()
+        if page is None:
+            try:
+                page = refresh_active_page()
+            except Exception:
+                page = None
+        if page is None:
+            sleep_with_cancel(0.5, cancel_callback)
+            continue
+
+        try:
+            filled = page.run_js(
             """
 const code = String(arguments[0] || '').trim();
 if (!code) return 'empty-code';
@@ -4984,6 +5093,23 @@ return 'not-ready';
             """,
             clean_code,
         )
+        except Exception as _fc_exc:
+            em = str(_fc_exc)
+            if (
+                ("NoneType" in em and "run_js" in em)
+                or "页面被刷新" in em
+                or "PageDisconnected" in em
+                or "与页面的连接已断开" in em
+            ):
+                if log_callback:
+                    log_callback(f"[!] fill_code page disconnected: {_fc_exc}")
+                try:
+                    refresh_active_page()
+                except Exception:
+                    pass
+                sleep_with_cancel(0.8, cancel_callback)
+                continue
+            raise
 
         if filled == "not-ready":
             sleep_with_cancel(0.5, cancel_callback)
@@ -5180,8 +5306,19 @@ def fill_profile_and_submit(timeout=210, log_callback=None, cancel_callback=None
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
+        page = _get_page()
+        if page is None:
+            try:
+                page = refresh_active_page()
+            except Exception:
+                page = None
+        if page is None:
+            sleep_with_cancel(0.5, cancel_callback)
+            continue
+
         if not form_filled_once:
-            filled = page.run_js(
+            try:
+                filled = page.run_js(
                 """
 const givenName = arguments[0];
 const familyName = arguments[1];
@@ -5256,6 +5393,23 @@ return 'filled-no-submit';
                 family_name,
                 password,
             )
+            except Exception as _fp_exc:
+                em = str(_fp_exc)
+                if (
+                    ("NoneType" in em and "run_js" in em)
+                    or "页面被刷新" in em
+                    or "PageDisconnected" in em
+                    or "与页面的连接已断开" in em
+                ):
+                    if log_callback:
+                        log_callback(f"[!] fill_profile page disconnected: {_fp_exc}")
+                    try:
+                        refresh_active_page()
+                    except Exception:
+                        pass
+                    sleep_with_cancel(0.8, cancel_callback)
+                    continue
+                raise
 
             if isinstance(filled, str) and filled.startswith("wait-cloudflare"):
                 form_filled_once = True
@@ -5471,7 +5625,11 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
         try:
-            refresh_active_page()
+            try:
+                refresh_active_page()
+            except Exception:
+                pass
+            page = _get_page()
             if page is None:
                 sleep_with_cancel(1, cancel_callback)
                 continue
@@ -6898,13 +7056,30 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
                     try:
                         if controller.should_stop():
                             break
-                        if _get_browser() is None:
-                            start_browser(log_callback=wlog)
+                        # 18r35: only hard-restart when browser/page is dead.
+                        # Always-restart caused infinite open/close under workers=10.
+                        b = _get_browser()
+                        p = _get_page()
+                        need_restart = b is None or p is None
+                        if not need_restart:
+                            try:
+                                _ = p.url
+                            except Exception:
+                                need_restart = True
+                        if need_restart:
+                            if b is None:
+                                start_browser(log_callback=wlog)
+                            else:
+                                restart_browser(log_callback=wlog)
                         else:
-                            restart_browser(log_callback=wlog)
+                            try:
+                                open_signup_page(log_callback=wlog, cancel_callback=controller.should_stop)
+                            except Exception as os_exc:
+                                wlog(f"[!] soft open_signup failed, hard restart: {os_exc}")
+                                restart_browser(log_callback=wlog)
                     except Exception as rb:
                         wlog(f"[!] restart browser: {rb}")
-                    sleep_with_cancel(1, controller.should_stop)
+                    sleep_with_cancel(0.6, controller.should_stop)
         finally:
             try:
                 stop_browser(log_callback=wlog)

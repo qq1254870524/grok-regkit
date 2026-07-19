@@ -22,8 +22,8 @@ OUT.mkdir(exist_ok=True)
 MODES = ["hybrid", "browser"]
 PROXIES = ["direct", "socks5_list"]
 EMAILS = ["aol", "outlook"]
-WORKERS = 2
-ROUNDS = 10  # accounts per cell (one job with count=ROUNDS)
+WORKERS = 10
+ROUNDS = 40  # accounts per cell (one job with count=ROUNDS); 18r35 user request
 TIMEOUT_PER_JOB = 3600 * 3  # 3h max per cell
 
 
@@ -37,12 +37,25 @@ def _req(method: str, path: str, body=None, timeout=60):
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
-def wait_idle(timeout=120):
+def wait_idle(timeout=120, *, force_stop_after=None):
+    """Wait until registration job is not running.
+
+    force_stop_after: if set and still running past this many seconds, POST /api/stop
+    (registration only; does not kill 8010/8080/8317/8318).
+    """
     t0 = time.time()
+    forced = False
     while time.time() - t0 < timeout:
         st = _req("GET", "/api/status")
         if not st.get("running"):
             return st
+        if force_stop_after is not None and (not forced) and (time.time() - t0) >= float(force_stop_after):
+            try:
+                _req("POST", "/api/stop", {})
+                forced = True
+                print("[matrix] wait_idle force_stop registration (409 prevention)", flush=True)
+            except Exception as exc:
+                print(f"[matrix] wait_idle force_stop fail: {exc}", flush=True)
         time.sleep(2)
     return _req("GET", "/api/status")
 
@@ -73,7 +86,10 @@ def put_config(patch: dict):
 def run_cell(mode, proxy, email, workers=WORKERS, count=ROUNDS):
     cell = f"{mode}__{proxy}__{email}"
     print(f"\n===== CELL {cell} workers={workers} count={count} =====", flush=True)
-    wait_idle(90)
+    # long wait: previous cell/orphan job may still hold 8092 (avoid HTTP 409)
+    st_idle = wait_idle(timeout=max(180, min(TIMEOUT_PER_JOB, 7200)), force_stop_after=300)
+    if st_idle.get("running"):
+        print(f"[matrix] still running after wait_idle, last={st_idle.get('last_event')}", flush=True)
     # clear logs optional
     try:
         _req("POST", "/api/logs/clear", {})
@@ -87,7 +103,9 @@ def run_cell(mode, proxy, email, workers=WORKERS, count=ROUNDS):
         "register_count": count,
         "email_provider": email,
         "email_preflight_on_start": True,
-        "email_preflight_limit": max(4, int(workers) * 2),  # 18r30b faster preflight sample
+        "email_preflight_continuous": True,
+        "email_preflight_limit": max(40, int(workers) * 4),  # 18r35: user warm pool sample
+        "email_preflight_warm_ahead": 40,  # 18r35: fixed pre-login ahead=40
         "mail_top_per_folder": 5,
     }
     # put_config supports email_provider in ConfigBody; also mirror config.json
@@ -124,10 +142,46 @@ def run_cell(mode, proxy, email, workers=WORKERS, count=ROUNDS):
         c["proxy"] = ""
     cfg_path.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
     # reload config by put again of known fields
-    put_config({k: c.get(k) for k in ("register_mode", "proxy_mode", "workers", "thread_count", "register_count", "email_provider", "email_preflight_on_start", "email_preflight_limit", "mail_top_per_folder") if k in c and c.get(k) is not None})
+    put_config({k: c.get(k) for k in ("register_mode", "proxy_mode", "workers", "thread_count", "register_count", "email_provider", "email_preflight_on_start", "email_preflight_continuous", "email_preflight_limit", "email_preflight_warm_ahead", "mail_top_per_folder") if k in c and c.get(k) is not None})
 
-    start = _req("POST", "/api/start", {"count": count, "workers": workers})
-    print("start", start, flush=True)
+    # verify cell config before start (detect mid-run UI thrash)
+    try:
+        live = _req("GET", "/api/config").get("config") or {}
+        bad = []
+        if str(live.get("register_mode") or "") != str(mode):
+            bad.append(f"mode={live.get('register_mode')}!={mode}")
+        if str(live.get("proxy_mode") or "") != str(cfg.get("proxy_mode")):
+            bad.append(f"proxy={live.get('proxy_mode')}!={cfg.get('proxy_mode')}")
+        if str(live.get("email_provider") or "").lower() != str(email).lower():
+            bad.append(f"email={live.get('email_provider')}!={email}")
+        if int(live.get("workers") or 0) != int(workers):
+            bad.append(f"workers={live.get('workers')}!={workers}")
+        if bad:
+            print(f"[matrix] config drift before start, re-put: {bad}", flush=True)
+            put_config(cfg)
+            cfg_path.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
+            put_config({k: c.get(k) for k in ("register_mode", "proxy_mode", "workers", "thread_count", "register_count", "email_provider", "email_preflight_on_start", "email_preflight_continuous", "email_preflight_limit", "email_preflight_warm_ahead", "mail_top_per_folder") if k in c and c.get(k) is not None})
+    except Exception as vexc:
+        print(f"[matrix] config verify skip: {vexc}", flush=True)
+
+    start = None
+    last_exc = None
+    for attempt in range(1, 8):
+        try:
+            start = _req("POST", "/api/start", {"count": count, "workers": workers})
+            print("start", start, flush=True)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            print(f"[matrix] start attempt {attempt}/7 fail: {msg}", flush=True)
+            if "409" in msg or "Conflict" in msg:
+                wait_idle(timeout=180, force_stop_after=30)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
     st = wait_done()
     result = {
         "cell": cell,
