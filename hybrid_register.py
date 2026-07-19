@@ -17,6 +17,8 @@ Used by Web/CLI when config register_mode == "hybrid".
 
 
 Changelog:
+- 2026-07-20r35b: mailbox token lookup no longer force_reload pools (preserve in_use).
+
 
 - 18r31c: continuous background email pre-login warm queue (workers skip re-auth when warm)
 - 18r28e: mailbox provider 按邮箱域名优先（outlook/* 不走 AOL preflight）；forced_email preflight 失败立即返回，不再同号空转 20 次；配合 pending 登录失败立刻改注册。
@@ -1485,13 +1487,13 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
 
         try:
 
-            pool = _am.get_pool(getattr(engine, "config", None), force_reload=True)
+            pool = _am.get_pool(getattr(engine, "config", None), force_reload=False)
 
         except TypeError:
 
             try:
 
-                pool = _am.get_pool(force_reload=True)
+                pool = _am.get_pool(force_reload=False)
 
             except Exception as e:
 
@@ -1543,13 +1545,13 @@ def _lookup_mail_token_from_pool(email: str, log=None) -> str:
 
         try:
 
-            pool = _om.get_pool(getattr(engine, "config", None), force_reload=True)
+            pool = _om.get_pool(getattr(engine, "config", None), force_reload=False)
 
         except TypeError:
 
             try:
 
-                pool = _om.get_pool(force_reload=True)
+                pool = _om.get_pool(force_reload=False)
 
             except Exception:
 

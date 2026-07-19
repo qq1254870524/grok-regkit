@@ -1,10 +1,17 @@
+# 18r35k: CreateEmail min gap 4.0s for MT rate-limit
+# 18r35d: tos-gate escape in open_signup + keep 18r35c CreateEmail gate
+# 18r35c: CreateEmail gate + MT/serial catch rate-limit on fill_email
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# 18r35e: fix stale page in proxy-error detect + Chromium interstitial markers + early abort click_email
 """
 Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-20r35d: open_signup 识别 grok.com/tos-gate，强制跳回 accounts.x.ai/sign-up 或换代理；避免成功后卡 tos-gate 找不到邮箱注册按钮。
+- 2026-07-20r35b: browser CreateEmail 验证码过多 detect+switch; pool in_use preserve (see outlook/aol).
+
 - 2026-07-19r31-g2a-keyfix: 修复 grok2api_remote_app_key 错误导致远端入池 401 静默失败；后处理/远端入池前热重载 config.json；401/403 明确报错且不重试、不误走全量覆盖。
 - 2026-07-19r30-lossfix: 后处理 Sub2 失败重试；任务结束 wait 加长 + 自动对账补齐 G2A/CPA/hybrid 缺号；减少 Sub2 比 G2A 少号。
 - 2026-07-19r29k: 后处理顺序改为 NSFW→G2A→CPA→Sub2API；Sub2API 优先用刚 mint 的 CPA OAuth JSON 直导入，
@@ -1247,25 +1254,98 @@ def is_proxy_connection_error(exc):
 
 
 def page_has_proxy_error(page_obj):
+    """True for proxy failures AND generic Chromium interstitial error pages.
+
+    18r35e: real failure is often Chromium default error HTML (title=host only,
+    Copyright The Chromium Authors) without ERR_PROXY in body.innerText. Also
+    callers must pass a fresh page handle after navigation.
+    """
+    if page_obj is None:
+        return False
     try:
         url = str(getattr(page_obj, "url", "") or "")
-        title = str(page_obj.run_js("return document.title || ''") or "")
-        body = str(page_obj.run_js("return document.body ? document.body.innerText.slice(0, 2000) : ''") or "")
     except Exception:
-        return False
-    text = f"{url}\n{title}\n{body}".lower()
-    return any(
-        marker in text
-        for marker in (
-            "err_proxy",
-            "proxy connection failed",
-            "proxy server",
-            "proxy authentication",
-            "tunnel connection failed",
-            "无法连接到代理服务器",
-            "代理服务器",
+        url = ""
+    title = ""
+    body = ""
+    html = ""
+    try:
+        title = str(page_obj.run_js("return document.title || ''") or "")
+    except Exception:
+        pass
+    try:
+        body = str(
+            page_obj.run_js(
+                "return document.body ? (document.body.innerText || '').slice(0, 3000) : ''"
+            )
+            or ""
         )
+    except Exception:
+        pass
+    try:
+        html = str(getattr(page_obj, "html", "") or "")[:6000]
+    except Exception:
+        html = ""
+    text = f"{url}\n{title}\n{body}\n{html}".lower()
+    markers = (
+        "err_proxy",
+        "err_tunnel",
+        "err_connection",
+        "err_timed_out",
+        "err_name_not_resolved",
+        "err_address_unreachable",
+        "err_socks",
+        "err_ssl",
+        "err_network_changed",
+        "err_empty_response",
+        "err_connection_reset",
+        "err_connection_closed",
+        "err_connection_refused",
+        "err_internet_disconnected",
+        "proxy connection failed",
+        "proxy server",
+        "proxy authentication",
+        "tunnel connection failed",
+        "this site can't be reached",
+        "this site can’t be reached",
+        "took too long to respond",
+        "dns_probe_finished",
+        "checking the proxy",
+        "unable to connect",
+        "无法连接到代理服务器",
+        "代理服务器",
+        "无法访问此网站",
+        "网页无法打开",
+        "没有互联网",
+        "连接已重置",
+        "临时重定向",
+        "err_proxy_connection_failed",
+        "neterror",
+        "network error",
+        "#main-frame-error",
+        "main-frame-error",
+        "interstitial-wrapper",
+        "copyright 2017 the chromium authors",
+        "copyright 2015 the chromium authors",
     )
+    if any(marker in text for marker in markers):
+        return True
+    # Chromium interstitial often keeps title=host while body is tiny error chrome UI
+    try:
+        host_hint = "accounts.x.ai"
+        title_l = (title or "").strip().lower()
+        body_l = (body or "").strip().lower()
+        html_l = (html or "").lower()
+        if title_l in (host_hint, "accounts.x.ai") and (
+            "chromium authors" in html_l
+            or "neterror" in html_l
+            or "main-frame-error" in html_l
+            or (len(body_l) < 80 and "sign" not in body_l and "邮箱" not in body_l)
+        ):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 class _ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
@@ -4294,6 +4374,20 @@ def click_email_signup_button(timeout=10, log_callback=None, cancel_callback=Non
         if log_callback:
             log_callback("[Debug] 尝试查找“使用邮箱注册”按钮...")
 
+        # 18r35e: do not burn full timeout on Chromium error interstitial
+        try:
+            if page_has_proxy_error(page):
+                if log_callback:
+                    try:
+                        log_callback(f"[!] click_email abort: browser error page url={getattr(page, 'url', '')}")
+                    except Exception:
+                        log_callback("[!] click_email abort: browser error page")
+                raise Exception("未找到「使用邮箱注册」按钮(浏览器错误页/代理失败)")
+        except Exception as _early_pe:
+            if "未找到「使用邮箱注册」按钮" in str(_early_pe):
+                raise
+            # detection itself failed — continue normal click path
+
         try:
             clicked = page.run_js(r"""
 function isVisible(node) {
@@ -4370,6 +4464,71 @@ return candidates[0].text || true;
         log_callback(f"[Debug] 页面内容片段: {page_html}")
 
     raise Exception("未找到「使用邮箱注册」按钮")
+
+
+
+def page_is_tos_gate(page_obj=None):
+    """True when browser landed on grok.com/tos-gate (post-login ToS) instead of signup."""
+    p = page_obj or _get_page()
+    if p is None:
+        return False
+    try:
+        url = (p.url or "").lower()
+    except Exception:
+        url = ""
+    if "tos-gate" in url or "/accept-tos" in url:
+        return True
+    try:
+        html = (p.html or "")[:4000].lower()
+    except Exception:
+        html = ""
+    return ("tos-gate" in html) or ("accept the terms" in html and "grok.com" in url)
+
+
+def escape_tos_gate_to_signup(page_obj=None, log_callback=None, cancel_callback=None):
+    """Leave tos-gate / leftover logged-in shell and force fresh signup URL."""
+    p = page_obj or _get_page()
+    if p is None:
+        return False
+    if not page_is_tos_gate(p):
+        return False
+    if log_callback:
+        try:
+            cur = p.url
+        except Exception:
+            cur = "?"
+        log_callback(f"[!] 检测到 ToS/gate 页，强制跳转注册页: {cur}")
+    try:
+        p.get(SIGNUP_URL)
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[!] tos-gate navigate fail: {e}")
+        return False
+    try:
+        p.wait.doc_loaded()
+    except Exception:
+        pass
+    sleep_with_cancel(1.2, cancel_callback)
+    try:
+        # best-effort clear storage that keeps session on grok.com
+        p.run_js(
+            "try{localStorage.clear();sessionStorage.clear();}catch(e){}"
+        )
+    except Exception:
+        pass
+    try:
+        p.get(SIGNUP_URL)
+        p.wait.doc_loaded()
+    except Exception:
+        pass
+    sleep_with_cancel(1.0, cancel_callback)
+    still = page_is_tos_gate(p)
+    if log_callback:
+        try:
+            log_callback(f"[*] tos-gate escape done url={p.url} still_gate={int(still)}")
+        except Exception:
+            pass
+    return not still
 
 
 def page_is_cloudflare_challenge(page_obj=None):
@@ -4532,11 +4691,23 @@ def open_signup_page(log_callback=None, cancel_callback=None):
                 continue
             raise
 
-        if _tls_browser_state().browser_started_with_proxy and page_has_proxy_error(page):
+        # 18r35e: ALWAYS refresh TLS page before error detection (stale handle missed Chromium interstitial)
+        try:
+            page = _get_page() or page
+        except Exception:
+            pass
+        try:
+            if page_has_proxy_error(page):
+                if log_callback:
+                    log_callback("[!] 浏览器页面显示代理/网络错误页(Chromium interstitial)，更换代理重试")
+                refresh_cliproxy_and_restart_browser(log_callback=log_callback)
+                continue
+        except Exception as _pe:
             if log_callback:
-                log_callback("[!] 浏览器页面显示代理错误，更换代理重试")
-            refresh_cliproxy_and_restart_browser(log_callback=log_callback)
-            continue
+                try:
+                    log_callback(f"[!] page_has_proxy_error check failed: {_pe}")
+                except Exception:
+                    pass
 
         # 18r30b: after proxy rotate / multi-thread, page handle may be dead — refresh TLS page.
         try:
@@ -4560,6 +4731,30 @@ def open_signup_page(log_callback=None, cancel_callback=None):
 
         if log_callback:
             log_callback(f"[*] 当前URL: {cur_url}")
+
+        # 18r35d: leftover session may land on grok.com/tos-gate — leave before click email
+        try:
+            page = _get_page() or page
+        except Exception:
+            pass
+        if page_is_tos_gate(page) or ("tos-gate" in (cur_url or "").lower()):
+            ok_escape = escape_tos_gate_to_signup(
+                page, log_callback=log_callback, cancel_callback=cancel_callback
+            )
+            try:
+                page = _get_page() or page
+                cur_url = page.url if page is not None else cur_url
+            except Exception:
+                pass
+            if log_callback:
+                log_callback(f"[*] tos-gate 处理后 URL: {cur_url} ok={int(bool(ok_escape))}")
+            if (not ok_escape) or page_is_tos_gate(page) or ("tos-gate" in (cur_url or "").lower()):
+                if log_callback:
+                    log_callback(
+                        f"[!] tos-gate 仍在，更换代理/重启浏览器 ({round_i}/{max_proxy_rounds})"
+                    )
+                refresh_cliproxy_and_restart_browser(log_callback=log_callback)
+                continue
 
         # Cloudflare challenge: wait then rotate proxy if still blocked
         try:
@@ -4599,7 +4794,7 @@ def open_signup_page(log_callback=None, cancel_callback=None):
             except Exception:
                 still_cf = False
                 disconnected = True
-            if still_cf or "未找到" in emsg or disconnected:
+            if still_cf or page_is_tos_gate(page) or "未找到" in emsg or disconnected or "tos-gate" in emsg.lower():
                 if log_callback:
                     log_callback(
                         f"[!] 注册页未就绪: {e}；更换代理重试 ({round_i}/{max_proxy_rounds})"
@@ -4643,6 +4838,92 @@ return !!(givenInput && familyInput && passwordInput);
         )
     except Exception:
         return False
+
+
+
+
+# 18r35c: serialize CreateEmail across workers to cut IP-level rate limit
+import threading as _rl_threading
+_CREATE_EMAIL_GATE = _rl_threading.Lock()
+_CREATE_EMAIL_LAST_TS = 0.0
+_CREATE_EMAIL_MIN_GAP_SEC = 4.0  # 18r35k: wider MT gap vs per-mailbox 验证码过多
+
+
+def _wait_create_email_gate(log_callback=None):
+    """Stagger CreateEmail submissions so many workers do not fire at once."""
+    global _CREATE_EMAIL_LAST_TS
+    import time as _t
+    with _CREATE_EMAIL_GATE:
+        now = _t.time()
+        wait = float(_CREATE_EMAIL_MIN_GAP_SEC) - (now - float(_CREATE_EMAIL_LAST_TS or 0.0))
+        if wait > 0:
+            if log_callback:
+                try:
+                    log_callback(f"[*] CreateEmail gate wait {wait:.2f}s (anti rate-limit)")
+                except Exception:
+                    pass
+            _t.sleep(wait)
+        _CREATE_EMAIL_LAST_TS = _t.time()
+
+
+def detect_page_create_email_rate_limit(page=None, log_callback=None) -> tuple[bool, str]:
+    """Browser-path detector for xAI CreateEmail '验证码过多' / too-many-codes UI."""
+    try:
+        from hybrid_register import detect_create_email_rate_limit
+    except Exception:
+        detect_create_email_rate_limit = None
+    pg = page
+    if pg is None:
+        try:
+            pg = _get_page()
+        except Exception:
+            pg = None
+    if pg is None:
+        return False, ""
+    body = ""
+    try:
+        body = pg.run_js(
+            r"""
+try {
+  const t = (document.body && (document.body.innerText || document.body.textContent) || '');
+  return String(t || '').slice(0, 4000);
+} catch (e) { return ''; }
+"""
+        ) or ""
+    except Exception as exc:
+        if log_callback:
+            try:
+                log_callback(f"[!] rate-limit page scrape fail: {exc}")
+            except Exception:
+                pass
+        body = ""
+    url = ""
+    try:
+        url = str(getattr(pg, "url", "") or "")
+    except Exception:
+        url = ""
+    if detect_create_email_rate_limit is not None:
+        hit, ev = detect_create_email_rate_limit(body, url)
+        if hit:
+            return True, ev
+    # local fallback needles
+    low = f"{body} {url}".lower()
+    needles = (
+        "验证码过多",
+        "发送到此邮箱的验证码过多",
+        "too many verification",
+        "too many codes",
+        "too many code",
+        "try again later",
+        "please try again in",
+    )
+    for n in needles:
+        if n.lower() in low or n in body:
+            return True, f"needle={n!r} body={(body or '')[:500]}"
+    if (("minute" in low or "minutes" in low or "分钟" in body)
+            and ("retry" in low or "重试" in body or "too many" in low or "过多" in body)):
+        return True, f"needle='minute+retry' body={(body or '')[:500]}"
+    return False, ""
 
 
 def fill_email_and_submit(timeout=75, log_callback=None, cancel_callback=None):
@@ -4901,6 +5182,7 @@ return candidates[0].text || true;
             sleep_with_cancel(0.5, cancel_callback)
             continue
         sleep_with_cancel(0.8, cancel_callback)
+        _wait_create_email_gate(log_callback)  # 18r35c_gate_call
         clicked = page.run_js(
             r"""
 function isVisible(node) {
@@ -4979,6 +5261,36 @@ return 'enter';
             if log_callback:
                 detail = f" ({clicked})" if isinstance(clicked, str) else ""
                 log_callback(f"[*] 已填写邮箱并提交: {email}{detail}")
+            # 18r35b: wait briefly then detect CreateEmail rate-limit UI (验证码过多)
+            # so we switch mailbox instead of polling an empty inbox for 2 minutes.
+            try:
+                sleep_with_cancel(1.2, cancel_callback)
+            except Exception:
+                time.sleep(1.2)
+            rl_hit, rl_ev = detect_page_create_email_rate_limit(page=_get_page(), log_callback=log_callback)
+            if rl_hit:
+                if log_callback:
+                    log_callback(
+                        f"[!] CreateEmail RATE_LIMITED email={email} evidence={rl_ev}"
+                    )
+                # burn/remove handled by caller via exception keywords
+                raise Exception(
+                    f"create_email_rate_limited email={email} evidence={rl_ev}"
+                )
+            # second check a bit later (UI text may paint after spinner)
+            try:
+                sleep_with_cancel(1.5, cancel_callback)
+            except Exception:
+                time.sleep(1.5)
+            rl_hit2, rl_ev2 = detect_page_create_email_rate_limit(page=_get_page(), log_callback=log_callback)
+            if rl_hit2:
+                if log_callback:
+                    log_callback(
+                        f"[!] CreateEmail RATE_LIMITED(late) email={email} evidence={rl_ev2}"
+                    )
+                raise Exception(
+                    f"create_email_rate_limited email={email} evidence={rl_ev2}"
+                )
             return email, dev_token
         sleep_with_cancel(0.5, cancel_callback)
     if last_snapshot:
@@ -4996,7 +5308,18 @@ def fill_code_and_submit(email, dev_token, timeout=180, log_callback=None, cance
         page = _get_page()
         if page is None:
             return False
+        # 18r35b: never auto-resend when page already shows 验证码过多
+        try:
+            rl_hit, rl_ev = detect_page_create_email_rate_limit(page=page, log_callback=log_callback)
+            if rl_hit:
+                if log_callback:
+                    log_callback(f"[!] skip resend: rate-limited email={email} {rl_ev}")
+                raise Exception(f"create_email_rate_limited email={email} evidence={rl_ev}")
+        except Exception as _rl_exc:
+            if "create_email_rate_limited" in str(_rl_exc):
+                raise
         page.run_js(
+
             r"""
 const nodes = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 const target = nodes.find((node) => {
@@ -6257,9 +6580,47 @@ class GrokRegisterGUI:
                             log_callback=self.log, cancel_callback=self.should_stop
                         )
                         self.log("[*] 2. 创建邮箱并提交")
-                        email, dev_token = fill_email_and_submit(
-                            log_callback=self.log, cancel_callback=self.should_stop
-                        )
+                        try:
+                            email, dev_token = fill_email_and_submit(
+                                log_callback=self.log, cancel_callback=self.should_stop
+                            )
+                        except Exception as fill_exc:
+                            # 18r35c serial: rate-limit on fill_email -> burn+retry other mailbox
+                            fmsg = str(fill_exc)
+                            if any(
+                                k in fmsg
+                                for k in ("create_email_rate_limited", "RATE_LIMITED", "验证码过多")
+                            ):
+                                _em = str(email or "")
+                                try:
+                                    import re as _re_rl
+                                    _m = _re_rl.search(r"email=([^\s]+)", fmsg)
+                                    if _m:
+                                        _em = _m.group(1).strip()
+                                except Exception:
+                                    pass
+                                if _em:
+                                    try:
+                                        from hybrid_register import handle_create_email_rate_limited
+                                        handle_create_email_rate_limited(
+                                            _em,
+                                            "",
+                                            log=self.log,
+                                            source="browser_serial_fill_email",
+                                            evidence=fmsg[:300],
+                                            mail_token=str(dev_token or ""),
+                                        )
+                                    except Exception as _e:
+                                        self.log(f"[!] serial rate-limit cleanup: {_e}")
+                                self.log(
+                                    f"[!] CreateEmail rate-limit -> switch mailbox "
+                                    f"try={mail_try}/{max_mail_retry} email={_em}"
+                                )
+                                if mail_try < max_mail_retry:
+                                    restart_browser(log_callback=self.log)
+                                    sleep_with_cancel(1.5, self.should_stop)
+                                    continue
+                            raise
                         self.log(f"[*] 邮箱: {email}")
                         self.log(f"[Debug] 邮箱credential(jwt): {dev_token}")
                         try:
@@ -6287,6 +6648,9 @@ class GrokRegisterGUI:
                                 k in msg
                                 for k in (
                                     "early_no_new_mail",
+                                    "create_email_rate_limited",
+                                    "验证码过多",
+                                    "RATE_LIMITED",
                                     "未收到验证码",
                                     "获取验证码失败",
                                     "code_timeout",
@@ -6629,6 +6993,9 @@ def run_registration_job(count, log_callback=None, controller=None, workers=None
                             k in msg
                             for k in (
                                 "early_no_new_mail",
+                                    "create_email_rate_limited",
+                                    "验证码过多",
+                                    "RATE_LIMITED",
                                 "未收到验证码",
                                 "获取验证码失败",
                                 "code_timeout",
@@ -6874,9 +7241,69 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
             wlog(f"[*] 1. 打开注册页 (尝试 {mail_try}/{max_mail_retry})")
             open_signup_page(log_callback=wlog, cancel_callback=controller.should_stop)
             wlog("[*] 2. 创建邮箱并提交")
-            email, dev_token = fill_email_and_submit(
-                log_callback=wlog, cancel_callback=controller.should_stop
-            )
+            try:
+                email, dev_token = fill_email_and_submit(
+                    log_callback=wlog, cancel_callback=controller.should_stop
+                )
+            except Exception as fill_exc:
+                # 18r35c: rate-limit raised from fill_email (outside fill_code try)
+                fmsg = str(fill_exc)
+                _rl = any(
+                    k in fmsg
+                    for k in (
+                        "create_email_rate_limited",
+                        "RATE_LIMITED",
+                        "验证码过多",
+                        "too many verification",
+                        "too many codes",
+                    )
+                )
+                if _rl:
+                    _em = str(email or "")
+                    try:
+                        import re as _re_rl
+                        _m = _re_rl.search(r"email=([^\s]+)", fmsg)
+                        if _m:
+                            _em = _m.group(1).strip()
+                    except Exception:
+                        pass
+                    if _em:
+                        try:
+                            from hybrid_register import handle_create_email_rate_limited
+                            handle_create_email_rate_limited(
+                                _em,
+                                "",
+                                log=wlog,
+                                source="browser_mt_fill_email",
+                                evidence=fmsg[:300],
+                                mail_token=str(dev_token or ""),
+                            )
+                        except Exception as _rl_exc:
+                            try:
+                                from hybrid_register import remove_mailbox_from_pool
+                                remove_mailbox_from_pool(
+                                    _em, reason="create_email_rate_limited", log=wlog
+                                )
+                            except Exception:
+                                wlog(f"[!] rate-limit cleanup fail: {_rl_exc}")
+                    wlog(
+                        f"[!] CreateEmail rate-limit -> switch mailbox "
+                        f"try={mail_try}/{max_mail_retry} email={_em}"
+                    )
+                    if mail_try >= max_mail_retry:
+                        raise Exception(
+                            f"create_email_rate_limited exhausted email={_em} {fmsg}"
+                        )
+                    try:
+                        restart_browser(log_callback=wlog)
+                    except Exception:
+                        pass
+                    try:
+                        sleep_with_cancel(1.5, controller.should_stop)
+                    except Exception:
+                        time.sleep(1.5)
+                    continue
+                raise
             wlog(f"[*] 邮箱: {email}")
             wlog(f"[Debug] 邮箱credential(jwt): {dev_token}")
             try:
@@ -6900,9 +7327,19 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
                 break
             except Exception as mail_exc:
                 msg = str(mail_exc)
-                _mail_fail = any(
+                _rl2 = any(
                     k in msg
                     for k in (
+                        "create_email_rate_limited",
+                        "RATE_LIMITED",
+                        "验证码过多",
+                    )
+                )
+                _mail_fail = _rl2 or any(
+                    k in msg
+                    for k in (
+                        "early_no_new_mail",
+                        "create_email_rate_limited",
                         "验证码",
                         "code",
                         "mail",
@@ -6913,6 +7350,19 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
                         "Graph",
                     )
                 )
+                if _rl2 and email:
+                    try:
+                        from hybrid_register import handle_create_email_rate_limited
+                        handle_create_email_rate_limited(
+                            email,
+                            "",
+                            log=wlog,
+                            source="browser_mt_fill_code",
+                            evidence=msg[:300],
+                            mail_token=str(dev_token or ""),
+                        )
+                    except Exception as _rl_exc2:
+                        wlog(f"[!] rate-limit burn(code) fail: {_rl_exc2}")
                 wlog(f"[!] 验证码阶段失败 try={mail_try}: {mail_exc}")
                 if not _mail_fail or mail_try >= max_mail_retry:
                     raise

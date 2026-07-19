@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
+18r35g: /api/stop clears running immediately + force_stop; StartBody.job_kind routes pending_sso_recovery to correct path (no accidental register); stop does NOT kill G2A/Sub2/CPA gateways.
+
 2026-07-18e: job metrics add pending_sso/skipped; progress regex parses extended
 18r28c: pending job reloads hybrid_register+mail modules
 stats; POST /api/pending-sso/recover starts secondary SSO recovery job.
@@ -228,8 +230,24 @@ def _update_job_progress_from_log(message: str) -> None:
         _set_phase("sso", text)
     elif "consent" in low or "mint_method" in low or "[cpa]" in low or "sub2api" in low:
         _set_phase("post_process", text)
-    elif "混合任务结束" in text or "web job thread finished" in low or "当前统计" in text:
+    elif "混合任务结束" in text or "web job thread finished" in low:
+        # 18r35h: only true job-end markers set finished (NOT mid-job 当前统计 lines)
         _set_phase("finished", text)
+    elif "当前统计" in text:
+        # keep live counters; do not mark job finished while workers still running
+        if "pending-sso" in low or "pending_sso" in low:
+            _set_phase("pending_sso_recovery", text)
+        else:
+            _set_phase("running", text)
+    elif "[pending-sso]" in low or "pending_sso recovery" in low:
+        if "re-register" in low or "hybrid re-register" in low:
+            _set_phase("reregister", text)
+        elif "turnstile" in low:
+            _set_phase("signin_turnstile", text)
+        elif "sign-in" in low or "login" in low:
+            _set_phase("signin", text)
+        else:
+            _set_phase("pending_sso_recovery", text)
 
     match = _PROGRESS_RE.search(text)
     if match:
@@ -469,6 +487,8 @@ class StartBody(BaseModel):
     count: int = Field(default=1, ge=1, le=1000)
     # 18r30 multi-thread workers (1=serial)
     workers: int = Field(default=1, ge=1, le=32)
+    # 18r35g: optional job_kind so /api/start can route pending recovery without using wrong endpoint
+    job_kind: str = Field(default="register")
 
 
 class ConfigBody(BaseModel):
@@ -1133,50 +1153,76 @@ async def api_start(body: StartBody, x_access_key: Optional[str] = Header(None))
     global _job_thread
     _require_auth(x_access_key)
     workers = max(1, min(32, int(getattr(body, "workers", 1) or 1)))
+    raw_kind = str(getattr(body, "job_kind", None) or "register").strip().lower()
+    if raw_kind in (
+        "pending_sso_recovery",
+        "pending-sso",
+        "pending_sso",
+        "recover_pending",
+        "pending",
+        "sso_recovery",
+    ):
+        job_kind = "pending_sso_recovery"
+    else:
+        job_kind = "register"
     with _job_lock:
         if _job_state["running"]:
             raise HTTPException(status_code=409, detail="job already running")
         # clear log for new run but keep last few
-        _append_log(f"[*] starting registration count={body.count} workers={workers}")
+        if job_kind == "pending_sso_recovery":
+            _append_log(
+                f"[*] starting pending_sso recovery via /api/start count={body.count} workers={workers}"
+            )
+        else:
+            _append_log(f"[*] starting registration count={body.count} workers={workers}")
         t = threading.Thread(
             target=_run_job,
             args=(body.count,),
-            kwargs={"job_kind": "register", "workers": workers},
+            kwargs={"job_kind": job_kind, "workers": workers},
             daemon=True,
         )
         _job_thread = t
         t.start()
-    return {"ok": True, "started": True, "count": body.count, "workers": workers}
+    return {
+        "ok": True,
+        "started": True,
+        "count": body.count,
+        "workers": workers,
+        "job_kind": job_kind,
+    }
 
 
 @app.post("/api/stop")
 async def api_stop(x_access_key: Optional[str] = Header(None)):
+    """Stop ONLY registration/pending jobs + browsers.
+
+    18r35g: immediately mark job not-running so UI/status clears; workers
+    still observe controller.should_stop() and exit. Never touch G2A/Sub2/CPA.
+    """
+    global _controller
     _require_auth(x_access_key)
     with _job_lock:
         ctrl = _controller
         running = bool(_job_state.get("running"))
-    # Always try hard cleanup: even if job state is stale, kill browsers.
-    _append_log("[!] stop requested from web")
+        job_kind = str(_job_state.get("job_kind") or "")
+        # Clear running flag immediately so /api/status and new starts work.
+        if running:
+            _job_state["running"] = False
+            _job_state["phase"] = "stopping"
+            _job_state["finished_at"] = time.time()
+            _job_state["updated_at"] = time.time()
+            _job_state["last_event"] = "[!] stop requested — clearing running flag"
+    _append_log("[!] stop requested from web (18r35g immediate running=false)")
     try:
         if ctrl is not None:
-            ctrl.stop(force_cleanup=True)
-        else:
-            engine.force_stop_registration(
-                log_callback=_append_log, reason="web_stop_no_controller"
-            )
-    except TypeError:
-        # older controller without force_cleanup kw
-        try:
-            if ctrl is not None:
+            try:
+                ctrl.stop(force_cleanup=True)
+            except TypeError:
                 ctrl.stop()
-        except Exception:
-            pass
-        try:
-            engine.force_stop_registration(
-                log_callback=_append_log, reason="web_stop_fallback"
-            )
-        except Exception as exc:
-            _append_log(f"[!] force_stop after stop failed: {exc}")
+        # Always hard-kill browsers/preflight even if controller already set.
+        engine.force_stop_registration(
+            log_callback=_append_log, reason="web_stop_18r35g"
+        )
     except Exception as exc:
         _append_log(f"[!] stop cleanup error: {exc}")
         try:
@@ -1185,15 +1231,25 @@ async def api_stop(x_access_key: Optional[str] = Header(None)):
             )
         except Exception:
             pass
+    with _job_lock:
+        # If job thread already finished, keep its totals; only fix stuck state.
+        if _controller is ctrl:
+            _controller = None
+        if _job_state.get("phase") == "stopping":
+            _job_state["phase"] = "idle"
+            _job_state["updated_at"] = time.time()
+            _job_state["last_event"] = "[!] stop complete — job idle (gateways untouched)"
     return {
         "ok": True,
-        "stopped": bool(running or ctrl is not None),
+        "stopped": True,
         "running_was": running,
         "had_controller": ctrl is not None,
+        "job_kind": job_kind,
+        "running_now": False,
         "detail": (
-            "stopped and browser cleanup attempted"
-            if (running or ctrl is not None)
-            else "no running job (browser cleanup attempted)"
+            "stopped: running cleared + browser cleanup; gateways kept alive"
+            if running or ctrl is not None
+            else "no running job (browser cleanup attempted; gateways untouched)"
         ),
     }
 

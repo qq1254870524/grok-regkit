@@ -54,3 +54,10 @@ outlook_accounts.txt
 aol_accounts.txt
 capture_out/
 
+
+# local secret dumps / live monitors
+matrix_runs/_cfg_dump_*.json
+matrix_runs/_mon_*.txt
+matrix_runs/_live_pulse_*.log
+matrix_runs/_bg_mon_*.ps1
+

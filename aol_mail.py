@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""AOL mailbox provider via IMAP protocol (email----password/app password).
+"""
+# 2026-07-20r35b: preserve in_use/cooldown across force_reload (anti dual-mailbox).
+AOL mailbox provider via IMAP protocol (email----password/app password).
 
 Account line formats:
 1) email----password          (password 或应用专用密码；用户也称为 TOTP 字段)
@@ -746,7 +748,52 @@ def get_pool(config: dict, log_callback=None, force_reload: bool = False) -> Aol
     global _POOL
     with _POOL_LOCK:
         if _POOL is None or force_reload:
-            _POOL = build_pool_from_config(config, log_callback=log_callback)
+            old = _POOL
+            new_pool = build_pool_from_config(config, log_callback=log_callback)
+            if old is not None:
+                try:
+                    old_by = {}
+                    for a in (getattr(old, "accounts", None) or []):
+                        try:
+                            old_by[str(getattr(a, "email", "") or "").strip().lower()] = a
+                        except Exception:
+                            continue
+                    preserved = 0
+                    for a in (getattr(new_pool, "accounts", None) or []):
+                        key = str(getattr(a, "email", "") or "").strip().lower()
+                        prev = old_by.get(key)
+                        if not prev:
+                            continue
+                        try:
+                            if getattr(prev, "status", "") == "in_use":
+                                a.status = "in_use"
+                                preserved += 1
+                            elif getattr(prev, "status", "") in ("bad", "registered"):
+                                a.status = prev.status
+                            if float(getattr(prev, "cooldown_until", 0) or 0) > float(getattr(a, "cooldown_until", 0) or 0):
+                                a.cooldown_until = prev.cooldown_until
+                            if getattr(prev, "last_used_at", 0):
+                                a.last_used_at = prev.last_used_at
+                            if getattr(prev, "last_error", ""):
+                                a.last_error = prev.last_error
+                        except Exception:
+                            continue
+                    if log_callback and preserved:
+                        try:
+                            log_callback(f"[*] AOL pool rebuild preserved in_use={preserved}")
+                        except Exception:
+                            pass
+                    try:
+                        new_pool._idx = int(getattr(old, "_idx", 0) or 0) % max(1, len(new_pool.accounts) or 1)
+                    except Exception:
+                        pass
+                except Exception as merge_exc:
+                    if log_callback:
+                        try:
+                            log_callback(f"[!] AOL pool rebuild merge skip: {merge_exc}")
+                        except Exception:
+                            pass
+            _POOL = new_pool
         elif log_callback and _POOL.log_callback is not log_callback:
             _POOL.log_callback = log_callback
         return _POOL

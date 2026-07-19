@@ -19,6 +19,7 @@ Separators also accept | , or tab.
 
 
 create/acquire: rent mailbox from pool, ensure access_token
+- 2026-07-20r35d: ensure_tokens proxy/network fail -> one direct retry for refresh/password+TOTP login
 
 poll_code: Microsoft Graph inbox, extract xAI/Grok code
 
@@ -27,6 +28,9 @@ token cache: outlook_token_cache.json (local, gitignored)
 
 
 Changelog:
+- 2026-07-20r35b: get_pool no longer rebuilds on config.outlook_accounts text churn;
+  preserve in_use/cooldown/tokens across force_reload; stop multi-worker same-email CreateEmail.
+  (root cause of 验证码过多 under browser×10 Outlook)
 - 2026-07-19r29: treat identity/confirm + error.aspx errcode=1078 as permanent identity_confirm_blocked;
   abort _follow_to_code immediately on error.aspx/errcode; delete bad mailbox from pool (no 120s cool).
 
@@ -1510,57 +1514,91 @@ class OutlookAccountPool:
 
             return acc
 
-        sess = self._session(acc)
+        # 18r35d: login/refresh via configured proxies first; on proxy/network errors
+        # retry once with direct (Graph already had direct-first). Avoid long SOCKS
+        # stalls on login.microsoftonline.com under multi-worker load.
+        proxy_sess = self._session(acc)
+        direct_sess = None
+        if self.proxies:
+            try:
+                direct_sess = OutlookSession(
+                    client_id=acc.client_id or self.client_id,
+                    proxies=None,
+                    log_callback=self.log_callback,
+                )
+            except Exception:
+                direct_sess = None
+
+        def _apply_token_data(data: dict, how: str) -> OutlookAccount:
+            acc.access_token = data["access_token"]
+            acc.refresh_token = data.get("refresh_token") or acc.refresh_token
+            acc.access_expires_at = _now() + int(data.get("expires_in") or 3600)
+            self.cache.put(acc.email, {
+                "access_token": acc.access_token,
+                "refresh_token": acc.refresh_token,
+                "access_expires_at": acc.access_expires_at,
+                "client_id": acc.client_id,
+            })
+            self._lg(f"[+] Outlook {how} ok: {acc.email}")
+            return acc
 
         if acc.refresh_token:
-
-            try:
-
-                data = sess.refresh_access_token(acc.refresh_token)
-
-                acc.access_token = data["access_token"]
-
-                acc.refresh_token = data.get("refresh_token") or acc.refresh_token
-
-                acc.access_expires_at = _now() + int(data.get("expires_in") or 3600)
-
-                self.cache.put(acc.email, {
-
-                    "access_token": acc.access_token, "refresh_token": acc.refresh_token,
-
-                    "access_expires_at": acc.access_expires_at, "client_id": acc.client_id,
-
-                })
-
-                self._lg(f"[+] Outlook refresh ok: {acc.email}")
-
-                return acc
-
-            except Exception as exc:
-
-                self._lg(f"[!] Outlook refresh failed, try password+TOTP: {exc}")
+            last_refresh_exc = None
+            for label, sess in (("proxy", proxy_sess), ("direct", direct_sess or proxy_sess)):
+                if sess is None:
+                    continue
+                if label == "direct" and sess is proxy_sess:
+                    continue
+                try:
+                    if label == "direct":
+                        self._lg(
+                            f"[*] Outlook refresh retry direct (proxy/network fail) email={acc.email}"
+                        )
+                    data = sess.refresh_access_token(acc.refresh_token)
+                    return _apply_token_data(data, f"refresh/{label}")
+                except Exception as exc:
+                    last_refresh_exc = exc
+                    if label == "proxy" and direct_sess is not None and _is_proxy_error(exc):
+                        self._lg(
+                            f"[!] Outlook refresh proxy fail, will try direct: {exc}"
+                        )
+                        continue
+                    self._lg(f"[!] Outlook refresh failed ({label}), try password+TOTP: {exc}")
+                    break
+            if last_refresh_exc is not None and direct_sess is None:
+                self._lg(f"[!] Outlook refresh failed, try password+TOTP: {last_refresh_exc}")
 
         if acc.password and acc.totp_secret:
-
-            data = sess.login_password_totp(acc.email, acc.password, acc.totp_secret)
-
-            acc.access_token = data["access_token"]
-
-            acc.refresh_token = data.get("refresh_token") or acc.refresh_token
-
-            acc.access_expires_at = _now() + int(data.get("expires_in") or 3600)
-
-            self.cache.put(acc.email, {
-
-                "access_token": acc.access_token, "refresh_token": acc.refresh_token,
-
-                "access_expires_at": acc.access_expires_at, "client_id": acc.client_id,
-
-            })
-
-            self._lg(f"[+] Outlook password+TOTP login ok: {acc.email}")
-
-            return acc
+            last_login_exc = None
+            for label, sess in (("proxy", proxy_sess), ("direct", direct_sess or proxy_sess)):
+                if sess is None:
+                    continue
+                if label == "direct" and sess is proxy_sess:
+                    continue
+                try:
+                    if label == "direct":
+                        self._lg(
+                            f"[*] Outlook password+TOTP login retry direct email={acc.email}"
+                        )
+                    data = sess.login_password_totp(acc.email, acc.password, acc.totp_secret)
+                    return _apply_token_data(data, f"password+TOTP/{label}")
+                except Exception as exc:
+                    last_login_exc = exc
+                    info = classify_outlook_login_error(exc, auth_path="password+totp")
+                    permanent = bool(info.get("permanent"))
+                    if permanent:
+                        raise
+                    if label == "proxy" and direct_sess is not None and (
+                        _is_proxy_error(exc) or info.get("category") == "network_proxy_or_timeout"
+                    ):
+                        self._lg(
+                            f"[!] Outlook login proxy/network fail, retry direct | "
+                            f"email={acc.email} exc={exc}"
+                        )
+                        continue
+                    raise
+            if last_login_exc is not None:
+                raise last_login_exc
 
         raise Exception(f"Outlook account {acc.email} has no refresh_token and missing password+totp")
 
@@ -2083,30 +2121,76 @@ def get_pool(config: dict, proxies=None, log_callback=None, force_reload: bool =
 
     global _POOL, _POOL_SIG
 
+    # 18r35b: DO NOT put outlook_accounts text into sig.
+    # persist/sync rewrites config text constantly; rebuilding wipes in_use and lets
+    # multiple workers acquire the same mailbox -> dual CreateEmail -> 验证码过多.
     sig = json.dumps({
-
-        "accounts": config.get("outlook_accounts") or "",
-
         "file": config.get("outlook_accounts_file") or "",
-
         "client_id": config.get("outlook_client_id") or "",
-
     }, ensure_ascii=False, sort_keys=True)
 
     with _POOL_LOCK:
-
-        if _POOL is None or force_reload or sig != _POOL_SIG:
-
-            _POOL = build_pool_from_config(config, proxies=proxies, log_callback=log_callback)
-
+        need_build = _POOL is None or force_reload or sig != _POOL_SIG
+        if need_build:
+            old = _POOL
+            new_pool = build_pool_from_config(config, proxies=proxies, log_callback=log_callback)
+            if old is not None:
+                try:
+                    old_by = {}
+                    for a in (getattr(old, "accounts", None) or []):
+                        try:
+                            old_by[a.identity()] = a
+                        except Exception:
+                            continue
+                    preserved_in_use = 0
+                    for a in (getattr(new_pool, "accounts", None) or []):
+                        prev = old_by.get(a.identity())
+                        if not prev:
+                            continue
+                        # preserve runtime lease / cooldown / live tokens
+                        try:
+                            if getattr(prev, "status", "") == "in_use":
+                                a.status = "in_use"
+                                preserved_in_use += 1
+                            elif getattr(prev, "status", "") in ("bad", "registered"):
+                                a.status = prev.status
+                            if float(getattr(prev, "cooldown_until", 0) or 0) > float(getattr(a, "cooldown_until", 0) or 0):
+                                a.cooldown_until = prev.cooldown_until
+                            if getattr(prev, "access_token", ""):
+                                a.access_token = prev.access_token
+                                a.access_expires_at = getattr(prev, "access_expires_at", 0) or a.access_expires_at
+                            if getattr(prev, "refresh_token", ""):
+                                a.refresh_token = prev.refresh_token
+                            if getattr(prev, "last_used_at", 0):
+                                a.last_used_at = prev.last_used_at
+                            if getattr(prev, "last_error", ""):
+                                a.last_error = prev.last_error
+                        except Exception:
+                            continue
+                    if log_callback and preserved_in_use:
+                        try:
+                            log_callback(
+                                f"[*] Outlook pool rebuild preserved in_use={preserved_in_use} "
+                                f"total={len(getattr(new_pool, 'accounts', []) or [])}"
+                            )
+                        except Exception:
+                            pass
+                    # keep cursor roughly stable
+                    try:
+                        new_pool._idx = int(getattr(old, "_idx", 0) or 0) % max(1, len(new_pool.accounts) or 1)
+                    except Exception:
+                        pass
+                except Exception as merge_exc:
+                    if log_callback:
+                        try:
+                            log_callback(f"[!] Outlook pool rebuild merge skip: {merge_exc}")
+                        except Exception:
+                            pass
+            _POOL = new_pool
             _POOL_SIG = sig
-
         else:
-
             _POOL.log_callback = log_callback
-
             _POOL.proxies = proxies
-
         return _POOL
 
 

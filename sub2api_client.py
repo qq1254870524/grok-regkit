@@ -1,3 +1,4 @@
+# 18r35f: treat Sub2API 'SSO already exists; not overwritten' as idempotent success
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Sub2API Grok importer: SSO->OAuth and CPA OAuth JSON direct import.
@@ -1124,6 +1125,29 @@ class Sub2APIClient:
                 detail = str(item.get("error") or item.get("message") or "unknown conversion/import failure")
                 last_error = detail
                 detail_l = detail.lower()
+                # 18r35f: upstream returns failed[] with "SSO already exists; not overwritten"
+                # when the account is already in Sub2API — treat as success (idempotent import).
+                if (
+                    "already exists" in detail_l
+                    or "not overwritten" in detail_l
+                    or "sso already" in detail_l
+                    or "duplicate" in detail_l
+                ):
+                    _log(
+                        self.log_callback,
+                        f"[+] Sub2API SSO 已在号池(幂等成功) email={name} "
+                        f"detail={detail[:220]} status={response.status_code}",
+                    )
+                    return {
+                        "ok": True,
+                        "usable": True,
+                        "created": [],
+                        "failed": failed,
+                        "account_id": "",
+                        "verification": {"already_exists": True, "detail": detail[:300]},
+                        "sso_meta": sso_meta,
+                        "already_exists": True,
+                    }
                 if ("429" in detail or "too many requests" in detail_l) and attempt < max_attempts:
                     delay = rate_backoff[min(attempt - 1, len(rate_backoff) - 1)]
                     _log(

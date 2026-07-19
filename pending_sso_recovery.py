@@ -1,4 +1,8 @@
 """
+18r35k: MT re-register pending_sso result undoes fail -> record_pending (not hard-fail).
+18r35j: pending load prefers mail_token; no-token accounts sink/archive so queue not blocked.
+18r35i: MT pending path must run hybrid re-register on auth_error (was serial-only; MT only record_fail).
+
 Pending SSO recovery helpers for grok-regkit hybrid.
 
 18r28h: ONE login submit only (no boost second click); CF-stuck cannot skip 10s
@@ -187,8 +191,25 @@ def decode_pending_mail_token(raw: str) -> str:
 
 
 def load_pending_sso_accounts(include_timestamped: bool = True) -> list[dict]:
-    items: list[dict] = []
-    seen: set[str] = set()
+    """Load pending SSO accounts.
+
+    18r35j rules:
+    - same email keeps the row WITH the longest mail_token (not first-seen bare row)
+    - queue order: has_mail_token first, then original encounter order
+    - bare no-token historical rows no longer block the head of the queue
+    """
+    best: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _rank(item: dict) -> tuple:
+        tok = str(item.get("mail_token") or "").strip()
+        note = str(item.get("note") or "")
+        return (
+            1 if tok else 0,
+            len(tok),
+            1 if "b64:" in str(item.get("raw") or "") else 0,
+            len(note),
+        )
 
     def _add_from(path: Path) -> None:
         if not path.is_file():
@@ -201,18 +222,97 @@ def load_pending_sso_accounts(include_timestamped: bool = True) -> list[dict]:
             parsed = parse_pending_account_line(ln)
             if not parsed:
                 continue
-            key = parsed["email"].lower()
-            if key in seen:
+            key = str(parsed.get("email") or "").strip().lower()
+            if not key:
                 continue
-            seen.add(key)
+            parsed["email"] = key
             parsed["source"] = path.name
-            items.append(parsed)
+            prev = best.get(key)
+            if prev is None:
+                best[key] = parsed
+                order.append(key)
+                continue
+            # Prefer richer mail_token / longer token blob for the same mailbox.
+            if _rank(parsed) > _rank(prev):
+                # keep earliest source name for traceability
+                parsed["source"] = prev.get("source") or parsed.get("source")
+                best[key] = parsed
 
     _add_from(ROOT / "accounts_registered_pending_sso.txt")
     if include_timestamped:
-        for pth in sorted(ROOT.glob("accounts_no_sso_*.txt"), key=lambda x: x.stat().st_mtime, reverse=True):
+        for pth in sorted(
+            ROOT.glob("accounts_no_sso_*.txt"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True,
+        ):
             _add_from(pth)
+
+    items = [best[k] for k in order if k in best]
+    # Runnable accounts with mailbox credentials first; no-token sink to tail.
+    items.sort(key=lambda it: (0 if str(it.get("mail_token") or "").strip() else 1,))
     return items
+
+
+def archive_pending_no_mail_token(
+    email: str,
+    *,
+    reason: str = "no_mail_token",
+    log=None,
+) -> int:
+    """Move a no-mail_token pending row out of the active head file into archive.
+
+    Keeps password history for manual review, but stops blocking recover queue.
+    Does NOT delete success-path data; only rewrites pending files.
+    """
+    target = str(email or "").strip().lower()
+    if not target:
+        return 0
+    _log = log or (lambda _m: None)
+    active = ROOT / "accounts_registered_pending_sso.txt"
+    archive = ROOT / "accounts_pending_no_mail_token_archive.txt"
+    if not active.is_file():
+        return 0
+    try:
+        lines = active.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        _log(f"[pending-sso] archive no_mail_token read fail: {exc}")
+        return 0
+    keep: list[str] = []
+    archived_rows: list[str] = []
+    moved = 0
+    for ln in lines:
+        parsed = parse_pending_account_line(ln)
+        if not parsed:
+            keep.append(ln)
+            continue
+        em = str(parsed.get("email") or "").strip().lower()
+        tok = str(parsed.get("mail_token") or "").strip()
+        if em == target and not tok:
+            note = str(parsed.get("note") or "pending_sso")
+            if reason and reason not in note:
+                note = f"{note}:{reason}" if note else reason
+            archived_rows.append(f"{parsed['email']}----{parsed['password']}----{note}")
+            moved += 1
+            continue
+        keep.append(ln)
+    if moved <= 0:
+        return 0
+    try:
+        tmp = active.with_suffix(active.suffix + ".tmp")
+        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+        tmp.replace(active)
+        if archived_rows:
+            with archive.open("a", encoding="utf-8") as fh:
+                for row in archived_rows:
+                    fh.write(row + "\n")
+        _log(
+            f"[pending-sso] archived no_mail_token email={target} moved={moved} "
+            f"archive={archive.name} active_remain={len(keep)}"
+        )
+    except Exception as exc:
+        _log(f"[pending-sso] archive no_mail_token write fail email={target}: {exc}")
+        return 0
+    return moved
 
 
 def remove_pending_sso_account(email: str, log: Callable[[str], None] | None = None) -> int:
@@ -1637,6 +1737,22 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None, wo
         controller = engine.CliStopController()
 
     pending = load_pending_sso_accounts(include_timestamped=True)
+    try:
+        _tok_n = sum(1 for it in pending if str(it.get("mail_token") or "").strip())
+        _notok_n = len(pending) - _tok_n
+        (log_callback or print)(
+            f"[pending-sso] queue loaded total={len(pending)} with_mail_token={_tok_n} "
+            f"no_mail_token={_notok_n} (token-first order)"
+        )
+        if pending:
+            head = pending[0]
+            (log_callback or print)(
+                f"[pending-sso] queue head email={head.get('email')} "
+                f"mail_token_len={len(str(head.get('mail_token') or ''))} "
+                f"note={head.get('note')}"
+            )
+    except Exception as _qexc:
+        (log_callback or print)(f"[pending-sso] queue stats fail: {_qexc}")
     if count and count > 0:
         pending = pending[: int(count)]
 
@@ -1784,13 +1900,22 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None, wo
                             if not forced_mail_token:
                                 log(
                                     f"[pending-sso] skip forced re-register missing mail_token "
-                                    f"email={email} (kept in pending; no IMAP/Graph creds)"
+                                    f"email={email} -> archive no_mail_token (unblocks queue; no IMAP/Graph creds)"
                                 )
+                                try:
+                                    archive_pending_no_mail_token(
+                                        email,
+                                        reason="no_mail_token_cannot_reregister",
+                                        log=log,
+                                    )
+                                except Exception as arc_exc:
+                                    log(f"[pending-sso] archive no_mail_token fail: {arc_exc}")
                                 rr = {
                                     "status": "fail",
                                     "ok": False,
                                     "email": email,
-                                    "detail": "skip_reregister_no_mail_token",
+                                    "detail": "skip_reregister_no_mail_token_archived",
+                                    "fail_reason": "no_mail_token",
                                 }
                             else:
                                 log(
@@ -1939,12 +2064,165 @@ def _run_pending_sso_recovery_job_mt(
                     )
                     res = normalize_result(raw)
                     status = res.get("status")
+                    detail = str(res.get("detail") or "")
+                    fail_reason = str(res.get("fail_reason") or "")
                     if status == STATUS_SUCCESS:
                         coord.record_success()
                     elif status == STATUS_STOPPED:
                         break
                     else:
                         coord.record_fail()
+                        # 18r35i: MT must also hybrid re-register (serial path already does).
+                        if not fail_reason:
+                            low = detail.lower()
+                            if "bad_password" in low or "page_err=bad_password" in low:
+                                fail_reason = "bad_password"
+                            elif "account_missing" in low or "page_err=account_missing" in low:
+                                fail_reason = "account_missing"
+                            elif (
+                                "auth_error" in low
+                                or "page_err=auth_error" in low
+                                or "an error occurred" in low
+                                or "no sso after sign-in" in low
+                                or "turnstile_retry_failed" in low
+                            ):
+                                fail_reason = "auth_error"
+                        need_rereg = (
+                            fail_reason
+                            in {"bad_password", "account_missing", "auth_error", "need_reregister"}
+                            or res.get("remove_pending")
+                            or ("no sso after sign-in" in detail.lower())
+                            or ("sign-in page_err" in detail.lower())
+                        )
+                        if need_rereg and not controller.should_stop():
+                            try:
+                                rotate_pending_sso_account_to_end(email, log=wlog)
+                            except Exception as rot_exc:
+                                wlog(f"[pending] rotate after fail error: {rot_exc}")
+                            wlog(
+                                f"[pending-sso] {fail_reason or 'auth_fail'} -> MT hybrid re-register "
+                                f"email={email} (success 后再移出 pending)"
+                            )
+                            try:
+                                import importlib
+                                import hybrid_register as _hr
+                                importlib.reload(_hr)
+                                register_one_hybrid = _hr.register_one_hybrid
+                                try:
+                                    engine.stop_browser(log_callback=wlog)
+                                    wlog("[pending-sso] closed sign-in browser before hybrid re-register")
+                                except Exception as sb_exc:
+                                    wlog(f"[pending-sso] stop sign-in browser before rereg: {sb_exc}")
+                                try:
+                                    re_accounts = ROOT / (
+                                        f"accounts_reregistered_{engine.now_beijing('%Y%m%d_%H%M%S')}_w{wid}.txt"
+                                    )
+                                except Exception:
+                                    import time as _t
+                                    re_accounts = ROOT / (
+                                        f"accounts_reregistered_{_t.strftime('%Y%m%d_%H%M%S')}_w{wid}.txt"
+                                    )
+                                forced_mail_token = str(item.get("mail_token") or "").strip()
+                                forced_xai_password = str(password or "").strip()
+                                if not forced_mail_token:
+                                    try:
+                                        from hybrid_register import _lookup_mail_token_from_pool as _lt
+                                        forced_mail_token = str(_lt(email, log=wlog) or "").strip()
+                                        wlog(
+                                            f"[pending-sso] pre-rereg mail_token lookup "
+                                            f"email={email} len={len(forced_mail_token)}"
+                                        )
+                                    except Exception as lkp_exc:
+                                        wlog(f"[pending-sso] pre-rereg mail_token lookup fail: {lkp_exc}")
+                                        forced_mail_token = ""
+                                if not forced_mail_token:
+                                    wlog(
+                                        f"[pending-sso] skip forced re-register missing mail_token "
+                                        f"email={email} -> archive no_mail_token (unblocks queue)"
+                                    )
+                                    try:
+                                        archive_pending_no_mail_token(
+                                            email,
+                                            reason="no_mail_token_cannot_reregister",
+                                            log=wlog,
+                                        )
+                                    except Exception as arc_exc:
+                                        wlog(f"[pending-sso] archive no_mail_token fail: {arc_exc}")
+                                    # MT path previously fell through without rr; keep explicit fail marker on item
+                                    try:
+                                        item["fail_reason"] = "no_mail_token"
+                                        item["detail"] = "skip_reregister_no_mail_token_archived"
+                                    except Exception:
+                                        pass
+                                else:
+                                    wlog(
+                                        f"[pending-sso] re-register forced_email={email} "
+                                        f"mail_token_len={len(forced_mail_token)} "
+                                        f"xai_password_len={len(forced_xai_password)}"
+                                    )
+                                    rr = register_one_hybrid(
+                                        log=wlog,
+                                        proxy=wproxy,
+                                        should_stop=controller.should_stop,
+                                        accounts_file=re_accounts,
+                                        post_success=True,
+                                        forced_email=email,
+                                        forced_mail_token=forced_mail_token,
+                                        forced_xai_password=forced_xai_password,
+                                    )
+                                    rr = normalize_result(rr)
+                                    rr_status = rr.get("status")
+                                    rr_email = str(rr.get("email") or "").strip()
+                                    wlog(
+                                        f"[pending-sso] re-register result status={rr_status} "
+                                        f"detail={rr.get('detail')} email={rr_email or email}"
+                                    )
+                                    if rr_status == STATUS_SUCCESS:
+                                        # convert prior fail into success for this worker slot
+                                        try:
+                                            coord.record_success()
+                                            # undo one fail if API allows; otherwise leave both
+                                            if hasattr(coord, "undo_fail"):
+                                                coord.undo_fail()
+                                            elif hasattr(coord, "record_fail_adjust"):
+                                                coord.record_fail_adjust(-1)
+                                            else:
+                                                # best-effort: success already counted; fail remains inflated
+                                                wlog("[pending-sso] note: fail counter not decremented (no undo_fail)")
+                                        except Exception as adj_exc:
+                                            wlog(f"[pending-sso] success adjust: {adj_exc}")
+                                        if rr_email.lower() == str(email or "").strip().lower() or not rr_email:
+                                            try:
+                                                remove_pending_sso_account(email, log=wlog)
+                                                wlog(f"[pending-sso] re-register success -> 移出 pending email={email}")
+                                            except Exception as rm_exc:
+                                                wlog(f"[pending-sso] remove pending after success fail: {rm_exc}")
+                                    elif rr_status == STATUS_PENDING_SSO:
+                                        # 18r35k: hybrid burn/pending is NOT a hard fail
+                                        try:
+                                            if hasattr(coord, "undo_fail"):
+                                                coord.undo_fail()
+                                            if hasattr(coord, "record_pending"):
+                                                coord.record_pending(
+                                                    rate_limited=("rate_limit" in str(rr.get("detail") or "").lower()
+                                                                  or "create_email_rate" in str(rr.get("detail") or "").lower())
+                                                )
+                                            wlog(
+                                                f"[pending-sso] re-register pending_sso detail={rr.get('detail')} "
+                                                f"email={rr_email or email} (fail->pending; kept in queue)"
+                                            )
+                                        except Exception as pend_adj:
+                                            wlog(f"[pending-sso] pending adjust fail: {pend_adj}")
+                                    elif rr_status == STATUS_STOPPED:
+                                        wlog("[pending-sso] re-register stopped; pending kept")
+                                        break
+                            except Exception as reg_exc:
+                                wlog(f"[pending-sso] re-register exception: {reg_exc}")
+                                try:
+                                    import traceback as _tb
+                                    wlog(_tb.format_exc())
+                                except Exception:
+                                    pass
                 except Exception as exc:
                     coord.record_fail()
                     wlog(f"[pending-sso] exception email={email}: {exc}")

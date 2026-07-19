@@ -1,12 +1,22 @@
-# 18r35 Progress
+# 18r35 Progress Board
 
-Updated: 2026-07-20T02:27:50.856135
+Updated: 2026-07-20 05:04:57
 
-- running: False
-- phase: finished
-- cell counters: ok=1 fail=38 pend=0 target=40
-- session: ok=89 fail=121 pend=76
-- jobs: 8/8
-- cells_done_jsonl: 6/8 (+pending)
-- last_event: [*] 多线程任务结束。成功 1 | 失败 38 | pending_sso 0
-- pulse: 02:27:48 running=False phase=finished ok=1 fail=38 pend=0 target=40 mode=browser proxy=socks5_list email=aol workers=10 | [*] 多线程任务结束。成功 1 | 失败 38 | pending_sso 0
+- matrix_alive: False
+- cells_done: 6/8 (+pending_sso_recovery)
+- current: run=True phase=waiting_code ok=2 fail=0 pend=0 target=4
+- session: 8/0/0
+- jobs: 1/2
+- last_event: [w1] [*] Outlook Graph folder mode=priority keys=['inbox', 'junkemail', 'deleteditems']
+- pulse: 05:04:55 running=True phase=waiting_code ok=2 fail=0 pend=0 target=4 mode=hybrid proxy=socks5_list email=outlook workers=2 | [w2] [*] Outlook Graph via direct ok folder=inbox count=5
+
+## Completed cells
+
+| cell | success | fail | pending |
+|---|---:|---:|---:|
+| `hybrid__direct__aol` | 39 | 1 | 0 |
+| `hybrid__direct__outlook` | 5 | 0 | 35 |
+| `hybrid__socks5_list__aol` | 35 | 2 | 3 |
+| `hybrid__socks5_list__outlook` | 6 | 0 | 34 |
+| `browser__direct__aol` | 0 | 40 | 0 |
+| `browser__direct__outlook` | 0 | 40 | 0 |

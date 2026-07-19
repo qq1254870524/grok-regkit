@@ -81,6 +81,12 @@ class JobCoordinator:
     def record_fail(self) -> None:
         with self._lock:
             self.fail += 1
+    def undo_fail(self) -> None:
+        """18r35i: after hybrid re-register success, reverse a prior fail tally."""
+        with self._lock:
+            if int(getattr(self, 'fail', 0) or 0) > 0:
+                self.fail = int(self.fail) - 1
+
 
     def record_pending(self, *, rate_limited: bool = False) -> None:
         with self._lock:
