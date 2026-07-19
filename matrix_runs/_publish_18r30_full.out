@@ -1,0 +1,76 @@
+ZIP C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-multithread-18r30-full.zip 406377
++ git add -A
+he working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28f2.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28f_live.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/loss_watchdog_18r30.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_18r30_multithread.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_18r31_100rounds.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_cross_run.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_rerun_weak_18r24.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/reconcile_pools.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/start_web8092_hidden.ps1', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/stable-2026-07-19-matrix-multithread-18r30-full/worker_coord.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/loss_watchdog_18r30.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/matrix_18r31_100rounds.py', CRLF will be replaced by LF the next time Git touches it
+
++ git commit -m release: stable-2026-07-19-matrix-multithread-18r30-full multi-thread full matrix
+
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_probe_socks5_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_progress_pack2_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_progress_pack_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_publish_companions_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_pulse_18r29_now.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_read_dispatch.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_sleep120.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_snap_keys.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_snap_now.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_snap_once_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_snap_progress_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_snap_wait_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_stall_watch_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_status_18r29_now.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_supervise_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_supervise_18r29b.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_tick_status_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_unattended_guardian_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_wait3m_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_wait_flag.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_wait_report_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28e.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28e_live.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28f2.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r28f_live.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/_watch_18r29.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/loss_watchdog_18r30.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_18r30_multithread.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_18r31_100rounds.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_cross_run.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/matrix_rerun_weak_18r24.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/reconcile_pools.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/tools/start_web8092_hidden.ps1
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/web/__init__.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/web/index.html
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/web/server.py
+ create mode 100644 packages/stable-2026-07-19-matrix-multithread-18r30-full/worker_coord.py
+ create mode 100644 sub2api_import_dead.jsonl
+ create mode 100644 sub2api_import_pending.jsonl
+ create mode 100644 tools/loss_watchdog_18r30.py
+ create mode 100644 tools/matrix_18r31_100rounds.py
+
++ git tag -a stable-2026-07-19-matrix-multithread-18r30-full -m release: stable-2026-07-19-matrix-multithread-18r30-full
++ git push mygithub main
+To https://github.com/qq1254870524/grok-regkit.git
+   74a1a71..fe6a49c  main -> main
+
++ git push mygithub stable-2026-07-19-matrix-multithread-18r30-full
+To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-matrix-multithread-18r30-full -> stable-2026-07-19-matrix-multithread-18r30-full
+
++ gh release create stable-2026-07-19-matrix-multithread-18r30-full C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-multithread-18r30-full.zip --repo qq1254870524/grok-regkit --title stable-2026-07-19-matrix-multithread-18r30-full --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_gh_body_stable-2026-07-19-matrix-multithread-18r30-full.md
+HTTP 422: Validation Failed (https://api.github.com/repos/qq1254870524/grok-regkit/releases/356271611)
+Release.tag_name already exists
+
++ gh release upload stable-2026-07-19-matrix-multithread-18r30-full C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-multithread-18r30-full.zip --repo qq1254870524/grok-regkit --clobber
+PUBLISH DONE stable-2026-07-19-matrix-multithread-18r30-full
+
+---STDERR---
