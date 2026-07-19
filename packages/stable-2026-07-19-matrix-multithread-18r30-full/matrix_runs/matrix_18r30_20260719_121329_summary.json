@@ -1,0 +1,22 @@
+[
+  {
+    "cell": "hybrid__socks5_list__aol",
+    "mode": "hybrid",
+    "proxy": "socks5_list",
+    "email": "aol",
+    "workers": 2,
+    "count": 2,
+    "success": 0,
+    "fail": 0,
+    "pending_sso": 0,
+    "skipped": 0,
+    "error": "",
+    "last_event": "",
+    "finished_at": null,
+    "ts": "2026-07-19T12:18:33"
+  },
+  {
+    "cell": "pending_sso_recovery",
+    "error": "<urlopen error [WinError 10061] 由于目标计算机积极拒绝，无法连接。>"
+  }
+]

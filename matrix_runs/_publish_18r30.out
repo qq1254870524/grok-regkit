@@ -1,0 +1,168 @@
+file worker_coord.py
+file hybrid_register.py
+file pending_sso_recovery.py
+file grok_register_ttk.py
+file aol_mail.py
+file outlook_mail.py
+file cpa_export.py
+file sub2api_client.py
+file CHANGELOG.md
+file STABLE_VERSION.md
+file README.md
+file MATRIX_REPORT.md
+file requirements.txt
+file PACKAGE_META.json
+dir web
+dir browser
+dir protocol
+dir tools
+dir docs
+ZIP C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-multithread-18r30.zip 391734
++ git status -sb
+18r29.py
+?? tools/_find_browser_mode.py
+?? tools/_fix_build_list.py
+?? tools/_fix_pending_file_18r24b.py
+?? tools/_fix_pending_header_18r28f.py
+?? tools/_fix_post_tag.py
+?? tools/_fix_pub_tag.py
+?? tools/_fix_weak_rounds.py
+?? tools/_gate280.py
+?? tools/_gate360.py
+?? tools/_gate_hybrid_hsa_18r29.py
+?? tools/_gate_pack2.py
+?? tools/_hour_monitor_18r29.py
+?? tools/_inspect_18r29.py
+?? tools/_long_monitor_18r29.py
+?? tools/_long_sample_18r29.py
+?? tools/_long_wait_18r29.py
+?? tools/_matrix_18r28g.py
+?? tools/_milestone_watch_18r29.py
+?? tools/_monitor_loop_18r29.py
+?? tools/_monitor_loop_18r29b.py
+?? tools/_patch_18r24.py
+?? tools/_patch_18r24b_reload.py
+?? tools/_patch_18r25_nsfw_outlook.py
+?? tools/_patch_18r25_reload.py
+?? tools/_patch_18r28e.py
+?? tools/_patch_18r28f_mail_route.py
+?? tools/_patch_18r28f_norefill.py
+?? tools/_patch_18r28f_pending.py
+?? tools/_patch_18r28f_reload.py
+?? tools/_patch_18r28g_cf.py
+?? tools/_patch_browser_burn_18r29b.py
+?? tools/_patch_browser_burn_18r29b2.py
+?? tools/_patch_email_log.py
+?? tools/_patch_pending_18r24.py
+?? tools/_patch_pending_rotate_18r24b.py
+?? tools/_poll_18r28f.py
+?? tools/_poll_18r28g.py
+?? tools/_poll_18r28g2.py
+?? tools/_probe_socks5_18r29.py
+?? tools/_progress_pack2_18r29.py
+?? tools/_progress_pack_18r29.py
+?? tools/_publish_companions_18r29.py
+?? tools/_pulse_18r29_now.py
+?? tools/_read_dispatch.py
+?? tools/_sleep120.py
+?? tools/_snap_keys.py
+?? tools/_snap_now.py
+?? tools/_snap_once_18r29.py
+?? tools/_snap_progress_18r29.py
+?? tools/_snap_wait_18r29.py
+?? tools/_stall_watch_18r29.py
+?? tools/_status_18r29_now.py
+?? tools/_supervise_18r29.py
+?? tools/_supervise_18r29b.py
+?? tools/_tick_status_18r29.py
+?? tools/_unattended_guardian_18r29.py
+?? tools/_wait3m_18r29.py
+?? tools/_wait_flag.py
+?? tools/_wait_report_18r29.py
+?? tools/_watch_18r28e.py
+?? tools/_watch_18r28e_live.py
+?? tools/_watch_18r28f2.py
+?? tools/_watch_18r28f_live.py
+?? tools/_watch_18r29.py
+?? tools/matrix_18r30_multithread.py
+?? worker_coord.py
+
++ git add -A
+working copy of 'tools/_snap_progress_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_snap_wait_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_stall_watch_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_status_18r29_now.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_supervise_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_supervise_18r29b.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_tick_status_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_unattended_guardian_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_wait3m_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_wait_flag.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_wait_report_18r29.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_watch_18r28e.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_watch_18r28e_live.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_watch_18r28f2.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/_watch_18r28f_live.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'tools/matrix_18r30_multithread.py', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'worker_coord.py', CRLF will be replaced by LF the next time Git touches it
+
++ git reset HEAD -- aol_accounts.txt outlook_accounts.txt socks5_proxies.txt config.json
++ git commit -m release: stable-2026-07-19-matrix-multithread-18r30 multi-thread workers UI/API + email preflight sample + mail top=5
+_18r25_reload.py
+ create mode 100644 tools/_patch_18r28e.py
+ create mode 100644 tools/_patch_18r28f_mail_route.py
+ create mode 100644 tools/_patch_18r28f_norefill.py
+ create mode 100644 tools/_patch_18r28f_pending.py
+ create mode 100644 tools/_patch_18r28f_reload.py
+ create mode 100644 tools/_patch_18r28g_cf.py
+ create mode 100644 tools/_patch_browser_burn_18r29b.py
+ create mode 100644 tools/_patch_browser_burn_18r29b2.py
+ create mode 100644 tools/_patch_email_log.py
+ create mode 100644 tools/_patch_pending_18r24.py
+ create mode 100644 tools/_patch_pending_rotate_18r24b.py
+ create mode 100644 tools/_poll_18r28f.py
+ create mode 100644 tools/_poll_18r28g.py
+ create mode 100644 tools/_poll_18r28g2.py
+ create mode 100644 tools/_probe_socks5_18r29.py
+ create mode 100644 tools/_progress_pack2_18r29.py
+ create mode 100644 tools/_progress_pack_18r29.py
+ create mode 100644 tools/_publish_companions_18r29.py
+ create mode 100644 tools/_pulse_18r29_now.py
+ create mode 100644 tools/_read_dispatch.py
+ create mode 100644 tools/_sleep120.py
+ create mode 100644 tools/_snap_keys.py
+ create mode 100644 tools/_snap_now.py
+ create mode 100644 tools/_snap_once_18r29.py
+ create mode 100644 tools/_snap_progress_18r29.py
+ create mode 100644 tools/_snap_wait_18r29.py
+ create mode 100644 tools/_stall_watch_18r29.py
+ create mode 100644 tools/_status_18r29_now.py
+ create mode 100644 tools/_supervise_18r29.py
+ create mode 100644 tools/_supervise_18r29b.py
+ create mode 100644 tools/_tick_status_18r29.py
+ create mode 100644 tools/_unattended_guardian_18r29.py
+ create mode 100644 tools/_wait3m_18r29.py
+ create mode 100644 tools/_wait_flag.py
+ create mode 100644 tools/_wait_report_18r29.py
+ create mode 100644 tools/_watch_18r28e.py
+ create mode 100644 tools/_watch_18r28e_live.py
+ create mode 100644 tools/_watch_18r28f2.py
+ create mode 100644 tools/_watch_18r28f_live.py
+ create mode 100644 tools/_watch_18r29.py
+ create mode 100644 tools/matrix_18r30_multithread.py
+ create mode 100644 worker_coord.py
+
++ git tag -a stable-2026-07-19-matrix-multithread-18r30 -m release: stable-2026-07-19-matrix-multithread-18r30 multi-thread workers UI/API + email preflight sample + mail top=5
++ git push mygithub main
+To https://github.com/qq1254870524/grok-regkit.git
+   c217d28..74a1a71  main -> main
+
++ git push mygithub stable-2026-07-19-matrix-multithread-18r30
+To https://github.com/qq1254870524/grok-regkit.git
+ * [new tag]         stable-2026-07-19-matrix-multithread-18r30 -> stable-2026-07-19-matrix-multithread-18r30
+
++ gh release create stable-2026-07-19-matrix-multithread-18r30 C:\Users\zhang\grok-regkit\packages\stable-2026-07-19-matrix-multithread-18r30.zip --repo qq1254870524/grok-regkit --title stable-2026-07-19-matrix-multithread-18r30 --notes-file C:\Users\zhang\grok-regkit\matrix_runs\_gh_body_stable-2026-07-19-matrix-multithread-18r30.md
+https://github.com/qq1254870524/grok-regkit/releases/tag/stable-2026-07-19-matrix-multithread-18r30
+
+PUBLISH DONE stable-2026-07-19-matrix-multithread-18r30
+
