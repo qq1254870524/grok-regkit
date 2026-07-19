@@ -143,3 +143,19 @@
 - cell `browser__socks5_list__aol` success=3 fail=6 pending=1 err=
 - cell `browser__socks5_list__outlook` success=0 fail=10 pending=0 err=
 - cell `pending_sso_recovery` success=0 fail=10 pending=None err=
+
+## stable-2026-07-19-matrix-multithread-18r30-full
+- time: 2026-07-19T14:14:29
+- multi-thread full matrix completion package
+- Sub2 drop-account fix: import retries + job-end reconcile; dead SSO queue
+- Sub2 drop-account fix: import retries + job-end reconcile G2A/hybrid/CPA; dead SSO queue
+- does not overwrite 18r29 or early 18r30 tag
+- cell `hybrid__direct__aol` success=10 fail=0 pending=0 err=
+- cell `hybrid__direct__outlook` success=7 fail=0 pending=3 err=
+- cell `hybrid__socks5_list__aol` success=7 fail=0 pending=3 err=
+- cell `hybrid__socks5_list__outlook` success=2 fail=0 pending=8 err=
+- cell `browser__direct__aol` success=5 fail=5 pending=0 err=
+- cell `browser__direct__outlook` success=3 fail=5 pending=0 err=
+- cell `browser__socks5_list__aol` success=3 fail=6 pending=1 err=
+- cell `browser__socks5_list__outlook` success=0 fail=10 pending=0 err=
+- cell `pending_sso_recovery` success=0 fail=10 pending=None err=

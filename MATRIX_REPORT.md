@@ -102,3 +102,15 @@ summary_file=matrix_18r30_20260719_123545_summary.json
 - `browser__socks5_list__aol` success=3 fail=6 pending=1 err=
 - `browser__socks5_list__outlook` success=0 fail=10 pending=0 err=
 - `pending_sso_recovery` success=0 fail=10 pending=None err=
+
+## 18r30 full matrix results
+finished=2026-07-19T14:14:29
+- `hybrid__direct__aol` success=10 fail=0 pending=0 err=
+- `hybrid__direct__outlook` success=7 fail=0 pending=3 err=
+- `hybrid__socks5_list__aol` success=7 fail=0 pending=3 err=
+- `hybrid__socks5_list__outlook` success=2 fail=0 pending=8 err=
+- `browser__direct__aol` success=5 fail=5 pending=0 err=
+- `browser__direct__outlook` success=3 fail=5 pending=0 err=
+- `browser__socks5_list__aol` success=3 fail=6 pending=1 err=
+- `browser__socks5_list__outlook` success=0 fail=10 pending=0 err=
+- `pending_sso_recovery` success=0 fail=10 pending=None err=

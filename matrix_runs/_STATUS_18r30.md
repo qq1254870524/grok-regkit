@@ -1,8 +1,8 @@
 # 18r30 live
-time: 2026-07-19T14:13:44
-matrix_alive: True
-api: ok=0/10 fail=8 pend=0 phase=finished jobs=10/9
-event: [w2] [*] turnstile sitekey=0x4AAAAAAAhr9JGVDZbr...
+time: 2026-07-19T14:14:29
+matrix_alive: False
+api: ok=0/10 fail=10 pend=0 phase=finished jobs=10/10
+event: [*] pending_sso 恢复结束。成功 0 | 失败 10 | workers=2
 
 ## cells jsonl
 ```
@@ -14,6 +14,7 @@ event: [w2] [*] turnstile sitekey=0x4AAAAAAAhr9JGVDZbr...
 {"cell": "browser__direct__outlook", "mode": "browser", "proxy": "direct", "email": "outlook", "workers": 2, "count": 10, "success": 3, "fail": 5, "pending_sso": 0, "skipped": 0, "error": "", "last_event": "[*] 多线程任务结束。成功 3 | 失败 5 | pending_sso 0", "finished_at": 1784440401.3352616, "ts": "2026-07-19T13:53:22"}
 {"cell": "browser__socks5_list__aol", "mode": "browser", "proxy": "socks5_list", "email": "aol", "workers": 2, "count": 10, "success": 3, "fail": 6, "pending_sso": 1, "skipped": 0, "error": "", "last_event": "[*] 多线程任务结束。成功 3 | 失败 6 | pending_sso 1", "finished_at": 1784441090.3249738, "ts": "2026-07-19T14:04:55"}
 {"cell": "browser__socks5_list__outlook", "mode": "browser", "proxy": "socks5_list", "email": "outlook", "workers": 2, "count": 10, "success": 0, "fail": 10, "pending_sso": 0, "skipped": 0, "error": "", "last_event": "[*] 多线程任务结束。成功 0 | 失败 10 | pending_sso 0", "finished_at": 1784441450.2104943, "ts": "2026-07-19T14:10:51"}
+{"cell": "pending_sso_recovery", "workers": 2, "success": 0, "fail": 10, "ts": "2026-07-19T14:14:12"}
 
 ```
 
@@ -54,5 +55,7 @@ result {'cell': 'browser__socks5_list__aol', 'mode': 'browser', 'proxy': 'socks5
 start {'ok': True, 'started': True, 'count': 10, 'workers': 2}
 result {'cell': 'browser__socks5_list__outlook', 'mode': 'browser', 'proxy': 'socks5_list', 'email': 'outlook', 'workers': 2, 'count': 10, 'success': 0, 'fail': 10, 'pending_sso': 0, 'skipped': 0, 'error': '', 'last_event': '[*] ���߳�����������ɹ� 0 | ʧ�� 10 | pending_sso 0', 'finished_at': 1784441450.2104943, 'ts': '2026-07-19T14:10:51'}
 pending start {'ok': True, 'started': True, 'count': 10, 'workers': 2, 'job_kind': 'pending_sso_recovery'}
+DONE C:\Users\zhang\grok-regkit\matrix_runs\matrix_18r30_20260719_123545_summary.json
+MD C:\Users\zhang\grok-regkit\matrix_runs\MATRIX_18r30_20260719_123545.md
 
 ```
