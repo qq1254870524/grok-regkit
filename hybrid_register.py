@@ -17,6 +17,8 @@ Used by Web/CLI when config register_mode == "hybrid".
 
 
 Changelog:
+- 2026-07-20r37: CreateEmail 假 actual_send 修复：seen_status_unknown/status=0 不再把 net_hits 抬成 dual-send lock，也不 promote browser_sent；仅 2xx/ui_code/raw_sent 才确认 browser_sent；弱证据时短轮询等响应确认，未确认允许 protocol-rescue，减少 early_no_new_mail 空烧。
+
 - 2026-07-20r35b: mailbox token lookup no longer force_reload pools (preserve in_use).
 
 
@@ -2377,97 +2379,112 @@ def register_one_hybrid(
             )
 
             # Accept browser_sent only with strong evidence (2xx / ok / code-step)
-
-            # PLUS real send evidence: actual_send_count>=1 or net_hits>=1 or UI code step.
-
-            # 18r14: status=200 alone with actual_send=0/net_hits=0 must NOT skip protocol.
-
+            # PLUS real send evidence. 18r37: NEVER promote from weak status_unknown.
+            # net_hits alone under seen_status_unknown is NOT dual-send lock / browser_sent.
             reason = str(st.get("reason") or "")
-
-            actual_send = int(st.get("actual_send_count") or 0)
-
+            status_n = int(st.get("status") or 0)
+            actual_send_hook = int(st.get("actual_send_count") or 0)
             net_hits_n = int(st.get("net_hits") or 0)
-
-            if actual_send <= 0 and net_hits_n > 0:
-
-                # net_hits is body capture of CreateEmail; backfill for logs/decision
-
-                actual_send = net_hits_n
-
-                st["actual_send_count"] = actual_send
-
             ui_code_now = bool(st.get("ui_has_code") or st.get("ui_body_code"))
-
             weak_reasons = {
-
                 "seen_status_unknown",
-
                 "not_seen",
-
                 "no_data",
-
             }
-
+            strong_http = 200 <= status_n < 300
+            # 18r37: only backfill actual_send from net_hits when response is strong
+            actual_send = actual_send_hook
+            if actual_send <= 0 and net_hits_n > 0 and strong_http and reason not in weak_reasons:
+                actual_send = net_hits_n
+                st["actual_send_count"] = actual_send
             raw_sent = bool(st.get("sent")) and reason not in weak_reasons
-
-            has_send_evidence = (actual_send >= 1) or (net_hits_n >= 1) or ui_code_now
-
-            browser_sent = bool(raw_sent and has_send_evidence)
+            # Confirmed browser send: real success signals only
+            confirmed_send = bool(
+                ui_code_now
+                or (raw_sent and (strong_http or actual_send >= 1 or net_hits_n >= 1))
+                or (strong_http and (actual_send >= 1 or net_hits_n >= 1 or bool(st.get("ok"))))
+            )
+            network_fired = (net_hits_n >= 1) or (actual_send_hook >= 1) or (actual_send >= 1)
+            # dual-send lock only when send is confirmed (not weak unknown)
+            dual_send_lock = bool(
+                confirmed_send
+                and (actual_send >= 1 or net_hits_n >= 1 or ui_code_now)
+            )
+            has_send_evidence = confirmed_send
+            browser_sent = bool(confirmed_send)
+            # 18r37: weak unknown + net hit -> short re-poll for 2xx/ui_code before deciding
+            if (not browser_sent) and network_fired and reason in weak_reasons:
+                log(
+                    f"[hybrid] CreateEmail weak evidence wait-confirm "
+                    f"reason={reason} status={status_n} net_hits={net_hits_n} "
+                    f"actual_hook={actual_send_hook} (18r37 no promote)"
+                )
+                for _wc in range(8):
+                    if stop():
+                        return _result(STATUS_STOPPED)
+                    time.sleep(1.5)
+                    st2 = browser.create_email_status_via_browser()
+                    reason2 = str(st2.get("reason") or "")
+                    status2 = int(st2.get("status") or 0)
+                    net2 = int(st2.get("net_hits") or 0)
+                    act2 = int(st2.get("actual_send_count") or 0)
+                    ui2 = bool(st2.get("ui_has_code") or st2.get("ui_body_code"))
+                    strong2 = 200 <= status2 < 300
+                    raw2 = bool(st2.get("sent")) and reason2 not in weak_reasons
+                    if ui2 or strong2 or raw2:
+                        st = st2
+                        reason = reason2
+                        status_n = status2
+                        net_hits_n = net2
+                        actual_send_hook = act2
+                        actual_send = act2 if act2 > 0 else (net2 if strong2 else 0)
+                        ui_code_now = ui2
+                        strong_http = strong2
+                        raw_sent = raw2
+                        confirmed_send = True
+                        dual_send_lock = True
+                        browser_sent = True
+                        has_send_evidence = True
+                        log(
+                            f"[hybrid] CreateEmail wait-confirm OK "
+                            f"status={status2} reason={reason2} ui_code={ui2} "
+                            f"actual={actual_send} net_hits={net2}"
+                        )
+                        break
+                else:
+                    log(
+                        f"[hybrid] CreateEmail wait-confirm timeout "
+                        f"reason={reason} status={status_n} net_hits={net_hits_n} "
+                        f"— keep browser_sent=0 allow protocol-rescue path"
+                    )
 
             # 18r16: detect rate-limit message on page even when HTTP status looks 200
-
             ui_rl_hit, ui_rl_ev = detect_create_email_rate_limit(
-
                 st.get("ui_body_text"),
-
                 st.get("ui_rate_limit_text"),
-
                 st.get("reason"),
-
                 "rate_limited" if st.get("ui_rate_limited") else "",
-
             )
-
             if ui_rl_hit or bool(st.get("ui_rate_limited")):
-
                 log(
-
                     f"[hybrid] CreateEmail UI rate-limit detected email={email} "
-
                     f"status={st.get('status')} actual_send={actual_send} {ui_rl_ev} "
-
                     f"body={st.get('ui_body_text')!r}"
-
                 )
-
                 return handle_create_email_rate_limited(
-
                     email,
-
                     password,
-
                     log=log,
-
                     source="browser_ui",
-
                     evidence=ui_rl_ev or "ui_rate_limited_flag",
-
                     mail_token=mail_token,
-
                 )
-
             if raw_sent and not has_send_evidence:
-
                 log(
-
                     f"[hybrid] CreateEmail weak browser claim ignored "
-
-                    f"(no actual_send/net_hits/ui_code) status={st.get('status')} "
-
+                    f"(no confirmed 2xx/ui_code) status={st.get('status')} "
                     f"reason={reason} actual_send={actual_send} net_hits={net_hits_n}"
-
                 )
-
             protocol_sent = False
 
             if browser_sent:
@@ -2490,23 +2507,37 @@ def register_one_hybrid(
 
                 net_hits_now = int(st.get("net_hits") or 0)
 
-                if actual_send >= 1:
+                if dual_send_lock or (network_fired and reason not in weak_reasons and strong_http):
 
                     log(
 
-                        f"[hybrid] CreateEmail skip re-click (actual_send={actual_send} already) "
+                        f"[hybrid] CreateEmail skip re-click (confirmed/locked) "
 
-                        f"net_hits={net_hits_now} reason={reason} — 防双发/验证码过多"
+                        f"actual_send={actual_send} net_hits={net_hits_now} reason={reason} "
+
+                        f"dual_lock={int(dual_send_lock)} — 防双发/验证码过多"
 
                     )
 
-                    # treat as browser attempt; polling decides
+                    # 18r37: only promote when confirmed (never from weak status_unknown)
 
-                    if not browser_sent and (net_hits_now >= 1 or 200 <= int(st.get("status") or 0) < 300):
+                    if not browser_sent and confirmed_send:
 
                         browser_sent = True
 
-                        log(f"[hybrid] CreateEmail promote browser_sent from actual_send={actual_send}")
+                        log(f"[hybrid] CreateEmail promote browser_sent confirmed actual_send={actual_send}")
+
+                elif network_fired and reason in weak_reasons:
+
+                    log(
+
+                        f"[hybrid] CreateEmail skip re-click (weak network_fired, no promote) "
+
+                        f"net_hits={net_hits_now} reason={reason} actual_hook={actual_send_hook} "
+
+                        f"— 18r37 keep protocol-rescue eligible"
+
+                    )
 
                 elif net_hits_now >= 1 or bool(st.get("ui_has_code") or st.get("ui_body_code")):
 
@@ -2556,11 +2587,11 @@ def register_one_hybrid(
 
                         net_hits_n = int(st.get("net_hits") or 0)
 
-                        if actual_send <= 0 and net_hits_n > 0:
-
+                        # 18r37: only backfill when strong HTTP
+                        if actual_send <= 0 and net_hits_n > 0 and 200 <= int(st.get("status") or 0) < 300:
                             actual_send = net_hits_n
-
                             st["actual_send_count"] = actual_send
+
 
                         ui_code_now = bool(st.get("ui_has_code") or st.get("ui_body_code"))
 
@@ -2596,11 +2627,37 @@ def register_one_hybrid(
 
                         )
 
+                        if browser_sent:
+
+                            confirmed_send = True
+
+                            dual_send_lock = True
+
+                            network_fired = True
+
+                            log(f"[hybrid] CreateEmail re-click confirmed dual_send_lock=1 actual={actual_send}")
+
                     except Exception as re_exc:
 
                         log(f"[hybrid] CreateEmail re-click error: {re_exc}")
 
-            if not browser_sent:
+            if not browser_sent and network_fired and reason in weak_reasons:
+
+                # 18r37: unconfirmed browser fire — do NOT immediate protocol (dual-send risk).
+
+                # Poll first; protocol-rescue after empty short window uses dual_send_lock=False.
+
+                log(
+
+                    f"[hybrid] CreateEmail defer protocol (weak network_fired) "
+
+                    f"reason={reason} net_hits={net_hits_n} actual_hook={actual_send_hook} "
+
+                    f"— poll then rescue if empty"
+
+                )
+
+            elif not browser_sent:
 
                 # Protocol path only when UI never sent. Never stack protocol on top of browser_sent.
 
@@ -2682,11 +2739,17 @@ def register_one_hybrid(
 
 
 
-            if not browser_sent and not protocol_sent:
+            if not browser_sent and not protocol_sent and not (network_fired and reason in weak_reasons):
 
                 log("[hybrid] CreateEmail 无发信迹象，禁止空等验证码")
 
                 return _result(STATUS_FAIL)
+
+            # 18r37: weak unconfirmed fire still enters poll + optional rescue
+
+            if not browser_sent and not protocol_sent and network_fired and reason in weak_reasons:
+
+                log("[hybrid] CreateEmail unconfirmed network fire -> poll/rescue path")
 
             if stop():
 
@@ -2744,17 +2807,20 @@ def register_one_hybrid(
 
                 # or code_timeout false-positives dominate (Outlook Graph often >45s).
 
+                # 18r37: rescue allowed unless dual_send_lock (confirmed send)
                 can_protocol_rescue = (
-
-                    bool(browser_sent)
-
-                    and (not protocol_sent)
-
-                    and int(actual_send or 0) < 1
-
-                    and int(net_hits_n or 0) < 1
-
+                    (not protocol_sent)
+                    and (not dual_send_lock)
+                    and (
+                        bool(browser_sent)
+                        or (network_fired and reason in weak_reasons)
+                        or (not browser_sent and not network_fired)
+                    )
                 )
+                # Prefer short window when unconfirmed weak fire so we can rescue faster
+                if (not dual_send_lock) and network_fired and reason in weak_reasons:
+                    can_protocol_rescue = True
+
 
                 use_short = bool(can_protocol_rescue)
 
@@ -2817,26 +2883,17 @@ def register_one_hybrid(
             clean = str(code or "").replace("-", "").strip()
 
             if (
-
                 not clean
-
-                and browser_sent
-
+                and dual_send_lock
                 and not protocol_sent
-
-                and int(actual_send or 0) >= 1
-
                 and not stop()
-
             ):
-
                 log(
-
-                    f"[hybrid] skip protocol-rescue (actual_send={actual_send} already fired) "
-
+                    f"[hybrid] skip protocol-rescue (dual_send_lock confirmed "
+                    f"actual_send={actual_send} net_hits={net_hits_n}) "
                     f"email={email} — avoid dual CreateEmail / 验证码过多; fall through code_timeout burn"
-
                 )
+
 
 
 
@@ -2845,20 +2902,12 @@ def register_one_hybrid(
             # actual_send>=1 already requested mail — second CreateEmail triggers 验证码过多.
 
             if (
-
                 not clean
-
-                and browser_sent
-
                 and not protocol_sent
-
-                and int(actual_send or 0) < 1
-
-                and int(net_hits_n or 0) < 1
-
+                and (not dual_send_lock)
                 and not stop()
-
             ):
+
 
                 try:
 

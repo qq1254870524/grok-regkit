@@ -25,6 +25,7 @@
 2026-07-19r17: prepare_profile stuck on code page >14s abort (no re-send).
 2026-07-18r16: UI body rate-limit detect; freeze reclick when actual_send/net_hits>=1.
 2026-07-18r14: CreateEmail status JS returns actual_send/blocked/inflight/sent_once; backfill actual from net_hits.
+2026-07-20r37: actual_send backfill from net_hits only on 2xx; weak status_unknown no dual-send inflation.
 """
 from __future__ import annotations
 
@@ -349,8 +350,14 @@ return {
                         "net_urls": list(raw.get("net_urls") or []),
                     }
                 )
-                # 18r14: if hook counter missing but body capture saw CreateEmail, backfill.
-                if int(data.get("actual_send_count") or 0) <= 0 and int(data.get("net_hits") or 0) > 0:
+                # 18r37: only backfill actual_send from net_hits when status is real 2xx.
+                # Weak status=0 / seen_status_unknown must NOT inflate dual-send lock.
+                _st = int(data.get("status") or 0)
+                if (
+                    int(data.get("actual_send_count") or 0) <= 0
+                    and int(data.get("net_hits") or 0) > 0
+                    and 200 <= _st < 300
+                ):
                     data["actual_send_count"] = int(data.get("net_hits") or 0)
         except Exception as exc:
             data["reason"] = f"js_error:{exc}"
