@@ -1,3 +1,15 @@
+## 2026-07-21 / matrix 18r40 multi-thread full cross-run
+
+- Package/tag: `stable-2026-07-21-matrix-multithread-18r40` (**no overwrite** of older Packages)
+- Params: workers=2, register count=4, email preheat=4, rounds=2
+- 22 cells: hybrid/browser × direct/socks5 × outlook/aol ×2 + pending_sso ×4 + stop ×2 — **all done**
+- `/api/stop`: stop Event + double force_stop + clear running; **keeps** 8010/8318 gateways; both stop cells `stop_ok=true`
+- Hybrid nearly all 4/4; Browser+AOL 4/4; Browser+Outlook partial (early_no_new / rate-limit soft fails)
+- Pending SSO: direct r1 = 3; later cells soft-zero under auth_error/re-register
+- Hidden start: no Python console windows
+- Tools: `tools/matrix_18r40_multithread.py`, `tools/start_hidden.ps1`, `tools/restart_all_hidden_18r40.ps1`
+- Matrix report: `matrix_runs/MATRIX_18r40_20260720_222635.md`
+
 ﻿## 2026-07-19r31d / smaller browser window (headed)
 
 - Windows hybrid/browser: `--window-size=900x640` + `--window-position=40,40` (still **headed**, not headless — CF/Turnstile needs real Chrome)
@@ -191,3 +203,13 @@
 - 100 rounds/cell multi-thread matrix completion (workers=2)
 - includes 18r30c browser MT finish path fix
 - does NOT overwrite 18r29/18r30/18r30-full packages
+
+## 18r41 (2026-07-20) — Task2 multi-thread exclusivity
+
+- Outlook/AOL `acquire`: reserve `in_use` under lock **before** ensure_tokens/ensure_login (login outside lock) so multi-worker no longer serializes whole pool and never dual-claims one mailbox.
+- New pool status `warming`: continuous email preflight marks mailbox warming; workers skip warming; preflight fail will not remove `in_use` accounts.
+- SOCKS5 bind order regression-tested: `pool[(worker_id-1) % n]` sequential reuse.
+- JobCoordinator `claim_slot` concurrent overshoot test.
+- Unit test: `matrix_runs/test_task2_mt_exclusivity.py` (ALL PASS).
+- Graph poll top uses `mail_top_per_folder` when available (default 5, all folders).
+
