@@ -804,101 +804,87 @@ def _encode_pending_mail_token(mail_token: str) -> str:
 
 
 def save_to_pending_sso_file(
-
     email: str,
-
     password: str,
-
     reason: str = "pending_sso",
-
     log: Callable[[str], None] | None = None,
-
     mail_token: str = "",
-
 ) -> Path | None:
-
-    """Append email----password----reason[----b64:mail_token] to pending files."""
-
+    """Upsert email----password----reason[----b64:mail_token] into pending files (18r36a)."""
     em = (email or "").strip()
-
     pw = (password or "").strip()
-
     if not em:
-
         if log:
-
             log(f"[hybrid] skip pending_sso save missing email reason={reason}")
-
         return None
-
     if not pw:
-
         # 18r29b: code-timeout / early_no_new_mail may burn before profile password exists
-
         pw = "PENDING_NO_PW"
-
         if log:
-
             log(f"[hybrid] pending_sso password placeholder used email={em} reason={reason}")
-
     tag = (reason or "pending_sso").strip() or "pending_sso"
-
     if not tag.startswith("pending_sso"):
-
         tag = f"pending_sso:{tag}"
-
     tok_field = _encode_pending_mail_token(mail_token)
-
     if tok_field:
-
         line = f"{em}----{pw}----{tag}----{tok_field}"
-
     else:
-
         line = f"{em}----{pw}----{tag}"
 
     pending_fixed = ROOT / "accounts_registered_pending_sso.txt"
-
+    exhausted_path = ROOT / "accounts_pending_sso_exhausted.txt"
     try:
-
-        with pending_fixed.open("a", encoding="utf-8") as pf:
-
-            pf.write(line + "\n")
+        # 18r36a: upsert by email — replace prior rows for same mailbox
+        em_l = em.strip().lower()
+        # 18r36b: never re-queue emails already in exhausted dead-letter
+        if exhausted_path.is_file():
+            try:
+                for _eln in exhausted_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if not str(_eln).strip():
+                        continue
+                    if str(_eln).split("----", 1)[0].strip().lower() == em_l:
+                        if log:
+                            log(
+                                f"[hybrid] pending_sso skip save email={em} reason={tag} "
+                                f"already_in_exhausted={exhausted_path.name}"
+                            )
+                        return None
+            except Exception:
+                pass
+        keep_lines: list[str] = []
+        if pending_fixed.is_file():
+            try:
+                for prev in pending_fixed.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if not str(prev).strip():
+                        continue
+                    head = str(prev).split("----", 1)[0].strip().lower()
+                    if head == em_l:
+                        continue
+                    keep_lines.append(prev)
+            except Exception:
+                keep_lines = []
+        keep_lines.append(line)
+        body = "\n".join(keep_lines) + "\n"
+        tmp = pending_fixed.with_suffix(pending_fixed.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(pending_fixed)
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
-
         pending_stamp = ROOT / f"accounts_no_sso_{stamp}.txt"
-
         with pending_stamp.open("a", encoding="utf-8") as pf:
-
             pf.write(line + "\n")
 
         if log:
-
             log(
-
-                f"[hybrid] pending_sso saved email={em} reason={tag} "
-
+                f"[hybrid] pending_sso saved(upsert) email={em} reason={tag} "
                 f"file={pending_fixed.name} stamp={pending_stamp.name} "
-
-                f"line={line}"
-
+                f"active_rows={len(keep_lines)} line={line}"
             )
-
         return pending_fixed
-
     except Exception as exc:
-
         if log:
-
             log(f"[hybrid] pending_sso save fail email={em} reason={tag}: {exc}")
-
         return None
-
-
-
-
-
 
 
 def detect_create_email_rate_limit(*parts) -> tuple[bool, str]:

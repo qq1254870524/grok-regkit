@@ -1,4 +1,10 @@
 """
+18r36b: skip/purge exhausted emails so burn cannot requeue dead-letter.
+18r36a: pending dead-loop break — per-email attempt cap + exhausted archive + active-file dedupe.
+  - timeout_no_sso / signup_unconfirmed re-register loops no longer infinite rotate+append
+  - after MAX_PENDING_ATTEMPTS (default 3) move to accounts_pending_sso_exhausted.txt and remove active
+  - compact_pending_sso_file keeps one best row per email (richest mail_token)
+  - attempt counters in matrix_runs/pending_sso_attempts.json (survives job restart)
 18r35k: MT re-register pending_sso result undoes fail -> record_pending (not hard-fail).
 18r35j: pending load prefers mail_token; no-token accounts sink/archive so queue not blocked.
 18r35i: MT pending path must run hybrid re-register on auth_error (was serial-only; MT only record_fail).
@@ -24,6 +30,7 @@ and on CF stuck/re-fill; never blind re-click login while challenge pending.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import traceback
@@ -37,6 +44,279 @@ STATUS_FAIL = "fail"
 STATUS_PENDING_SSO = "pending_sso"
 STATUS_POOL_EMPTY = "pool_empty"
 STATUS_STOPPED = "stopped"
+
+
+# 18r36a: break infinite auth_error -> re-register -> timeout_no_sso -> burn loop
+MAX_PENDING_ATTEMPTS = int(os.environ.get("PENDING_SSO_MAX_ATTEMPTS", "3") or "3")
+PENDING_ATTEMPTS_PATH = ROOT / "matrix_runs" / "pending_sso_attempts.json"
+PENDING_EXHAUSTED_PATH = ROOT / "accounts_pending_sso_exhausted.txt"
+
+
+def _pending_attempts_load() -> dict:
+    try:
+        if PENDING_ATTEMPTS_PATH.is_file():
+            data = json.loads(PENDING_ATTEMPTS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _pending_attempts_save(data: dict) -> None:
+    try:
+        PENDING_ATTEMPTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PENDING_ATTEMPTS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(PENDING_ATTEMPTS_PATH)
+    except Exception:
+        pass
+
+
+def bump_pending_attempt(email: str, reason: str = "", log: Callable[[str], None] | None = None) -> int:
+    key = str(email or "").strip().lower()
+    if not key:
+        return 0
+    data = _pending_attempts_load()
+    item = data.get(key) if isinstance(data.get(key), dict) else {}
+    n = int(item.get("n") or 0) + 1
+    data[key] = {
+        "n": n,
+        "last_reason": str(reason or item.get("last_reason") or "")[:240],
+        "updated_at": time.time(),
+        "first_at": float(item.get("first_at") or time.time()),
+    }
+    _pending_attempts_save(data)
+    if log:
+        log(f"[pending-sso] attempt bump email={key} n={n}/{MAX_PENDING_ATTEMPTS} reason={reason}")
+    return n
+
+
+def get_pending_attempt(email: str) -> int:
+    key = str(email or "").strip().lower()
+    if not key:
+        return 0
+    data = _pending_attempts_load()
+    item = data.get(key)
+    if isinstance(item, dict):
+        return int(item.get("n") or 0)
+    return 0
+
+
+def clear_pending_attempt(email: str, log: Callable[[str], None] | None = None) -> None:
+    key = str(email or "").strip().lower()
+    if not key:
+        return
+    data = _pending_attempts_load()
+    if key in data:
+        data.pop(key, None)
+        _pending_attempts_save(data)
+        if log:
+            log(f"[pending-sso] attempt counter cleared email={key}")
+
+
+def archive_pending_exhausted(
+    email: str,
+    *,
+    reason: str = "exhausted",
+    password: str = "",
+    mail_token: str = "",
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """Move email out of active pending queue into exhausted dead-letter file."""
+    import base64
+
+    target = str(email or "").strip().lower()
+    if not target:
+        return 0
+    _log = log or (lambda _m: None)
+    active = ROOT / "accounts_registered_pending_sso.txt"
+    moved_rows: list[str] = []
+    keep: list[str] = []
+    best_pw = str(password or "").strip()
+    best_tok = str(mail_token or "").strip()
+
+    if active.is_file():
+        try:
+            lines = active.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception as exc:
+            _log(f"[pending-sso] exhausted read fail: {exc}")
+            lines = []
+        for ln in lines:
+            parsed = parse_pending_account_line(ln)
+            if not parsed:
+                if str(ln).strip():
+                    keep.append(ln)
+                continue
+            em = str(parsed.get("email") or "").strip().lower()
+            if em != target:
+                keep.append(ln)
+                continue
+            pw = str(parsed.get("password") or "").strip() or best_pw or "PENDING_NO_PW"
+            tok = str(parsed.get("mail_token") or "").strip() or best_tok
+            if pw and pw != "PENDING_NO_PW":
+                best_pw = pw
+            if tok and len(tok) >= len(best_tok):
+                best_tok = tok
+            note = str(parsed.get("note") or "pending_sso")
+            tag = f"exhausted:{reason}" if reason else "exhausted"
+            if tag not in note:
+                note = f"{note}:{tag}" if note else tag
+            if tok:
+                b64 = "b64:" + base64.urlsafe_b64encode(tok.encode("utf-8")).decode("ascii")
+                moved_rows.append(f"{parsed['email']}----{pw}----{note}----{b64}")
+            else:
+                moved_rows.append(f"{parsed['email']}----{pw}----{note}")
+        try:
+            tmp = active.with_suffix(active.suffix + ".tmp")
+            body = "\n".join(keep)
+            if keep:
+                body += "\n"
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(active)
+        except Exception as exc:
+            _log(f"[pending-sso] exhausted active rewrite fail: {exc}")
+            return 0
+
+    for path2 in sorted(ROOT.glob("accounts_no_sso_*.txt")):
+        try:
+            lines = path2.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            continue
+        kept2: list[str] = []
+        changed = False
+        for ln in lines:
+            parsed = parse_pending_account_line(ln)
+            if parsed and str(parsed.get("email") or "").strip().lower() == target:
+                changed = True
+                continue
+            kept2.append(ln)
+        if changed:
+            try:
+                body = "\n".join(kept2)
+                if kept2:
+                    body += "\n"
+                path2.write_text(body, encoding="utf-8")
+            except Exception:
+                pass
+
+    if not moved_rows:
+        pw = best_pw or "PENDING_NO_PW"
+        note = f"pending_sso:exhausted:{reason}"
+        if best_tok:
+            b64 = "b64:" + base64.urlsafe_b64encode(best_tok.encode("utf-8")).decode("ascii")
+            moved_rows = [f"{target}----{pw}----{note}----{b64}"]
+        else:
+            moved_rows = [f"{target}----{pw}----{note}"]
+
+    try:
+        with PENDING_EXHAUSTED_PATH.open("a", encoding="utf-8") as fh:
+            for row in moved_rows:
+                fh.write(row + "\n")
+        _log(
+            f"[pending-sso] EXHAUSTED archive email={target} reason={reason} "
+            f"rows={len(moved_rows)} file={PENDING_EXHAUSTED_PATH.name} active_remain={len(keep)}"
+        )
+    except Exception as exc:
+        _log(f"[pending-sso] exhausted archive write fail email={target}: {exc}")
+        return 0
+    clear_pending_attempt(target, log=_log)
+    return len(moved_rows)
+
+
+def compact_pending_sso_file(log: Callable[[str], None] | None = None) -> dict:
+    """Dedupe active pending file to one best row per email (richest mail_token)."""
+    _log = log or (lambda _m: None)
+    path2 = ROOT / "accounts_registered_pending_sso.txt"
+    if not path2.is_file():
+        return {"before": 0, "after": 0, "unique": 0}
+    try:
+        lines = path2.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        _log(f"[pending-sso] compact read fail: {exc}")
+        return {"before": 0, "after": 0, "unique": 0}
+
+    def _rank_line(parsed: dict) -> tuple:
+        tok = str(parsed.get("mail_token") or "").strip()
+        note = str(parsed.get("note") or "")
+        return (
+            1 if tok else 0,
+            len(tok),
+            1 if "b64:" in str(parsed.get("raw") or "") else 0,
+            len(note),
+        )
+
+    best: dict[str, tuple] = {}
+    order: list[str] = []
+    before = 0
+    for ln in lines:
+        if not str(ln).strip():
+            continue
+        before += 1
+        parsed = parse_pending_account_line(ln)
+        if not parsed:
+            key = f"__raw__{before}"
+            best[key] = (ln, (0, 0, 0, 0))
+            order.append(key)
+            continue
+        key = str(parsed.get("email") or "").strip().lower()
+        if not key:
+            continue
+        rank = _rank_line(parsed)
+        prev = best.get(key)
+        if prev is None:
+            best[key] = (ln, rank)
+            order.append(key)
+        elif rank >= prev[1]:
+            best[key] = (ln, rank)
+
+    new_lines = [best[k][0] for k in order if k in best]
+    try:
+        body = "\n".join(new_lines)
+        if new_lines:
+            body += "\n"
+        tmp = path2.with_suffix(path2.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(path2)
+    except Exception as exc:
+        _log(f"[pending-sso] compact write fail: {exc}")
+        return {"before": before, "after": before, "unique": 0}
+    info = {
+        "before": before,
+        "after": len(new_lines),
+        "unique": len([k for k in order if not str(k).startswith("__raw__")]),
+    }
+    _log(
+        f"[pending-sso] compact active file before={info['before']} "
+        f"after={info['after']} unique~={info['unique']}"
+    )
+    return info
+
+
+def maybe_exhaust_pending(
+    email: str,
+    *,
+    reason: str,
+    password: str = "",
+    mail_token: str = "",
+    log: Callable[[str], None] | None = None,
+    force: bool = False,
+) -> bool:
+    """Bump attempt; if over cap (or force), archive exhausted and return True."""
+    _log = log or (lambda _m: None)
+    n = bump_pending_attempt(email, reason=reason, log=_log)
+    if force or n >= MAX_PENDING_ATTEMPTS:
+        archive_pending_exhausted(
+            email,
+            reason=f"{reason}:attempts={n}",
+            password=password,
+            mail_token=mail_token,
+            log=_log,
+        )
+        return True
+    return False
+
+
 
 def result(status: str, **extra: Any) -> dict:
     out = {"status": status, "ok": status == STATUS_SUCCESS}
@@ -190,6 +470,64 @@ def decode_pending_mail_token(raw: str) -> str:
     return s
 
 
+
+def is_pending_exhausted(email: str) -> bool:
+    key = str(email or "").strip().lower()
+    if not key:
+        return False
+    path = ROOT / "accounts_pending_sso_exhausted.txt"
+    if not path.is_file():
+        return False
+    try:
+        for ln in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not str(ln).strip():
+                continue
+            if str(ln).split("----", 1)[0].strip().lower() == key:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def purge_exhausted_from_active(log: Callable[[str], None] | None = None) -> int:
+    """Remove any exhausted emails that re-entered active pending file."""
+    _log = log or (lambda _m: None)
+    active = ROOT / "accounts_registered_pending_sso.txt"
+    if not active.is_file():
+        return 0
+    try:
+        lines = active.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception as exc:
+        _log(f"[pending-sso] purge_exhausted read fail: {exc}")
+        return 0
+    keep = []
+    removed = 0
+    for ln in lines:
+        parsed = parse_pending_account_line(ln)
+        if not parsed:
+            if str(ln).strip():
+                keep.append(ln)
+            continue
+        em = str(parsed.get("email") or "").strip().lower()
+        if em and is_pending_exhausted(em):
+            removed += 1
+            continue
+        keep.append(ln)
+    if removed:
+        try:
+            body = "\n".join(keep)
+            if keep:
+                body += "\n"
+            tmp = active.with_suffix(active.suffix + ".tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(active)
+            _log(f"[pending-sso] purge_exhausted removed={removed} active_remain={len(keep)}")
+        except Exception as exc:
+            _log(f"[pending-sso] purge_exhausted write fail: {exc}")
+            return 0
+    return removed
+
+
 def load_pending_sso_accounts(include_timestamped: bool = True) -> list[dict]:
     """Load pending SSO accounts.
 
@@ -224,6 +562,8 @@ def load_pending_sso_accounts(include_timestamped: bool = True) -> list[dict]:
                 continue
             key = str(parsed.get("email") or "").strip().lower()
             if not key:
+                continue
+            if is_pending_exhausted(key):
                 continue
             parsed["email"] = key
             parsed["source"] = path.name
@@ -1736,6 +2076,14 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None, wo
     if controller is None:
         controller = engine.CliStopController()
 
+    try:
+        compact_pending_sso_file(log=log_callback or (lambda _m: None))
+        purge_exhausted_from_active(log=log_callback or (lambda _m: None))
+    except Exception as _c_exc:
+        try:
+            (log_callback or (lambda _m: None))(f"[pending-sso] compact on start fail: {_c_exc}")
+        except Exception:
+            pass
     pending = load_pending_sso_accounts(include_timestamped=True)
     try:
         _tok_n = sum(1 for it in pending if str(it.get("mail_token") or "").strip())
@@ -1948,6 +2296,7 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None, wo
                                 if rr_email.lower() == str(email or "").strip().lower() or not rr_email:
                                     try:
                                         remove_pending_sso_account(email, log=log)
+                                        clear_pending_attempt(email, log=log)
                                         log(f"[pending-sso] re-register success -> 移出 pending email={email}")
                                     except Exception as rm_exc:
                                         log(f"[pending-sso] remove pending after re-register success fail: {rm_exc}")
@@ -1957,7 +2306,39 @@ def run_pending_sso_recovery_job(count=0, log_callback=None, controller=None, wo
                                         f"!= pending {email}; keep original pending line"
                                     )
                             elif rr_status == STATUS_PENDING_SSO:
-                                log("[pending-sso] re-register got pending_sso again; kept as pending fallback")
+                                detail_rr = str(rr.get("detail") or "")
+                                log(
+                                    f"[pending-sso] re-register got pending_sso again detail={detail_rr} "
+                                    f"email={rr_email or email}"
+                                )
+                                try:
+                                    exhausted = maybe_exhaust_pending(
+                                        email,
+                                        reason=detail_rr or "re_register_pending_sso",
+                                        password=str(password or ""),
+                                        mail_token=str(item.get("mail_token") or ""),
+                                        log=log,
+                                    )
+                                    if exhausted:
+                                        log(
+                                            f"[pending-sso] email exhausted after re-register pending_sso "
+                                            f"email={email} detail={detail_rr}"
+                                        )
+                                    else:
+                                        try:
+                                            rotate_pending_sso_account_to_end(email, log=log)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            compact_pending_sso_file(log=log)
+                                        except Exception:
+                                            pass
+                                        log(
+                                            f"[pending-sso] kept in queue after pending_sso "
+                                            f"attempts={get_pending_attempt(email)}/{MAX_PENDING_ATTEMPTS} email={email}"
+                                        )
+                                except Exception as ex_exc:
+                                    log(f"[pending-sso] exhaust check fail: {ex_exc}")
                             elif rr_status == STATUS_STOPPED:
                                 log("[pending-sso] re-register stopped; pending kept")
                                 break
@@ -2194,11 +2575,12 @@ def _run_pending_sso_recovery_job_mt(
                                         if rr_email.lower() == str(email or "").strip().lower() or not rr_email:
                                             try:
                                                 remove_pending_sso_account(email, log=wlog)
+                                                clear_pending_attempt(email, log=wlog)
                                                 wlog(f"[pending-sso] re-register success -> 移出 pending email={email}")
                                             except Exception as rm_exc:
                                                 wlog(f"[pending-sso] remove pending after success fail: {rm_exc}")
                                     elif rr_status == STATUS_PENDING_SSO:
-                                        # 18r35k: hybrid burn/pending is NOT a hard fail
+                                        # 18r36a: count attempts; exhaust dead-letter after cap
                                         try:
                                             if hasattr(coord, "undo_fail"):
                                                 coord.undo_fail()
@@ -2207,10 +2589,33 @@ def _run_pending_sso_recovery_job_mt(
                                                     rate_limited=("rate_limit" in str(rr.get("detail") or "").lower()
                                                                   or "create_email_rate" in str(rr.get("detail") or "").lower())
                                                 )
-                                            wlog(
-                                                f"[pending-sso] re-register pending_sso detail={rr.get('detail')} "
-                                                f"email={rr_email or email} (fail->pending; kept in queue)"
+                                            detail_rr = str(rr.get("detail") or "")
+                                            exhausted = maybe_exhaust_pending(
+                                                email,
+                                                reason=detail_rr or "re_register_pending_sso",
+                                                password=str(password or ""),
+                                                mail_token=str(item.get("mail_token") or ""),
+                                                log=wlog,
                                             )
+                                            if exhausted:
+                                                wlog(
+                                                    f"[pending-sso] email exhausted after re-register pending_sso "
+                                                    f"email={email} detail={detail_rr}"
+                                                )
+                                            else:
+                                                try:
+                                                    rotate_pending_sso_account_to_end(email, log=wlog)
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    compact_pending_sso_file(log=wlog)
+                                                except Exception:
+                                                    pass
+                                                wlog(
+                                                    f"[pending-sso] re-register pending_sso detail={detail_rr} "
+                                                    f"email={rr_email or email} "
+                                                    f"attempts={get_pending_attempt(email)}/{MAX_PENDING_ATTEMPTS} kept"
+                                                )
                                         except Exception as pend_adj:
                                             wlog(f"[pending-sso] pending adjust fail: {pend_adj}")
                                     elif rr_status == STATUS_STOPPED:
