@@ -18,6 +18,7 @@ Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
 - 2026-07-20r37: CreateEmail 假 actual_send 修复：seen_status_unknown/status=0 不再把 net_hits 抬成 dual-send lock，也不 promote browser_sent；仅 2xx/ui_code/raw_sent 才确认 browser_sent；弱证据时短轮询等响应确认，未确认允许 protocol-rescue，减少 early_no_new_mail 空烧。
+- 2026-07-20r39: dual_send_lock/full mail poll raises early_no_new threshold near timeout (avoid 110s cut of intended 180s); redact password on no-mail burn log.
 - 2026-07-20r38: UI fallback leftover reason=running maps to code_page_stuck/ui_incomplete; do not log password plaintext in no-sso classify path.
 
 - 2026-07-20r35b: mailbox token lookup no longer force_reload pools (preserve in_use).
@@ -2839,9 +2840,20 @@ def register_one_hybrid(
 
                 )
 
+                # 18r39: dual_send full poll - raise early_no_new near timeout so 110s does not cut 180s wait
+                if dual_send_lock or (not can_protocol_rescue):
+                    early_no_new = max(110.0, float(poll_timeout) - 10.0)
+                else:
+                    early_no_new = 110.0
+                log(
+                    f"[hybrid] mail early_no_new_s={early_no_new:.0f} dual_send_lock={int(bool(dual_send_lock))} "
+                    f"can_protocol_rescue={int(bool(can_protocol_rescue))}"
+                )
+
                 try:
 
                     code = get_oai_code(
+
 
                         mail_token,
 
@@ -2854,7 +2866,7 @@ def register_one_hybrid(
                         since_ts=send_ts,
 
                         timeout=poll_timeout,
-
+                        early_no_new_s=early_no_new,
                     )
 
                 except TypeError:
@@ -2870,7 +2882,7 @@ def register_one_hybrid(
                         cancel_callback=stop,
 
                         since_ts=send_ts,
-
+                        early_no_new_s=early_no_new,
                     )
 
             except Exception as e0:
@@ -3026,7 +3038,7 @@ def register_one_hybrid(
 
                     f"protocol_sent={protocol_sent} err={code_exc} "
 
-                    f"password={password!r} full_detail=code_timeout_or_empty"
+                    f"password_len={len(password or '')} full_detail=code_timeout_or_empty"
 
                 )
 

@@ -28,6 +28,7 @@ token cache: outlook_token_cache.json (local, gitignored)
 
 
 Changelog:
+- 2026-07-20r39: early_no_new_s optional; dual_send full-poll can raise threshold so 110s early-break does not cut intended 180s wait.
 - 2026-07-20r35b: get_pool no longer rebuilds on config.outlook_accounts text churn;
   preserve in_use/cooldown/tokens across force_reload; stop multi-worker same-email CreateEmail.
   (root cause of 验证码过多 under browser×10 Outlook)
@@ -2581,7 +2582,8 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
 
                  log_callback=None, cancel_callback=None, extract_fn=None, proxies=None,
 
-                 ignore_existing: bool = True, since_ts: Optional[float] = None) -> str:
+                 ignore_existing: bool = True, since_ts: Optional[float] = None,
+                 early_no_new_s: Optional[float] = None) -> str:
 
     def cancelled():
 
@@ -2637,7 +2639,11 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
 
     seen_new_after_send = False  # 18r21 init (must exist before probe log)
 
-    early_no_new_s = 110.0
+    # 18r39: caller may override; None -> default 110; <=0 disables early break
+    if early_no_new_s is None:
+        early_no_new_s = 110.0
+    else:
+        early_no_new_s = float(early_no_new_s)
 
     while _now() < deadline:
 
@@ -3026,7 +3032,7 @@ def get_oai_code(config, token_blob, email, timeout=180, poll_interval=3.0,
 
         elapsed_poll = _now() - poll_started
 
-        if (not seen_new_after_send) and elapsed_poll >= float(early_no_new_s):
+        if float(early_no_new_s) > 0 and (not seen_new_after_send) and elapsed_poll >= float(early_no_new_s):
 
             _log(
 

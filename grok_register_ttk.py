@@ -3413,22 +3413,24 @@ def get_oai_code(
                 proxies=proxies,
                 ignore_existing=ignore_existing,
                 since_ts=since_ts,
+                early_no_new_s=kwargs.get("early_no_new_s"),
             )
         except Exception as exc:
             if proxies and is_proxy_connection_error(exc):
                 return outlook_mail.get_oai_code(
-                    config,
-                    dev_token,
-                    email,
-                    timeout=timeout,
-                    poll_interval=poll_interval,
-                    log_callback=log_callback,
-                    cancel_callback=cancel_callback,
-                    extract_fn=extract_verification_code,
-                    proxies=None,
-                    ignore_existing=ignore_existing,
-                    since_ts=since_ts,
-                )
+                config,
+                dev_token,
+                email,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                log_callback=log_callback,
+                cancel_callback=cancel_callback,
+                extract_fn=extract_verification_code,
+                proxies=None,
+                ignore_existing=ignore_existing,
+                since_ts=since_ts,
+                early_no_new_s=kwargs.get("early_no_new_s"),
+            )
             raise
     
     if aol_mail is not None and aol_mail.is_aol_provider(provider):
