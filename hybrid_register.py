@@ -18,6 +18,7 @@ Used by Web/CLI when config register_mode == "hybrid".
 
 Changelog:
 - 2026-07-20r37: CreateEmail 假 actual_send 修复：seen_status_unknown/status=0 不再把 net_hits 抬成 dual-send lock，也不 promote browser_sent；仅 2xx/ui_code/raw_sent 才确认 browser_sent；弱证据时短轮询等响应确认，未确认允许 protocol-rescue，减少 early_no_new_mail 空烧。
+- 2026-07-20r38: UI fallback leftover reason=running maps to code_page_stuck/ui_incomplete; do not log password plaintext in no-sso classify path.
 
 - 2026-07-20r35b: mailbox token lookup no longer force_reload pools (preserve in_use).
 
@@ -4793,11 +4794,18 @@ def register_one_hybrid(
 
                 ui_reason = str(ui_result.get("reason") or "")
 
+                # 18r38: initial UI-fallback marker must not leak as final pending reason
+                if ui_reason in ("running", ""):
+                    if ui_result.get("protocol_verified") or ui_result.get("code_confirm_tries"):
+                        ui_reason = "code_page_stuck"
+                    else:
+                        ui_reason = "ui_incomplete"
+
                 log(
 
                     f"[hybrid] no-sso classify signup_confirmed={int(signup_confirmed)} "
 
-                    f"ui_reason={ui_reason!r} ui_result={ui_result}"
+                    f"ui_reason={ui_reason!r} ui_result_keys={list(ui_result.keys())}"
 
                 )
 
@@ -4807,9 +4815,9 @@ def register_one_hybrid(
 
                         f"[hybrid] signup unconfirmed (no SSO); burn to pending_sso "
 
-                        f"ui_reason={ui_reason!r} email={email} password={password!r} "
+                        f"ui_reason={ui_reason!r} email={email} password=*** "
 
-                        f"ui_result={ui_result}"
+                        f"protocol_verified={int(bool(ui_result.get('protocol_verified')))}"
 
                     )
 
@@ -4843,7 +4851,7 @@ def register_one_hybrid(
 
                     f"[hybrid] registered without SSO/OOS; burn to pending_sso "
 
-                    f"email={email} password={password!r}"
+                    f"email={email} password=***"
 
                 )
 

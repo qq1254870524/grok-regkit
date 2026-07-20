@@ -26,6 +26,8 @@
 2026-07-18r16: UI body rate-limit detect; freeze reclick when actual_send/net_hits>=1.
 2026-07-18r14: CreateEmail status JS returns actual_send/blocked/inflight/sent_once; backfill actual from net_hits.
 2026-07-20r37: actual_send backfill from net_hits only on 2xx; weak status_unknown no dual-send inflation.
+2026-07-20r38: UI fallback reason=running is initial-only; early exits set code_page_stuck/cancelled;
+              code-page stuck re-confirm; cf present wait limit 22s (was 14s).
 """
 from __future__ import annotations
 
@@ -2024,16 +2026,37 @@ return {pw:!!pw, cf:!!cf, email:!!email, code:!!code, given:!!given, url: locati
                 if code_stuck_since is None:
                     code_stuck_since = time.time()
                 stuck_for = time.time() - code_stuck_since
+                # 18r38: cf widget on code page often needs longer + periodic re-confirm
+                stuck_limit = 22.0 if bool(state.get("cf")) else 14.0
                 self._lg(
                     f"[*] prepare_profile still on code after confirm; keep waiting "
-                    f"(no open_signup / no email re-submit) stuck={stuck_for:.1f}s state={state}"
+                    f"(no open_signup / no email re-submit) stuck={stuck_for:.1f}s "
+                    f"limit={stuck_limit:.0f}s state={state}"
                 )
-                # 18r17: protocol already verified but UI never leaves code page → abort fast
-                if stuck_for >= 14.0:
+                # periodic re-confirm (not resend email) every ~4s
+                if stuck_for >= 3.5 and int(stuck_for) % 4 == 0:
+                    try:
+                        r = self._set_input_and_submit(clean, "code")
+                        self._lg(f"[*] prepare_profile stuck re-confirm code: {r}")
+                    except Exception as re_exc:
+                        self._lg(f"[Debug] prepare_profile stuck re-confirm: {re_exc}")
+                if stuck_for >= stuck_limit:
                     self._lg(
-                        f"[!] prepare_profile code page stuck {stuck_for:.1f}s >=14s; "
+                        f"[!] prepare_profile code page stuck {stuck_for:.1f}s >= {stuck_limit:.0f}s; "
                         f"abort without re-send protocol_verified={int(bool(protocol_verified))}"
                     )
+                    try:
+                        self.last_ui_fallback_result = {
+                            "reason": "code_page_stuck",
+                            "signup_confirmed": False,
+                            "protocol_verified": bool(protocol_verified),
+                            "submitted": False,
+                            "stuck_for": round(stuck_for, 1),
+                            "stuck_limit": stuck_limit,
+                            "state": dict(state) if isinstance(state, dict) else {},
+                        }
+                    except Exception:
+                        pass
                     return False
                 time.sleep(1.0)
                 continue
@@ -2431,6 +2454,16 @@ return String(cfInput.value || '').trim().length;
         while time.time() < deadline:
             if stop():
                 self._lg("[*] UI fallback cancelled")
+                try:
+                    self.last_ui_fallback_result = {
+                        "reason": "cancelled",
+                        "signup_confirmed": False,
+                        "protocol_verified": bool(protocol_verified),
+                        "submitted": bool(submitted),
+                        "email_page_blocked_hits": int(email_page_blocked_hits),
+                    }
+                except Exception:
+                    pass
                 return ""
             try:
                 state = page.run_js(
@@ -2725,6 +2758,19 @@ return 'code-submitted:' + buttonText(btn);
                     f"abort early err={page_err!r} body={body[:160]!r} "
                     f"alts_tried={len(tried_alt_codes)}"
                 )
+                try:
+                    self.last_ui_fallback_result = {
+                        "reason": "code_page_stuck",
+                        "signup_confirmed": False,
+                        "protocol_verified": bool(protocol_verified),
+                        "submitted": False,
+                        "email_page_blocked_hits": int(email_page_blocked_hits),
+                        "code_confirm_tries": int(code_confirm_tries),
+                        "alts_tried": len(tried_alt_codes),
+                        "page_err": page_err[:160],
+                    }
+                except Exception:
+                    pass
                 return ""
 
             # If stuck after code confirm, try continue/next/Enter without re-sending email.
