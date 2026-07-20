@@ -1,4 +1,4 @@
-﻿# STABLE_VERSION
+# STABLE_VERSION
 
 ## Current
 - **Tag**: `stable-2026-07-21-matrix-multithread-18r41`

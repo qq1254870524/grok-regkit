@@ -1,3 +1,21 @@
+﻿## 2026-07-21 / matrix 18r41 multi-thread full cross-run (22/22)
+
+- Package/tag: `stable-2026-07-21-matrix-multithread-18r41` (**no overwrite** of 18r40 or older Packages)
+- Params: workers=2, register count=4, email preheat=4, rounds=2
+- 22 cells: hybrid/browser × direct/socks5 × outlook/aol ×2 + pending_sso ×4 + stop ×2 — **all done**
+- 18r41b: browser MT last mail fail → `pending_sso:browser_code_fail` (was hard fail)
+- Register: AOL 8/8 cells 4/4; Browser Outlook strong; Hybrid Outlook soft pending_sso OK
+- Pending SSO: direct r1/r2 **4/4**, socks5 r1 **4/4**, socks5 r2 **3/4** (soft)
+- `/api/stop` ×2: stop Event + kill workers + clear pending; gateways 8010/8318 kept; both `stop_ok=true`
+- Hidden start: no Python console windows
+- Tools: `tools/matrix_18r41_multithread.py`, `tools/start_hidden.ps1`
+- Matrix report: `matrix_runs/MATRIX_18r41_20260721_003555.md`
+- Zip: `Packages/stable-2026-07-21-matrix-multithread-18r41.zip`
+## 2026-07-21 / 18r41b browser MT mail-fail -> pending_sso + matrix re-run
+
+- Bug: multi-thread full-browser last mail retry bare-raised `early_no_new_mail` / code timeout → worker **hard fail** (pending_sso=0).
+- Fix in `grok_register_ttk.py` `_register_one_browser`: last mail-stage fail breaks → burn + `pending_sso:browser_code_fail`.
+- Matrix: `tools/matrix_18r41_multithread.py` same 22-cell plan (w=2,n=4,pre=4,×2 rounds).
 ## 2026-07-21 / matrix 18r40 multi-thread full cross-run
 
 - Package/tag: `stable-2026-07-21-matrix-multithread-18r40` (**no overwrite** of older Packages)
@@ -212,4 +230,5 @@
 - JobCoordinator `claim_slot` concurrent overshoot test.
 - Unit test: `matrix_runs/test_task2_mt_exclusivity.py` (ALL PASS).
 - Graph poll top uses `mail_top_per_folder` when available (default 5, all folders).
+
 
