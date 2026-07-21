@@ -1,4 +1,5 @@
-"""Browser-only token harvest for Castle / Turnstile (hybrid mode).
+"""18r43: isVisible accepts 0x0 rects for silent/minimized browsers.
+Browser-only token harvest for Castle / Turnstile (hybrid mode).
 2026-07-19r20: CreateEmail 重复请求共享首个 Promise/Response（不再 AbortError，避免 UI toast incomplete envelope）；
 2026-07-19r19: blocked_duplicate CreateEmail 不再返回假 JSON(会触发页面 [invalid_argument] protocol error: incomplete envelope)；
               改为 AbortError/abort 静默取消第2+次请求，首发仍放行；consent 见 sso_to_auth_json 18r19。
@@ -379,8 +380,17 @@ function isVisible(node) {
   if (!node) return false;
   const style = window.getComputedStyle(node);
   if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
+  // 18r43: silent/minimized/offscreen windows often report 0x0 rects; still treat as present.
   const rect = node.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
+  if (rect.width > 0 && rect.height > 0) return true;
+  try {
+    if (node.offsetParent !== null) return true;
+    if (String(style.position || '').toLowerCase() === 'fixed') return true;
+  } catch (e) {}
+  // last resort: accept form controls that are enabled in DOM
+  const tag = String(node.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return !node.disabled;
+  return false;
 }
 const inputs = Array.from(document.querySelectorAll('input, textarea')).filter((n) => isVisible(n) && !n.disabled);
 const hasCode = inputs.some((n) => {
@@ -503,8 +513,17 @@ function isVisible(node) {
   if (!node) return false;
   const style = window.getComputedStyle(node);
   if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity||1) === 0) return false;
+  // 18r43: silent/minimized/offscreen windows often report 0x0 rects; still treat as present.
   const rect = node.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
+  if (rect.width > 0 && rect.height > 0) return true;
+  try {
+    if (node.offsetParent !== null) return true;
+    if (String(style.position || '').toLowerCase() === 'fixed') return true;
+  } catch (e) {}
+  // last resort: accept form controls that are enabled in DOM
+  const tag = String(node.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return !node.disabled;
+  return false;
 }
 function nodeText(node) {
   return [node.innerText, node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')]
@@ -573,7 +592,7 @@ return {
                         click_email_signup_button(timeout=10, log_callback=self.log)
                     except Exception as e:
                         self._lg(f"[!] click_email_signup_button: {e}")
-                state = _wait_email_input(10.0, label="after-email-signup-click")
+                state = _wait_email_input(15.0, label="after-email-signup-click")
 
             # 2) hard reopen signup if still missing input
             if not (isinstance(state, dict) and state.get("emailInput")):
@@ -589,7 +608,7 @@ return {
                         click_email_signup_button(timeout=12, log_callback=self.log)
                     except Exception as e2:
                         self._lg(f"[!] manual signup reopen fail: {e2}")
-                state = _wait_email_input(12.0, label="after-hard-reopen")
+                state = _wait_email_input(16.0, label="after-hard-reopen")
 
             # 3) one more method-button click + wait
             if not (isinstance(state, dict) and state.get("emailInput")):
@@ -1783,7 +1802,22 @@ true;
         except Exception as e:
             self._lg(f"[Debug] getTurnstileToken: {e}")
 
-        deadline = time.time() + timeout
+        # 18r42c: after helper fail, do not burn full 80s when widget never mounts
+        effective_timeout = int(timeout)
+        try:
+            has_w = page.run_js(
+                """
+try {
+  return !!(document.querySelector('iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"], .cf-turnstile iframe, input[name="cf-turnstile-response"]'));
+} catch (e) { return false; }
+"""
+            )
+            if not has_w:
+                effective_timeout = min(effective_timeout, 12)
+                self._lg("[Debug] turnstile poll shortened: no widget on page")
+        except Exception:
+            pass
+        deadline = time.time() + effective_timeout
         while time.time() < deadline:
             try:
                 tok = page.run_js(

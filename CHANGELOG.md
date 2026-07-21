@@ -1,4 +1,29 @@
-﻿## 2026-07-21 / matrix 18r41 multi-thread full cross-run (22/22)
+## 2026-07-21 / 18r42 silent multi-thread matrix DONE (w=10 n=100 pre=20 SOCKS5)
+
+- Package/tag: `stable-2026-07-21-matrix-multithread-silent-18r42` (**no overwrite** 18r41/18r40)
+- Zip: `packages/stable-2026-07-21-matrix-multithread-silent-18r42.zip`
+- Matrix report: `matrix_runs/MATRIX_18r42_20260721_024738.md`
+- **12/12 cells done** (silent headed minimize/offscreen, edge_safe never touch user Edge)
+  - hybrid SOCKS5 outlook r1/r2: 41/53 success
+  - hybrid SOCKS5 aol r1/r2: 83/88 success
+  - browser SOCKS5 outlook r1/r2: 82/98 success
+  - browser SOCKS5 aol r1/r2: 95/94 success
+  - pending_sso recovery SOCKS5 r1/r2: 39/83 success
+  - stop_registration r1/r2: **stop_ok=true** (stop Event + kill workers + clear pending; gateways kept)
+- **18r42d SSO vs mail_token**: import rejects Outlook mail_token as Grok SSO; export importable `email----password----session_sso` only; pending rows keep mail_token field separate
+- **待入池 metric**: `/api/status` exposes `awaiting_pool`/`pending_pool`; UI metric after success/fail (needs idle web restart to load)
+- CPA device-code: `allow_direct_fallback=True`, `network_attempts=2`
+- token_harvester silent: `isVisible` accepts 0x0 rects (minimized browsers)
+- Hidden start: no Python console windows
+- Tools: `tools/matrix_18r42_silent_mt.py`, `tools/start_matrix18r42_hidden.ps1`, `tools/package_18r42_silent.py`
+
+## 2026-07-21 / 18r43 silent stable planned (w=20 pre=40 n=1000)
+
+- Package/tag planned: `stable-2026-07-21-matrix-multithread-silent-stable-18r43` (**no overwrite** 18r42)
+- Params: workers=20, preheat=40, count=1000, hybrid + SOCKS5 + outlook/aol x2 + pending_sso x2 + stop tests
+- UI: 待入池 real-time with success/fail
+- Tools: `tools/matrix_18r43_silent_stable_mt.py`, `tools/start_matrix18r43_hidden.ps1`
+## 2026-07-21 / matrix 18r41 multi-thread full cross-run (22/22)
 
 - Package/tag: `stable-2026-07-21-matrix-multithread-18r41` (**no overwrite** of 18r40 or older Packages)
 - Params: workers=2, register count=4, email preheat=4, rounds=2

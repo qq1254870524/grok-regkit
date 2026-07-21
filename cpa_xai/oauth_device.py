@@ -1,5 +1,7 @@
 """xAI OAuth device-code grant (Grok CLI / CPA client).
 
+18r43: allow_direct_fallback default True; network_attempts default 2 (proxy then direct).
+
 Endpoints from https://auth.x.ai/.well-known/openid-configuration
 """
 
@@ -192,10 +194,14 @@ class OAuthDeviceError(RuntimeError):
 
 def request_device_code(
     *, client_id: str = CLIENT_ID, scope: str = SCOPE, timeout: float = 30.0,
-    proxy: str | None = None, log: LogFn | None = None, network_attempts: int = 4,
-    allow_direct_fallback: bool = False,
+    proxy: str | None = None, log: LogFn | None = None, network_attempts: int = 2,
+    allow_direct_fallback: bool = True,
 ) -> DeviceCodeSession:
-    """Request a device code with classified network retries."""
+    """Request a device code with classified network retries.
+
+    18r43: default direct fallback ON after short proxy retries — auth.x.ai device-code
+    often fails via SOCKS with transient URLError; official OAuth endpoint is safe direct.
+    """
     log = log or _noop_log
     routes: list[str | None] = [proxy] + ([None] if proxy and allow_direct_fallback else [])
     status: int = 0

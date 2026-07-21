@@ -1222,7 +1222,7 @@ def mint_with_browser(
     try:
         # request_device_code owns classified retries; do not multiply them here.
         try:
-            sess = request_device_code(proxy=resolved or None, log=log)
+            sess = request_device_code(proxy=resolved or None, log=log, allow_direct_fallback=True, network_attempts=2)
         except BaseException as e:  # noqa: BLE001
             log(f"request_device_code failed after internal retries: {type(e).__name__}: {e}")
             raise

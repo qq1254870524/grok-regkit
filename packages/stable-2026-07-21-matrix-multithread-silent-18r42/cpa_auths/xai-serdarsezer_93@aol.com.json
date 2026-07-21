@@ -1,0 +1,25 @@
+{
+  "type": "xai",
+  "auth_kind": "oauth",
+  "email": "serdarsezer_93@aol.com",
+  "sub": "dcdd01a7-6946-4feb-8e7e-e0740f065dcc",
+  "access_token": "eyJ0eXAiOiJhdCtqd3QiLCJhbGciOiJFUzI1NiIsImtpZCI6Im9hdXRoMi1wcm9kdWN0aW9uLTIwMjYtMDItMTkifQ.eyJpc3MiOiJodHRwczovL2F1dGgueC5haSIsInN1YiI6ImRjZGQwMWE3LTY5NDYtNGZlYi04ZTdlLWUwNzQwZjA2NWRjYyIsImF1ZCI6ImIxYTAwNDkyLTA3M2EtNDdlYS04MTZmLTRjMzI5MjY0YTgyOCIsImV4cCI6MTc4NDU4MDc3MiwiaWF0IjoxNzg0NTU5MTcyLCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIG9mZmxpbmVfYWNjZXNzIGdyb2stY2xpOmFjY2VzcyBhcGk6YWNjZXNzIGNvbnZlcnNhdGlvbnM6cmVhZCBjb252ZXJzYXRpb25zOndyaXRlIiwicHJpbmNpcGFsX3R5cGUiOiJVc2VyIiwicHJpbmNpcGFsX2lkIjoiZGNkZDAxYTctNjk0Ni00ZmViLThlN2UtZTA3NDBmMDY1ZGNjIiwiY2xpZW50X2lkIjoiYjFhMDA0OTItMDczYS00N2VhLTgxNmYtNGMzMjkyNjRhODI4IiwianRpIjoiZjA2Y2U5M2QtMjkzMC00MWJhLWJhNzctMWYzMzc0NDk2YjY2IiwidGVhbV9pZCI6IjgwYWI5NjI0LTU5NjAtNDEyYS04M2U1LWRjMjVlMzhmMTNhOSIsInJlZmVycmVyIjoiZ3Jvay1idWlsZCJ9.yUYzbRV3C9NkHGT6MCuDifgvzYr34UcZi6Pcc1Mi5C944my_hUPrqrAB_Az-U-6MUC4A3rQ9TUzOc1vO3HpKqA",
+  "refresh_token": "y3X3YWedoVY-XRcjmwBjPsZD-OQ7u3rbFerm6Mp8TdQ937KIf3nAr0PgDe1fQ_sQ-2TbKgzGRDB3-Wi4tFhdDw",
+  "id_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6Im9hdXRoMi1wcm9kdWN0aW9uLTIwMjYtMDItMTkifQ.eyJpc3MiOiJodHRwczovL2F1dGgueC5haSIsInN1YiI6ImRjZGQwMWE3LTY5NDYtNGZlYi04ZTdlLWUwNzQwZjA2NWRjYyIsImF1ZCI6ImIxYTAwNDkyLTA3M2EtNDdlYS04MTZmLTRjMzI5MjY0YTgyOCIsImV4cCI6MTc4NDU4MDc3MiwiaWF0IjoxNzg0NTU5MTcyLCJub25jZSI6Ind1N1dUZTlFUGZ4SlNDUkhOUjlaX3ciLCJnaXZlbl9uYW1lIjoiSmFzb24iLCJmYW1pbHlfbmFtZSI6Ikd1byIsImVtYWlsIjoic2VyZGFyc2V6ZXJfOTNAYW9sLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlfQ.vj9orW8_AHtOtqazZ_6tyIp_BquaPtCEuWrcog-LtRXPynfpW1_06QWo_0-VN0VfYccmdZqKQ1cNPBbaDDP2Og",
+  "token_type": "Bearer",
+  "expires_in": 21600,
+  "expired": "2026-07-20T20:52:52Z",
+  "last_refresh": "2026-07-20T14:52:52Z",
+  "redirect_uri": "http://127.0.0.1:56121/callback",
+  "token_endpoint": "https://auth.x.ai/oauth2/token",
+  "base_url": "https://cli-chat-proxy.grok.com/v1",
+  "disabled": false,
+  "headers": {
+    "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+    "X-XAI-Token-Auth": "xai-grok-cli",
+    "x-authenticateresponse": "authenticate-response",
+    "x-grok-client-identifier": "grok-pager",
+    "x-grok-client-version": "0.2.93"
+  },
+  "sso": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiNWY5MDg3NzYtNzMxZS00YjI2LThkMmYtZjcwMDExNzM1ZDMzIn0.yFbsDbLe8i4llDN0NOKAOODDA-IIMxfJ-Q0mTtZtU9o"
+}

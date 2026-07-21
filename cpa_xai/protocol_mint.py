@@ -199,7 +199,7 @@ def mint_with_sso_protocol(
 
     # 2) Device code
     try:
-        sess = request_device_code(proxy=resolved or None, timeout=timeout, log=log)
+        sess = request_device_code(proxy=resolved or None, timeout=timeout, log=log, allow_direct_fallback=True, network_attempts=2)
     except OAuthDeviceError as e:
         raise ProtocolMintError(f"device code: {e}") from e
     except Exception as e:  # noqa: BLE001
