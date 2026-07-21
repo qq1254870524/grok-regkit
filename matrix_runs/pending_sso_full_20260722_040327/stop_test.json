@@ -1,0 +1,17 @@
+{
+  "start_code": 200,
+  "stop_code": 200,
+  "stop_resp": {
+    "ok": true,
+    "stopped": true,
+    "running_was": true,
+    "had_controller": true,
+    "job_kind": "register",
+    "running_now": false,
+    "detail": "stopped: running cleared; browser cleanup async; gateways/web kept alive"
+  },
+  "running_before": true,
+  "running_after": false,
+  "panel_alive": true,
+  "ok": true
+}

@@ -305,6 +305,11 @@ def request_device_code(
             seen_direct = True
         dedup.append((kind, route, fd))
     routes = dedup
+    log(
+        "device-code routes="
+        + ",".join(_safe_proxy_label(r, force_direct=fd) for _, r, fd in routes)
+        + f" prefer_direct_first={prefer_direct_first} allow_direct_fallback={allow_direct_fallback}"
+    )
 
     status: int = 0
     body: dict[str, Any] | str = {}

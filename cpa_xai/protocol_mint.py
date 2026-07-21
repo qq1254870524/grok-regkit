@@ -227,6 +227,7 @@ def _mint_once(
             timeout=timeout,
             log=log,
             allow_direct_fallback=True,
+            prefer_direct_first=True,
             network_attempts=2,
         )
     except OAuthDeviceError as e:

@@ -1,0 +1,151 @@
+{
+  "base_pool": {
+    "ok": true,
+    "g2a": 3786,
+    "sub2": 3897,
+    "g2a_ok": true,
+    "sub2_ok": true,
+    "has_admin_email": true,
+    "has_admin_password": true
+  },
+  "final_pool": {
+    "ok": true,
+    "g2a": 3798,
+    "sub2": 3909,
+    "g2a_ok": true,
+    "sub2_ok": true,
+    "has_admin_email": true,
+    "has_admin_password": true
+  },
+  "base_cpa": 2529,
+  "final_cpa": 2541,
+  "rounds": [
+    {
+      "round": 1,
+      "ok": true,
+      "class": "success",
+      "success": 5,
+      "fail": 0,
+      "pending_sso": 0,
+      "awaiting_pool": 0,
+      "pool_before": {
+        "ok": true,
+        "g2a": 3786,
+        "sub2": 3897,
+        "g2a_ok": true,
+        "sub2_ok": true,
+        "has_admin_email": true,
+        "has_admin_password": true
+      },
+      "pool_after": {
+        "ok": true,
+        "g2a": 3791,
+        "sub2": 3902,
+        "g2a_ok": true,
+        "sub2_ok": true,
+        "has_admin_email": true,
+        "has_admin_password": true
+      },
+      "delta_g2a": 5,
+      "delta_sub2": 5,
+      "delta_cpa_files": 5,
+      "fail_hits": 9,
+      "ok_hits": 24,
+      "fail_samples": [
+        "[04:07:58] [w2] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:08:08] [w2] [!] Sub2API OAuth 账号已create但可用性验证失败 account_id=4410 detail=ConnectionError: HTTPConnectionPool(host='127.0.0.1', port=8080): Read timed out. (账号保留，不回滚；仅当 require_verify_success=true 时才视为入池失败)",
+        "[04:09:54] [w1] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:12:02] [w1] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:12:17] [w1] [!] Sub2API OAuth 账号已create但可用性验证失败 account_id=4413 detail=Grok Responses API returned 403: {\"code\":\"permission-denied\",\"error\":\"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please log into console.x.ai and update the permissions, or contact support.\"} (账号保留，不回滚；仅当 require_verify_success=true 时才视为入池失败)",
+        "[04:14:04] [w1] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:16:11] [*] Sub2API pending 处理结束 ok=0 fail=0 remaining=0",
+        "[04:16:29] [*] Sub2API 对账结束 ok=10 fail=0 missing_was=10"
+      ],
+      "ok_samples": [
+        "[04:16:16] [+] Sub2API SSO 已在号池(幂等成功) email=danzcynep@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:18] [+] Sub2API SSO 已在号池(幂等成功) email=dixonpamela132@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:19] [+] Sub2API SSO 已在号池(幂等成功) email=eliasbragason@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:21] [+] Sub2API SSO 已在号池(幂等成功) email=molsanvmhunkindh4@outlook.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:23] [+] Sub2API SSO 已在号池(幂等成功) email=samyraj99@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:24] [+] Sub2API SSO 已在号池(幂等成功) email=svaitoimatvei88@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:26] [+] Sub2API SSO 已在号池(幂等成功) email=valeraept26@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:16:28] [+] Sub2API SSO 已在号池(幂等成功) email=wikeroccio8@outlook.com detail=SSO already exists; not overwritten status=200"
+      ],
+      "last_event": "[*] pending_sso 恢复结束。成功 5 | 失败 0 | workers=2"
+    },
+    {
+      "round": 2,
+      "ok": true,
+      "class": "success",
+      "success": 7,
+      "fail": 0,
+      "pending_sso": 0,
+      "awaiting_pool": 0,
+      "pool_before": {
+        "ok": true,
+        "g2a": 3791,
+        "sub2": 3902,
+        "g2a_ok": true,
+        "sub2_ok": true,
+        "has_admin_email": true,
+        "has_admin_password": true
+      },
+      "pool_after": {
+        "ok": true,
+        "g2a": 3798,
+        "sub2": 3909,
+        "g2a_ok": true,
+        "sub2_ok": true,
+        "has_admin_email": true,
+        "has_admin_password": true
+      },
+      "delta_g2a": 7,
+      "delta_sub2": 7,
+      "delta_cpa_files": 7,
+      "fail_hits": 12,
+      "ok_hits": 30,
+      "fail_samples": [
+        "[04:23:14] [w1] [!] Sub2API OAuth 账号已create，可用性验证未通过(非入池失败) account_id=4417 detail=Grok Responses API returned 403: {\"code\":\"permission-denied\",\"error\":\"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please log into console.x.ai and update the permissions, or contact support.\"} (账号已保留；仅 require_verify_success=true 才算入池失败)",
+        "[04:25:18] [w2] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:25:19] [w1] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:25:34] [w2] [!] Sub2API OAuth 账号已create，可用性验证未通过(非入池失败) account_id=4419 detail=Grok Responses API returned 403: {\"code\":\"permission-denied\",\"error\":\"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please log into console.x.ai and update the permissions, or contact support.\"} (账号已保留；仅 require_verify_success=true 才算入池失败)",
+        "[04:27:30] [w2] [*] G2A 多目标入池完成 ok=2 fail=0 targets=2",
+        "[04:27:46] [w2] [!] Sub2API OAuth 账号已create，可用性验证未通过(非入池失败) account_id=4421 detail=Grok Responses API returned 403: {\"code\":\"permission-denied\",\"error\":\"Access to the chat endpoint is denied. Please ensure you're using the correct credentials. If you believe this is a mistake, please log into console.x.ai and update the permissions, or contact support.\"} (账号已保留；仅 require_verify_success=true 才算入池失败)",
+        "[04:27:47] [*] Sub2API pending 处理结束 ok=0 fail=0 remaining=0",
+        "[04:28:05] [*] Sub2API 对账结束 ok=10 fail=0 missing_was=10"
+      ],
+      "ok_samples": [
+        "[04:27:52] [+] Sub2API SSO 已在号池(幂等成功) email=danzcynep@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:27:54] [+] Sub2API SSO 已在号池(幂等成功) email=dixonpamela132@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:27:55] [+] Sub2API SSO 已在号池(幂等成功) email=eliasbragason@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:27:57] [+] Sub2API SSO 已在号池(幂等成功) email=molsanvmhunkindh4@outlook.com detail=SSO already exists; not overwritten status=200",
+        "[04:27:59] [+] Sub2API SSO 已在号池(幂等成功) email=samyraj99@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:28:00] [+] Sub2API SSO 已在号池(幂等成功) email=svaitoimatvei88@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:28:02] [+] Sub2API SSO 已在号池(幂等成功) email=valeraept26@aol.com detail=SSO already exists; not overwritten status=200",
+        "[04:28:04] [+] Sub2API SSO 已在号池(幂等成功) email=wikeroccio8@outlook.com detail=SSO already exists; not overwritten status=200"
+      ],
+      "last_event": "[*] pending_sso 恢复结束。成功 7 | 失败 0 | workers=2"
+    }
+  ],
+  "stop": {
+    "start_code": 200,
+    "stop_code": 200,
+    "stop_resp": {
+      "ok": true,
+      "stopped": true,
+      "running_was": true,
+      "had_controller": true,
+      "job_kind": "register",
+      "running_now": false,
+      "detail": "stopped: running cleared; browser cleanup async; gateways/web kept alive"
+    },
+    "running_before": true,
+    "running_after": false,
+    "panel_alive": true,
+    "ok": true
+  },
+  "total_success": 12,
+  "total_fail": 0,
+  "any_pool_gap": false,
+  "finished": "2026-07-22T04:28:26"
+}
