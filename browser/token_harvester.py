@@ -27,9 +27,12 @@ Browser-only token harvest for Castle / Turnstile (hybrid mode).
 2026-07-18r16: UI body rate-limit detect; freeze reclick when actual_send/net_hits>=1.
 2026-07-18r14: CreateEmail status JS returns actual_send/blocked/inflight/sent_once; backfill actual from net_hits.
 2026-07-20r37: actual_send backfill from net_hits only on 2xx; weak status_unknown no dual-send inflation.
+2026-07-21r43b: freeze-reclick throttle 4s; hard freeze needs 2xx/ui_code/ok; soft net_hits wait then yield.
 2026-07-20r38: UI fallback reason=running is initial-only; early exits set code_page_stuck/cancelled;
               code-page stuck re-confirm; cf present wait limit 22s (was 14s).
 """
+# 18r44b: CreateEmail body-aware OK; never treat bare code-step as sent
+
 from __future__ import annotations
 
 import os
@@ -98,6 +101,8 @@ class BrowserTokenSession:
   window.__hybrid_create_email_actual_sends = 0;
   window.__hybrid_create_email_blocked = 0;
   window.__hybrid_create_email_lock = false;
+  window.__hybrid_create_email_body = window.__hybrid_create_email_body || '';
+  window.__hybrid_create_email_body_ok = true;
   function isCreateEmailUrl(u) {
     try { return String(u || '').includes('CreateEmailValidationCode'); } catch (e) { return false; }
   }
@@ -115,12 +120,25 @@ class BrowserTokenSession:
     window.__hybrid_create_email_actual_sends = Number(window.__hybrid_create_email_actual_sends || 0) + 1;
     return false; // allow first
   }
-  function markCreateEmailResponse(url, status, ok) {
+  function markCreateEmailResponse(url, status, ok, bodyText) {
     if (!isCreateEmailUrl(url)) return;
     window.__hybrid_create_email_status = Number(status || 0);
-    window.__hybrid_create_email_ok = !!ok;
+    var body = String(bodyText || '');
+    window.__hybrid_create_email_body = body.slice(0, 2000);
+    var low = body.toLowerCase();
+    var bodyBad = false;
+    if (low) {
+      if (low.indexOf('too many') >= 0 || low.indexOf('rate limit') >= 0 || low.indexOf('rate_limit') >= 0) bodyBad = true;
+      if (body.indexOf('验证码过多') >= 0 || body.indexOf('发送到此邮箱的验证码过多') >= 0) bodyBad = true;
+      if (low.indexOf('invalid_argument') >= 0 || low.indexOf('"error"') >= 0) {
+        if (low.indexOf('"error":null') < 0 && low.indexOf('"error": null') < 0) bodyBad = true;
+      }
+    }
+    window.__hybrid_create_email_body_ok = !bodyBad;
+    var httpOk = !!ok || (Number(status) >= 200 && Number(status) < 300);
+    window.__hybrid_create_email_ok = !!(httpOk && !bodyBad);
     window.__hybrid_create_email_inflight = false;
-    if (ok || (Number(status) >= 200 && Number(status) < 300)) {
+    if (window.__hybrid_create_email_ok) {
       window.__hybrid_create_email_sent_once = true;
     }
   }
@@ -230,7 +248,17 @@ class BrowserTokenSession:
     if (isCE) {
       window.__hybrid_create_email_shared = p.then(async function(resp){
         try {
-          markCreateEmailResponse(url, resp.status || 0, !!(resp.ok || (resp.status >= 200 && resp.status < 300)));
+          var bodyText = '';
+          try {
+            var cloned = resp.clone();
+            bodyText = await cloned.text();
+          } catch (e2) { bodyText = ''; }
+          markCreateEmailResponse(
+            url,
+            resp.status || 0,
+            !!(resp.ok || (resp.status >= 200 && resp.status < 300)),
+            bodyText
+          );
         } catch (e) {}
         return resp;
       });
@@ -274,7 +302,9 @@ class BrowserTokenSession:
       xhr.addEventListener('load', function(){
         try {
           if (isCreateEmailUrl(xhr.__u)) {
-            markCreateEmailResponse(xhr.__u, xhr.status || 0, xhr.status >= 200 && xhr.status < 300);
+            var xt = '';
+            try { xt = String(xhr.responseText || ''); } catch (e3) { xt = ''; }
+            markCreateEmailResponse(xhr.__u, xhr.status || 0, xhr.status >= 200 && xhr.status < 300, xt);
           }
         } catch (e) {}
       });
@@ -332,6 +362,8 @@ return {
   blocked_duplicate_count: Number(window.__hybrid_create_email_blocked||0),
   inflight: !!window.__hybrid_create_email_inflight,
   sent_once: !!window.__hybrid_create_email_sent_once,
+  body_ok: (window.__hybrid_create_email_body_ok !== false),
+  body_text: String(window.__hybrid_create_email_body||'').slice(0, 400),
   net_urls: uniq.slice(0, 5).map(n => String((n&&n.url)||'').slice(0, 160))
 };
 """
@@ -437,18 +469,31 @@ return {
         except Exception as ui_exc:
             data["ui_probe_err"] = str(ui_exc)
 
-        if ok and 200 <= status < 300:
+        body_ok = True
+        if isinstance(raw, dict) and "body_ok" in raw:
+            body_ok = bool(raw.get("body_ok"))
+        data["body_ok"] = body_ok
+        if isinstance(raw, dict) and raw.get("body_text"):
+            data["net_body_text"] = str(raw.get("body_text") or "")[:400]
+        # 18r44b: require real 2xx + body_ok; bare code-step is NOT send evidence
+        if ok and 200 <= status < 300 and body_ok:
             data["sent"] = True
             data["reason"] = f"ok_status={status}"
-        elif ok and status == 0 and ui_code_step:
-            data["sent"] = True
-            data["reason"] = "ok_status_unknown_but_code_step"
-        elif seen and 200 <= status < 300:
+        elif ok and 200 <= status < 300 and not body_ok:
+            data["sent"] = False
+            data["reason"] = f"ok_status={status}_body_bad"
+        elif seen and 200 <= status < 300 and body_ok:
             data["sent"] = True
             data["reason"] = f"seen_status={status}"
+        elif seen and 200 <= status < 300 and not body_ok:
+            data["sent"] = False
+            data["reason"] = f"seen_status={status}_body_bad"
         elif seen and status == 0 and ui_code_step:
-            data["sent"] = True
+            data["sent"] = False
             data["reason"] = "seen_status_unknown_code_step"
+        elif ok and status == 0 and ui_code_step:
+            data["sent"] = False
+            data["reason"] = "ok_status_unknown_but_code_step"
         elif seen and status == 0:
             # Request may have been initiated, but response not confirmed. Do NOT skip re-click.
             data["sent"] = False
@@ -1012,34 +1057,63 @@ true;
             net_hits = int(st.get("net_hits") or 0)
             status_n = int(st.get("status") or 0)
             code_step = bool(st.get("ui_has_code") or st.get("ui_body_code"))
-            # 18r8: any real CreateEmail evidence freezes further clicks (prevent dual-code).
+            # 18r8/18r43b: freeze further clicks when CreateEmail already fired (防双发).
             actual_n = int(st.get("actual_send_count") or 0)
-            # 18r16: any real CreateEmail request already fired → freeze (防双发/验证码过多)
+            reason_s = str(st.get("reason") or "")
+            weak_reason = reason_s in {
+                "seen_status_unknown",
+                "not_seen",
+                "no_data",
+                "pending",
+                "inflight",
+                "maybe_inflight",
+                "status_unknown",
+            }
+            strong_http = 200 <= status_n < 300
+            # 18r43b: hard freeze on real send evidence; weak net_hits alone is soft-wait
             hard_no_reclick = bool(
-                st.get("sent")
-                or actual_n >= 1
-                or net_hits >= 1
-                or (code_step and (st.get("seen") or net_hits >= 1 or bool(st.get("ok"))))
-                or bool(st.get("ui_rate_limited"))
+                bool(st.get("ui_rate_limited"))
+                or code_step
+                or (bool(st.get("sent")) and (strong_http or actual_n >= 1 or bool(st.get("ok"))))
+                or (strong_http and (actual_n >= 1 or bool(st.get("ok"))))
+                or (actual_n >= 1 and strong_http and not weak_reason)
+                or (net_hits >= 1 and strong_http and not weak_reason)
+            )
+            soft_no_reclick = bool(
+                (not hard_no_reclick)
+                and (net_hits >= 1 or actual_n >= 1)
             )
             if st.get("ui_rate_limited"):
                 self._lg(
                     f"[!] CreateEmail UI rate-limited body={st.get('ui_body_text')!r} "
                     f"email={email} actual_send={actual_n} net_hits={net_hits}"
                 )
-            if hard_no_reclick:
-                self._lg(
-                    f"[*] CreateEmail freeze-reclick reason={st.get('reason')} "
-                    f"status={status_n} seen={st.get('seen')} net_hits={net_hits} "
-                    f"raw={st.get('net_hits_raw')} actual_send={st.get('actual_send_count')} "
-                    f"blocked_dup={st.get('blocked_duplicate_count')} "
-                    f"sent={int(bool(st.get('sent')))} "
-                    f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
-                    f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
-                )
+            if hard_no_reclick or soft_no_reclick:
+                # 18r43b: throttle freeze logs (was every 0.45s spam on seen_status_unknown)
+                now_ts = time.time()
+                last_fr = float(getattr(self, "_last_freeze_reclick_log_ts", 0.0) or 0.0)
+                if (now_ts - last_fr) >= 4.0:
+                    self._last_freeze_reclick_log_ts = now_ts
+                    self._lg(
+                        f"[*] CreateEmail freeze-reclick reason={reason_s} "
+                        f"mode={'hard' if hard_no_reclick else 'soft'} "
+                        f"status={status_n} seen={st.get('seen')} net_hits={net_hits} "
+                        f"raw={st.get('net_hits_raw')} actual_send={st.get('actual_send_count')} "
+                        f"blocked_dup={st.get('blocked_duplicate_count')} "
+                        f"sent={int(bool(st.get('sent')))} "
+                        f"ui_code={st.get('ui_has_code')}/{st.get('ui_body_code')} "
+                        f"castle_len={st.get('castle_len') or (len(c) if c else 0)}"
+                    )
                 if c:
                     self._lg(f"[*] native castle len={len(c)} head={c[:20]}")
                     return c
+                # soft weak fire: wait briefly for castle/2xx then yield to hybrid protocol-rescue
+                if soft_no_reclick and first_seen_ts and (time.time() - first_seen_ts >= 12.0):
+                    self._lg(
+                        f"[*] CreateEmail soft freeze timeout reason={reason_s} "
+                        f"net_hits={net_hits} actual={actual_n} — return without extra click"
+                    )
+                    return c or ""
                 time.sleep(0.45)
                 continue
             elif c and (time.time() + 8) >= deadline:

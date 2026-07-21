@@ -1,3 +1,10 @@
+# 18r44c: claim SSO session_id before hybrid disk/pool; collision -> pending_sso
+# 18r44b: CreateEmail never promote on bare ui_code (stale OTP page)
+# 18r43m: attempt-based quota (register_count=N max attempts); no success overshoot
+# 18r43i: hybrid job-end wait_post timeout=None (depth-scaled drain)
+# 18r43g: hybrid target = success count (pending/fail do not consume success quota)
+# 18r43b: dual_send_lock requires ui_code or 2xx+non-weak+ok/send; weak net_hits never block rescue
+# 18r43a: non-session/mail_token never counts success or pool-import; burn pending_sso
 # 18r42d: save path normalize + refuse mail_token as SSO field
 # 18r30-lossfix: job-end wait_post 120s + Sub2 对账补齐; 减少 G2A/Sub2 丢号.
 
@@ -18,6 +25,8 @@ Used by Web/CLI when config register_mode == "hybrid".
 
 
 Changelog:
+- 2026-07-22r44b: CreateEmail 禁止仅凭 ui_code 晋升 browser_sent；配合 token_harvester body-aware OK，修 pending 恢复假成功->early_no_new_mail 空烧。
+- 2026-07-21r43b: dual_send_lock 仅 ui_code 或 2xx+非弱reason+ok/send；wait-confirm 不再因裸 2xx/假 actual_send 锁死 protocol-rescue；减少 early_no_new_mail 空烧。
 - 2026-07-20r37: CreateEmail 假 actual_send 修复：seen_status_unknown/status=0 不再把 net_hits 抬成 dual-send lock，也不 promote browser_sent；仅 2xx/ui_code/raw_sent 才确认 browser_sent；弱证据时短轮询等响应确认，未确认允许 protocol-rescue，减少 early_no_new_mail 空烧。
 - 2026-07-20r39: dual_send_lock/full mail poll raises early_no_new threshold near timeout (avoid 110s cut of intended 180s); redact password on no-mail burn log.
 - 2026-07-20r38: UI fallback leftover reason=running maps to code_page_stuck/ui_incomplete; do not log password plaintext in no-sso classify path.
@@ -2382,8 +2391,10 @@ def register_one_hybrid(
             )
 
             # Accept browser_sent only with strong evidence (2xx / ok / code-step)
-            # PLUS real send evidence. 18r37: NEVER promote from weak status_unknown.
+            # PLUS real send evidence. 18r37/18r43b: NEVER promote from weak status_unknown.
             # net_hits alone under seen_status_unknown is NOT dual-send lock / browser_sent.
+            # 18r43b: dual_send_lock requires ui_code OR (2xx + non-weak reason + real send/ok).
+            # Fake actual_send=1/net_hits=1 under unknown must NOT block protocol-rescue.
             reason = str(st.get("reason") or "")
             status_n = int(st.get("status") or 0)
             actual_send_hook = int(st.get("actual_send_count") or 0)
@@ -2393,6 +2404,10 @@ def register_one_hybrid(
                 "seen_status_unknown",
                 "not_seen",
                 "no_data",
+                "pending",
+                "inflight",
+                "maybe_inflight",
+                "status_unknown",
             }
             strong_http = 200 <= status_n < 300
             # 18r37: only backfill actual_send from net_hits when response is strong
@@ -2402,16 +2417,29 @@ def register_one_hybrid(
                 st["actual_send_count"] = actual_send
             raw_sent = bool(st.get("sent")) and reason not in weak_reasons
             # Confirmed browser send: real success signals only
+            # 18r44b: bare ui_code must NOT confirm send — recovery OTP page often stale
+            body_ok_flag = st.get("body_ok", True)
+            if body_ok_flag is None:
+                body_ok_flag = True
+            body_ok_flag = bool(body_ok_flag)
             confirmed_send = bool(
-                ui_code_now
-                or (raw_sent and (strong_http or actual_send >= 1 or net_hits_n >= 1))
-                or (strong_http and (actual_send >= 1 or net_hits_n >= 1 or bool(st.get("ok"))))
+                reason not in weak_reasons
+                and strong_http
+                and body_ok_flag
+                and (
+                    (raw_sent and actual_send >= 1)
+                    or (actual_send >= 1 and bool(st.get("ok")))
+                    or (raw_sent and bool(st.get("ok")))
+                )
             )
             network_fired = (net_hits_n >= 1) or (actual_send_hook >= 1) or (actual_send >= 1)
-            # dual-send lock only when send is confirmed (not weak unknown)
+            # dual-send lock only on confirmed real send (not bare OTP UI)
             dual_send_lock = bool(
                 confirmed_send
-                and (actual_send >= 1 or net_hits_n >= 1 or ui_code_now)
+                and strong_http
+                and body_ok_flag
+                and reason not in weak_reasons
+                and (actual_send >= 1 or bool(st.get("ok")) or raw_sent)
             )
             has_send_evidence = confirmed_send
             browser_sent = bool(confirmed_send)
@@ -2420,7 +2448,7 @@ def register_one_hybrid(
                 log(
                     f"[hybrid] CreateEmail weak evidence wait-confirm "
                     f"reason={reason} status={status_n} net_hits={net_hits_n} "
-                    f"actual_hook={actual_send_hook} (18r37 no promote)"
+                    f"actual_hook={actual_send_hook} (18r43b no promote without ui/2xx+ok)"
                 )
                 for _wc in range(8):
                     if stop():
@@ -2434,31 +2462,49 @@ def register_one_hybrid(
                     ui2 = bool(st2.get("ui_has_code") or st2.get("ui_body_code"))
                     strong2 = 200 <= status2 < 300
                     raw2 = bool(st2.get("sent")) and reason2 not in weak_reasons
-                    if ui2 or strong2 or raw2:
+                    ok2 = bool(st2.get("ok"))
+                    # 18r44b: require strong 2xx + ok/send; bare ui_code never promotes
+                    body2 = st2.get("body_ok", True)
+                    if body2 is None:
+                        body2 = True
+                    body2 = bool(body2)
+                    promote2 = bool(
+                        reason2 not in weak_reasons
+                        and strong2
+                        and body2
+                        and (act2 >= 1 or raw2)
+                        and (ok2 or raw2)
+                    )
+                    if promote2:
                         st = st2
                         reason = reason2
                         status_n = status2
                         net_hits_n = net2
                         actual_send_hook = act2
-                        actual_send = act2 if act2 > 0 else (net2 if strong2 else 0)
+                        actual_send = act2 if act2 > 0 else (net2 if strong2 and ok2 and body2 else 0)
                         ui_code_now = ui2
                         strong_http = strong2
                         raw_sent = raw2
                         confirmed_send = True
-                        dual_send_lock = True
+                        dual_send_lock = bool(
+                            strong2
+                            and body2
+                            and reason2 not in weak_reasons
+                            and (act2 >= 1 or raw2 or ok2)
+                        )
                         browser_sent = True
                         has_send_evidence = True
                         log(
                             f"[hybrid] CreateEmail wait-confirm OK "
-                            f"status={status2} reason={reason2} ui_code={ui2} "
-                            f"actual={actual_send} net_hits={net2}"
+                            f"status={status2} reason={reason2} ui_code={ui2} body_ok={int(body2)} "
+                            f"actual={actual_send} net_hits={net2} dual_lock={int(dual_send_lock)}"
                         )
                         break
                 else:
                     log(
                         f"[hybrid] CreateEmail wait-confirm timeout "
                         f"reason={reason} status={status_n} net_hits={net_hits_n} "
-                        f"— keep browser_sent=0 allow protocol-rescue path"
+                        f"-- keep browser_sent=0 dual_send_lock=0 allow protocol-rescue path"
                     )
 
             # 18r16: detect rate-limit message on page even when HTTP status looks 200
@@ -2597,23 +2643,26 @@ def register_one_hybrid(
 
 
                         ui_code_now = bool(st.get("ui_has_code") or st.get("ui_body_code"))
-
-                        raw_sent = bool(st.get("sent")) and reason not in {
-
+                        status_n2 = int(st.get("status") or 0)
+                        strong_http2 = 200 <= status_n2 < 300
+                        weak2 = {
                             "seen_status_unknown",
-
                             "not_seen",
-
                             "no_data",
-
+                            "pending",
+                            "inflight",
+                            "maybe_inflight",
+                            "status_unknown",
                         }
-
+                        raw_sent = bool(st.get("sent")) and reason not in weak2
+                        # 18r43b: re-click confirm needs ui_code or strong non-weak send
                         browser_sent = bool(
-
-                            raw_sent
-
-                            and ((actual_send >= 1) or (net_hits_n >= 1) or ui_code_now)
-
+                            ui_code_now
+                            or (
+                                reason not in weak2
+                                and strong_http2
+                                and (raw_sent or actual_send >= 1 or bool(st.get("ok")))
+                            )
                         )
 
                         log(
@@ -2631,14 +2680,22 @@ def register_one_hybrid(
                         )
 
                         if browser_sent:
-
                             confirmed_send = True
-
-                            dual_send_lock = True
-
+                            # 18r43b: dual lock only for ui_code or strong HTTP success
+                            dual_send_lock = bool(
+                                ui_code_now
+                                or (
+                                    strong_http2
+                                    and reason not in weak2
+                                    and (actual_send >= 1 or raw_sent or bool(st.get("ok")))
+                                )
+                            )
                             network_fired = True
-
-                            log(f"[hybrid] CreateEmail re-click confirmed dual_send_lock=1 actual={actual_send}")
+                            log(
+                                f"[hybrid] CreateEmail re-click confirmed "
+                                f"dual_send_lock={int(dual_send_lock)} actual={actual_send} "
+                                f"status={status_n2} reason={reason}"
+                            )
 
                     except Exception as re_exc:
 
@@ -5019,17 +5076,52 @@ def register_one_hybrid(
                     log(f"[!] refuse save non-session SSO email={email} sso_len={len(sso or '')}")
             except Exception:
                 pass
-            if _sso_ok and sso:
-                line = f"{email}----{password}----{sso}\n"
+            # 18r43a: mail_token / non-session must NOT count as success or enter G2A/Sub2/CPA.
+            # Burn back to pending_sso with mailbox token so secondary SSO recovery can re-run.
+            if not (_sso_ok and sso):
+                log(
+                    f"[hybrid] non-importable token -> pending_sso email={email} "
+                    f"sso_len={len(sso or '')} (mail_token kept for recovery)"
+                )
                 try:
-                    with accounts_file.open("a", encoding="utf-8") as f:
-                        f.write(line)
-                except Exception as e:
-                    log(f"[hybrid] save file fail: {e}")
-            else:
-                log(f"[hybrid] skip accounts file write (no importable session SSO) email={email}")
-
-
+                    burn_mailbox_to_pending(
+                        email,
+                        password or "PENDING_NO_PW",
+                        reason="pending_sso:token_not_session_sso",
+                        log=log,
+                        mail_token=mail_token,
+                    )
+                except Exception as be:
+                    log(f"[hybrid] token_not_session_sso burn fail: {be}")
+                return _result(STATUS_PENDING_SSO, email=email, detail="token_not_session_sso")
+            # 18r44c: process-wide session_id claim before disk/pool
+            try:
+                from grok_register_ttk import claim_sso_session_or_reject
+                ok_claim, sid, owner = claim_sso_session_or_reject(sso, email=email, log_callback=log)
+                if not ok_claim:
+                    try:
+                        burn_mailbox_to_pending(
+                            email,
+                            password or "PENDING_NO_PW",
+                            reason="sso_session_collision",
+                            log=log,
+                            mail_token=mail_token,
+                        )
+                    except Exception as be:
+                        log(f"[hybrid] sso_session_collision burn fail: {be}")
+                    return _result(
+                        STATUS_PENDING_SSO,
+                        email=email,
+                        detail=f"sso_session_collision owner={owner} sid={(sid or '')[:13]}",
+                    )
+            except Exception as claim_exc:
+                log(f"[hybrid] sso claim check fail (continue): {claim_exc}")
+            line = f"{email}----{password}----{sso}\n"
+            try:
+                with accounts_file.open("a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception as e:
+                log(f"[hybrid] save file fail: {e}")
 
             log(f"[hybrid][+] OK {email}")
 
@@ -5339,12 +5431,11 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None, worke
     try:
 
         i = 0
-
         switch_mailbox_tries = 0
-
         max_switch_mailbox = max(8, int(count) * 3)
-
-        while i < count:
+        max_attempts = int(count)
+        # 18r43m: attempt-based — exactly register_count attempts max
+        while i < max_attempts:
 
             if controller.should_stop():
 
@@ -5518,7 +5609,7 @@ def run_hybrid_registration_job(count, log_callback=None, controller=None, worke
 
         try:
 
-            engine.wait_post_success_queue(timeout=20 if controller.should_stop() else 120, log_callback=log)
+            engine.wait_post_success_queue(timeout=20 if controller.should_stop() else None, log_callback=log)
 
         except Exception:
 
@@ -5622,11 +5713,11 @@ def _run_hybrid_registration_job_mt(
 
     wn = max(1, int(workers or 1))
 
-    log(f"[*] 混合多线程启动 workers={wn} target={count}")
+    log(f"[*] 混合多线程启动 workers={wn} attempt_target={count} claim_mode=attempt (18r43m)")
 
     max_switch = max(8, int(count) * 3)
 
-    coord = JobCoordinator(int(count), log=log, max_switch_mailbox=max_switch)
+    coord = JobCoordinator(int(count), log=log, max_switch_mailbox=max_switch, claim_mode="attempt")
 
     accounts_file = _Path(accounts_output_file)
 
@@ -5832,7 +5923,7 @@ def _run_hybrid_registration_job_mt(
 
     try:
 
-        engine.wait_post_success_queue(timeout=20 if controller.should_stop() else 120, log_callback=log)
+        engine.wait_post_success_queue(timeout=20 if controller.should_stop() else None, log_callback=log)
 
     except Exception:
 

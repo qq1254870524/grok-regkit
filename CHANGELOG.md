@@ -1,3 +1,12 @@
+# Changelog
+
+## 2026-07-22 — 18r44c silent multi-thread stable
+- CPA prefer_direct for auth.x.ai (fix curl97/SOCKS reject)
+- SSO isolation 18r44a + process-wide session_id claim 18r44c (no dual-email same session import)
+- CreateEmail body_ok 18r44b (no bare OTP false-sent)
+- Matrix report under matrix_runs/matrix_18r44_silent_20260722_014611
+- Package: packages/stable-2026-07-22-matrix-multithread-silent-18r44c
+
 ## 2026-07-21 / 18r42 silent multi-thread matrix DONE (w=10 n=100 pre=20 SOCKS5)
 
 - Package/tag: `stable-2026-07-21-matrix-multithread-silent-18r42` (**no overwrite** 18r41/18r40)
@@ -17,12 +26,20 @@
 - Hidden start: no Python console windows
 - Tools: `tools/matrix_18r42_silent_mt.py`, `tools/start_matrix18r42_hidden.ps1`, `tools/package_18r42_silent.py`
 
-## 2026-07-21 / 18r43 silent stable planned (w=20 pre=40 n=1000)
+## 2026-07-21 / 18r43 silent stable IN PROGRESS (w=20 pre=40 n=1000)
+- 18r43f: Sub2API 可用性验证对 permanent permission-denied 立即失败，避免 awaiting_pool 被 105s×N 拖死（下一次 /api/start 生效）
+- 18r43g: register count is SUCCESS target（pending/fail 不再提前结束任务）
+- 18r43h: post_success task_done 防双调用 + 死线程自动替换（awaiting_pool；下一次 /api/start 生效）
 
-- Package/tag planned: `stable-2026-07-21-matrix-multithread-silent-stable-18r43` (**no overwrite** 18r42)
-- Params: workers=20, preheat=40, count=1000, hybrid + SOCKS5 + outlook/aol x2 + pending_sso x2 + stop tests
-- UI: 待入池 real-time with success/fail
-- Tools: `tools/matrix_18r43_silent_stable_mt.py`, `tools/start_matrix18r43_hidden.ps1`
+- Package/tag planned: stable-2026-07-21-matrix-multithread-silent-18r43 (**no overwrite** 18r42/41/40)
+- Params: workers=20, preheat=40, count=1000, hybrid + SOCKS5; outlookx2 + aolx2 + pending_ssox2 + stopx2
+- UI: awaiting_pool live with success/fail
+- Disk fixes (apply on next /api/start cell; do not restart 8092 mid-job): dual_send_lock strict; post_success_workers=6 + early ensure; drain timeout scales with queue depth; token_harvester reload; mail_token never SSO import
+- **18r43e resume**: matrix state/jsonl resume + attach running job (no force-stop); start_matrix skips if alive; supervisor auto-restarts dead matrix after 2 polls
+- Watchers: matrix + web 8092 + supervisor + finish + longpoll + pulse + edge_safe silence
+- Tools: tools/matrix_18r43_silent_stable_mt.py, tools/package_18r43_silent.py, tools/_finish_18r43_release.py, tools/start_matrix18r43_hidden.ps1
+
+
 ## 2026-07-21 / matrix 18r41 multi-thread full cross-run (22/22)
 
 - Package/tag: `stable-2026-07-21-matrix-multithread-18r41` (**no overwrite** of 18r40 or older Packages)

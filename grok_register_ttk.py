@@ -1,3 +1,11 @@
+# 18r44c: process-wide session_id claim — reject same SSO session_id across workers/emails before disk/G2A/Sub2; restart browser after each browser success
+# 18r44a: browser SSO isolation — reject stale sso cookie across same-worker multi-account; clear xAI session cookies on open_signup; Windows per-launch user-data
+# 18r43n: force_stop sets cancel + non-block web stop
+# 18r43m: attempt-based JobCoordinator claim_mode
+# 18r43i: wait_post re-ensure drain workers every 10s
+# 18r43h: post_success task_done guard + auto-replace dead drain workers
+# 18r43a: multi post-success workers (default 6) drain awaiting_pool under workers=20
+# 18r43d: wait_post_success_queue scales timeout with awaiting_pool depth (not hard 90s)
 # 18r42d: G2A 入池拒绝 mail_token/wrapper；_normalize_sso_token 去前导 -
 # 18r41: browser MT early_no_new/code-fail last-try -> pending_sso (not hard fail)
 # 18r35k: CreateEmail min gap 4.0s for MT rate-limit
@@ -11,6 +19,9 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 
 Changelog:
+- 2026-07-22r44c: 进程级 session_id 认领：同 session_id 第二邮箱禁止写盘/入池（防 G2A 少号）；browser 每号成功后 clear cookie + restart_browser 硬隔离。
+- 2026-07-22r44a: 修复同 worker 连续注册串 SSO：wait_for_sso 拒绝开等前已存在的 sso cookie；open_signup 清 xAI session cookie；Windows 每实例独立 user-data，避免两号共用 session_id 导致 G2A 少入池。
+- 2026-07-21r43h: post-success worker 永不因单任务异常退出；task_done 防双调用；ensure 替换死线程，避免 awaiting_pool 卡住。
 - 2026-07-20r35d: open_signup 识别 grok.com/tos-gate，强制跳回 accounts.x.ai/sign-up 或换代理；避免成功后卡 tos-gate 找不到邮箱注册按钮。
 - 2026-07-20r35b: browser CreateEmail 验证码过多 detect+switch; pool in_use preserve (see outlook/aol).
 
@@ -283,8 +294,12 @@ _cpa_last_mint_ts = 0.0  # wall clock; serialize + gap between mints
 _post_success_q = queue.Queue()
 _post_success_worker_lock = threading.Lock()
 _post_success_worker_started = False
+_post_success_worker_count = 0
+_post_success_threads = []  # 18r43h live Thread refs for dead-worker replace
 _post_success_pending = 0
 _post_success_pending_lock = threading.Lock()
+# 18r43a: multi post-success workers drain awaiting_pool under high concurrency
+_POST_SUCCESS_DEFAULT_WORKERS = 6
 
 
 def get_post_success_queue_depth():
@@ -1806,6 +1821,76 @@ def _is_importable_session_sso(raw_token):
         return token.count(".") == 2 and 40 <= len(token) <= 800
 
 
+
+# 18r44c: process-wide SSO session_id registry (prevent cross-account collision import)
+_SSO_SESSION_CLAIM_LOCK = threading.Lock()
+_SSO_SESSION_CLAIMS = {}  # session_id -> email
+
+
+def _extract_sso_session_id(raw_token):
+    """Decode xAI session JWT payload.session_id; empty if not parseable."""
+    token = _normalize_sso_token(raw_token)
+    if not token or token.count(".") != 2:
+        return ""
+    try:
+        import base64 as _b64
+        import json as _json
+        pl = token.split(".")[1]
+        pad = "=" * ((4 - len(pl) % 4) % 4)
+        data = _json.loads(_b64.urlsafe_b64decode(pl + pad))
+        sid = str((data or {}).get("session_id") or "").strip()
+        return sid
+    except Exception:
+        return ""
+
+
+def claim_sso_session_or_reject(raw_token, email="", log_callback=None):
+    """Claim session_id for email. Returns (ok, session_id, owner_email).
+
+    If another email already claimed this session_id, returns ok=False.
+    Same email re-claim is allowed (idempotent).
+    """
+    log = log_callback or (lambda m: None)
+    sid = _extract_sso_session_id(raw_token)
+    em = str(email or "").strip().lower()
+    if not sid:
+        # no sid: allow but warn (cannot dedupe)
+        try:
+            log(f"[!] sso session_id missing email={email or '-'} — cannot hard-dedupe")
+        except Exception:
+            pass
+        return True, "", ""
+    with _SSO_SESSION_CLAIM_LOCK:
+        owner = _SSO_SESSION_CLAIMS.get(sid)
+        if owner and owner != em:
+            try:
+                log(
+                    f"[!] SSO session collision REJECTED email={email} "
+                    f"sid={sid[:13]}... already_owned_by={owner}"
+                )
+            except Exception:
+                pass
+            return False, sid, owner
+        _SSO_SESSION_CLAIMS[sid] = em or owner or sid
+        try:
+            log(f"[*] SSO session claimed email={email or '-'} sid={sid[:13]}...")
+        except Exception:
+            pass
+        return True, sid, em
+
+
+def release_sso_session_claim(raw_token, email=""):
+    """Optional release if registration fails after claim (not required for hard reject path)."""
+    sid = _extract_sso_session_id(raw_token)
+    em = str(email or "").strip().lower()
+    if not sid:
+        return
+    with _SSO_SESSION_CLAIM_LOCK:
+        owner = _SSO_SESSION_CLAIMS.get(sid)
+        if owner and (not em or owner == em):
+            _SSO_SESSION_CLAIMS.pop(sid, None)
+
+
 def add_token_to_grok2api_local_pool(raw_token, email="", log_callback=None):
     token = _normalize_sso_token(raw_token)
     if not token:
@@ -2098,23 +2183,45 @@ def _config_bool(value, default=False):
 
 
 def _post_success_worker_loop():
-    """Background worker: NSFW / g2a / Sub2API / CPA（不阻塞下一号浏览器注册）。"""
+    """Background worker: NSFW / g2a / Sub2API / CPA（不阻塞下一号浏览器注册）。
+
+    18r43h: never die on job errors; task_done exactly-once with ValueError guard
+    so a single bad job cannot kill the drain pool (awaiting_pool stuck).
+    """
     while True:
-        job = _post_success_q.get()
-        if job is None:
-            _post_success_q.task_done()
-            break
-        log = job.get("log") or (lambda m: print(m, flush=True))
-        email = job.get("email") or ""
-        sso = job.get("sso") or ""
+        job = None
         try:
+            job = _post_success_q.get()
+        except Exception:
+            time.sleep(0.2)
+            continue
+        if job is None:
+            try:
+                _post_success_q.task_done()
+            except ValueError:
+                pass
+            break
+        log = job.get("log") if isinstance(job, dict) else None
+        if not callable(log):
+            log = (lambda m: print(m, flush=True))
+        email = ""
+        sso = ""
+        try:
+            email = str((job or {}).get("email") or "")
+            sso = str((job or {}).get("sso") or "")
             try:
                 load_config()
             except Exception:
                 pass
-            log(f"[bg] 后处理开始: {email}")
+            try:
+                log(f"[bg] 后处理开始: {email}")
+            except Exception:
+                pass
             if job.get("do_nsfw"):
-                log(f"[bg] 开启 NSFW: {email}")
+                try:
+                    log(f"[bg] 开启 NSFW: {email}")
+                except Exception:
+                    pass
                 try:
                     nsfw_ok, nsfw_msg = enable_nsfw_for_token(sso, log_callback=log)
                     if nsfw_ok:
@@ -2122,7 +2229,10 @@ def _post_success_worker_loop():
                     else:
                         log(f"[bg] NSFW 未开启: {nsfw_msg}")
                 except Exception as nsfw_exc:
-                    log(f"[bg] NSFW 异常: {nsfw_exc}")
+                    try:
+                        log(f"[bg] NSFW 异常: {nsfw_exc}")
+                    except Exception:
+                        pass
             if job.get("do_g2a"):
                 try:
                     bg_tries = int(config.get("grok2api_bg_max_http_tries", 6) or 6)
@@ -2132,13 +2242,19 @@ def _post_success_worker_loop():
                     bg_timeout = float(config.get("grok2api_bg_http_timeout_sec", 15) or 15)
                 except (TypeError, ValueError):
                     bg_timeout = 15.0
-                add_token_to_grok2api_pools(
-                    sso,
-                    email=email,
-                    log_callback=log,
-                    max_http_tries=bg_tries,
-                    http_timeout=bg_timeout,
-                )
+                try:
+                    add_token_to_grok2api_pools(
+                        sso,
+                        email=email,
+                        log_callback=log,
+                        max_http_tries=bg_tries,
+                        http_timeout=bg_timeout,
+                    )
+                except Exception as g2a_exc:
+                    try:
+                        log(f"[bg] g2a 异常: {g2a_exc}")
+                    except Exception:
+                        pass
             cpa_result = None
             if job.get("do_cpa") and config.get("cpa_export_enabled", True) and config.get("cpa_auto_add", True):
                 try:
@@ -2151,7 +2267,10 @@ def _post_success_worker_loop():
                         log_callback=log,
                     )
                 except Exception as cpa_exc:
-                    log(f"[bg] CPA 导出未成功: {cpa_exc}")
+                    try:
+                        log(f"[bg] CPA 导出未成功: {cpa_exc}")
+                    except Exception:
+                        pass
                     cpa_result = {"ok": False, "error": str(cpa_exc)}
             if job.get("do_sub2api"):
                 try:
@@ -2166,7 +2285,10 @@ def _post_success_worker_loop():
                         log_callback=log,
                     )
                 except Exception as sub2api_exc:
-                    log(f"[bg] Sub2API 入池未成功（注册结果保留）: {sub2api_exc}")
+                    try:
+                        log(f"[bg] Sub2API 入池未成功（注册结果保留）: {sub2api_exc}")
+                    except Exception:
+                        pass
                     try:
                         from sub2api_client import record_sub2api_import_failure
 
@@ -2179,42 +2301,124 @@ def _post_success_worker_loop():
                             log_callback=log,
                         )
                     except Exception as rec_exc:
-                        log(f"[bg] Sub2API 失败落盘异常: {rec_exc}")
+                        try:
+                            log(f"[bg] Sub2API 失败落盘异常: {rec_exc}")
+                        except Exception:
+                            pass
             try:
                 from sub2api_client import log_pool_counts
 
                 log_pool_counts(config=config, log_callback=log, email=email)
             except Exception:
                 pass
-            log(f"[bg] 后处理完成: {email}")
+            try:
+                log(f"[bg] 后处理完成: {email}")
+            except Exception:
+                pass
         except Exception as exc:
-            log(f"[bg] 后处理异常 {email}: {exc}")
+            try:
+                log(f"[bg] 后处理异常 {email}: {exc}")
+            except Exception:
+                pass
         finally:
             global _post_success_pending
-            with _post_success_pending_lock:
-                _post_success_pending = max(0, _post_success_pending - 1)
-            _post_success_q.task_done()
+            try:
+                with _post_success_pending_lock:
+                    _post_success_pending = max(0, int(_post_success_pending or 0) - 1)
+            except Exception:
+                pass
+            try:
+                _post_success_q.task_done()
+            except ValueError:
+                pass
+            except Exception:
+                pass
 
 
-def ensure_post_success_worker(log_callback=None):
-    global _post_success_worker_started
+def ensure_post_success_worker(log_callback=None, workers=None):
+    """Start N background post-success workers (G2A/Sub2/CPA/NSFW).
+
+    18r43a: default 6 workers so awaiting_pool keeps up with register workers=20.
+    18r43h: prune dead threads and replace so awaiting_pool keeps draining.
+    Safe to call repeatedly; only starts missing workers up to target count.
+    """
+    global _post_success_worker_started, _post_success_worker_count, _post_success_threads
+    try:
+        n = int(workers) if workers is not None else 0
+    except Exception:
+        n = 0
+    if n <= 0:
+        try:
+            n = int((config or {}).get("post_success_workers") or 0)
+        except Exception:
+            n = 0
+    if n <= 0:
+        try:
+            reg_w = int((config or {}).get("workers") or (config or {}).get("thread_count") or 0)
+        except Exception:
+            reg_w = 0
+        if reg_w >= 10:
+            n = _POST_SUCCESS_DEFAULT_WORKERS
+        elif reg_w >= 4:
+            n = 3
+        else:
+            n = 1
+    n = max(1, min(16, int(n)))
     with _post_success_worker_lock:
-        if _post_success_worker_started:
-            return
-        t = threading.Thread(
-            target=_post_success_worker_loop,
-            name="post-success-worker",
-            daemon=True,
-        )
-        t.start()
-        _post_success_worker_started = True
-        if log_callback:
-            log_callback("[*] 后处理后台线程已启动（g2a/Sub2API/CPA/NSFW 可异步）")
+        alive = []
+        for th in list(_post_success_threads or []):
+            try:
+                if th is not None and th.is_alive():
+                    alive.append(th)
+            except Exception:
+                pass
+        _post_success_threads = alive
+        _post_success_worker_count = len(alive)
+        started_now = 0
+        while _post_success_worker_count < n:
+            idx = _post_success_worker_count + 1
+            th = threading.Thread(
+                target=_post_success_worker_loop,
+                name=f"post-success-worker-{idx}",
+                daemon=True,
+            )
+            th.start()
+            _post_success_threads.append(th)
+            _post_success_worker_count += 1
+            started_now += 1
+        _post_success_worker_started = _post_success_worker_count > 0
+        if log_callback and started_now > 0:
+            log_callback(
+                f"[*] 后处理后台线程已启动 workers={_post_success_worker_count} "
+                f"（+{started_now}；g2a/Sub2API/CPA/NSFW 可异步；awaiting_pool 并行排空）"
+            )
 
 
-def wait_post_success_queue(timeout=90, log_callback=None):
-    """Wait until background post-success jobs drain (call at job end)."""
+def wait_post_success_queue(timeout=None, log_callback=None):
+    """Wait until background post-success jobs drain (call at job end).
+
+    18r43d: default timeout scales with queue depth so workers=20 backlog
+    (awaiting_pool 100+) is not abandoned after a hard 90s.
+    """
     log = log_callback or (lambda m: None)
+    try:
+        with _post_success_pending_lock:
+            depth0 = int(_post_success_pending or 0)
+        depth0 = max(depth0, int(getattr(_post_success_q, "unfinished_tasks", 0) or 0))
+    except Exception:
+        depth0 = 0
+    if timeout is None:
+        # ~25s/item + base 90s, min 90s, max 1h
+        timeout = max(90.0, min(3600.0, float(depth0) * 25.0 + 90.0))
+    else:
+        try:
+            timeout = float(timeout)
+        except Exception:
+            timeout = 90.0
+        # never shorter than depth-scaled floor when backlog is large
+        if depth0 >= 20:
+            timeout = max(timeout, min(3600.0, float(depth0) * 20.0 + 60.0))
+    log(f"[*] 等待后处理队列 drain timeout={timeout:.0f}s depth≈{depth0}")
     deadline = time.time() + max(0.0, float(timeout or 0))
     last_log = 0.0
     while True:
@@ -2238,6 +2442,11 @@ def wait_post_success_queue(timeout=90, log_callback=None):
         if pending > 0 and (now - last_log) >= 10.0:
             log(f"[*] 等待后处理队列… 剩余约 {pending}（CPA/NSFW 后台中）")
             last_log = now
+            # 18r43i: re-ensure drain workers while waiting (replace dead threads)
+            try:
+                ensure_post_success_worker(log_callback=log)
+            except Exception:
+                pass
         time.sleep(1.0)
 
 
@@ -2251,6 +2460,20 @@ def schedule_post_registration(
     - cookies: optional pre-exported jar (hybrid path has no live page)
     """
     log = log_callback or (lambda m: print(m, flush=True))
+    # 18r44c: never import colliding session_id into G2A/Sub2
+    try:
+        ok_claim, sid, owner = claim_sso_session_or_reject(sso, email=email, log_callback=log)
+        if not ok_claim:
+            log(
+                f"[!] skip post_registration due to SSO collision email={email} "
+                f"sid={(sid or '')[:13]} owner={owner}"
+            )
+            return {"async": False, "queued": False, "skipped": "sso_session_collision", "owner": owner}
+    except Exception as claim_exc:
+        try:
+            log(f"[!] sso session claim check fail (continue): {claim_exc}")
+        except Exception:
+            pass
     out_cookies = []
     if isinstance(cookies, list) and cookies:
         out_cookies = [c for c in cookies if isinstance(c, dict)]
@@ -2429,8 +2652,34 @@ def export_cpa_after_success(email, password, sso, page=None, cookies=None, log_
                 or cpa_cfg.get("proxy")
                 or "http://127.0.0.1:7893"
             ).strip()
+        elif mode in ("socks5", "socks5_list", "proxy_list", "list", "pool"):
+            try:
+                picked = pick_proxy_from_list(cpa_cfg)
+            except Exception:
+                picked = ""
+            if picked:
+                cpa_cfg["cpa_proxy"] = picked
+            elif str(cpa_cfg.get("proxy") or "").strip():
+                cpa_cfg["cpa_proxy"] = str(cpa_cfg.get("proxy")).strip()
         elif str(cpa_cfg.get("proxy") or "").strip():
             cpa_cfg["cpa_proxy"] = str(cpa_cfg.get("proxy")).strip()
+    # Always attach multi-candidate list for CPA mint SOCKS failover + direct
+    try:
+        pool = load_proxy_list(cpa_cfg) or []
+    except Exception:
+        pool = []
+    if pool:
+        primary = str(cpa_cfg.get("cpa_proxy") or "").strip()
+        ordered = []
+        if primary:
+            ordered.append(primary)
+        for u in pool:
+            if u and u not in ordered:
+                ordered.append(u)
+        cpa_cfg["cpa_proxy_candidates"] = ordered[:8]
+        if not primary and ordered:
+            cpa_cfg["cpa_proxy"] = ordered[0]
+        log(f"[cpa] proxy pool candidates={len(cpa_cfg['cpa_proxy_candidates'])}")
     if _config_bool(config.get("cpa_gui_close_mint_browser", True), default=True):
         cpa_cfg["cpa_mint_browser_reuse"] = False
 
@@ -3016,6 +3265,21 @@ def create_browser_options(browser_proxy="", force_headless=None):
         _set_browser_argument(options, "--window-position=40,40")
     if os.path.exists(EXTENSION_PATH):
         options.add_extension(EXTENSION_PATH)
+    # 18r44a: per-launch user-data on Windows too (isolate multi-thread cookies/profile)
+    try:
+        base_data = os.environ.get("GROK_REGISTER_USER_DATA", "").strip() or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".chrome-data"
+        )
+        user_data = os.path.join(
+            base_data, f"win-{os.getpid()}-{int(time.time())}-{secrets.token_hex(3)}"
+        )
+        os.makedirs(user_data, exist_ok=True)
+        if hasattr(options, "set_user_data_path"):
+            options.set_user_data_path(user_data)
+        elif hasattr(options, "set_paths"):
+            options.set_paths(user_data_path=user_data)
+    except Exception:
+        pass
     return options
 
 
@@ -4666,9 +4930,13 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
 
 
 def force_stop_registration(log_callback=None, reason="user_stop"):
-    """Immediate stop: kill all worker browsers. Does NOT stop G2A/Sub2API/CLIProxy/CPA."""
+    """Immediate stop: kill all worker browsers. Does NOT stop G2A/Sub2API/CLIProxy/CPA/web."""
     _lg = log_callback if callable(log_callback) else (lambda m: None)
     _lg(f"[!] force_stop_registration: {reason}")
+    try:
+        config["stop_requested"] = True
+    except Exception:
+        pass
     try:
         stop_browser_silence_keeper(log_callback=_lg)
     except Exception:
@@ -5030,6 +5298,12 @@ def open_signup_page(log_callback=None, cancel_callback=None):
     browser = st.browser
     page = st.page
     raise_if_cancelled(cancel_callback)
+    # 18r44a: wipe previous account session before navigating signup
+    try:
+        if page is not None:
+            _clear_xai_session_cookies(page=page, log_callback=log_callback)
+    except Exception:
+        pass
     if browser is None:
         start_browser(log_callback=log_callback)
         if log_callback:
@@ -6360,6 +6634,111 @@ return String(cfInput.value || '').trim().length;
     raise Exception("最终注册页资料填写失败")
 
 
+
+def _iter_page_cookie_items(page):
+    """Yield (name, value) from DrissionPage cookie list/dict/objects."""
+    if page is None:
+        return
+    try:
+        cookies = page.cookies(all_domains=True, all_info=True) or []
+    except Exception:
+        try:
+            cookies = page.cookies() or []
+        except Exception:
+            cookies = []
+    for item in cookies:
+        if isinstance(item, dict):
+            name = str(item.get("name", "") or "").strip()
+            value = str(item.get("value", "") or "").strip()
+        else:
+            name = str(getattr(item, "name", "") or "").strip()
+            value = str(getattr(item, "value", "") or "").strip()
+        if name:
+            yield name, value
+
+
+def _collect_sso_cookie_values(page):
+    """Return set of current sso / sso-rw cookie values on page."""
+    out = set()
+    for name, value in _iter_page_cookie_items(page):
+        if name in ("sso", "sso-rw") and value:
+            out.add(value)
+            try:
+                nv = _normalize_sso_token(value)
+                if nv:
+                    out.add(nv)
+            except Exception:
+                pass
+    return out
+
+
+def _clear_xai_session_cookies(page=None, log_callback=None):
+    """Drop xAI auth cookies so the next signup cannot inherit previous SSO."""
+    p = page
+    if p is None:
+        try:
+            p = _get_page()
+        except Exception:
+            p = None
+    if p is None:
+        return 0
+    cleared = 0
+    try:
+        p.run_js(
+            r"""
+(function(){
+  const names = ['sso','sso-rw','sso_token','last-logged-in-with','logged_in','__Host-sso'];
+  const domains = ['.x.ai','x.ai','.accounts.x.ai','accounts.x.ai','.grok.com','grok.com', location.hostname];
+  const paths = ['/','/sign-up','/sign-in'];
+  for (const n of names) {
+    document.cookie = n + '=; Max-Age=0; path=/';
+    for (const d of domains) {
+      for (const path of paths) {
+        document.cookie = n + '=; Max-Age=0; path=' + path + '; domain=' + d;
+      }
+    }
+  }
+  try { localStorage.clear(); sessionStorage.clear(); } catch(e) {}
+  return true;
+})()
+"""
+        )
+        cleared += 1
+    except Exception:
+        pass
+    try:
+        setter = getattr(p, "set", None)
+        cookies_api = getattr(setter, "cookies", None) if setter is not None else None
+        if cookies_api is not None:
+            clear_fn = getattr(cookies_api, "clear", None)
+            if callable(clear_fn):
+                clear_fn()
+                cleared += 1
+            else:
+                rem = getattr(cookies_api, "remove", None) or getattr(cookies_api, "delete", None)
+                if callable(rem):
+                    for name, _value in list(_iter_page_cookie_items(p)):
+                        if name in ("sso", "sso-rw", "sso_token", "last-logged-in-with", "logged_in"):
+                            try:
+                                rem(name)
+                                cleared += 1
+                            except Exception:
+                                try:
+                                    rem(name=name)
+                                    cleared += 1
+                                except Exception:
+                                    pass
+    except Exception:
+        pass
+    if log_callback:
+        try:
+            left = len(_collect_sso_cookie_values(p))
+            log_callback(f"[*] 已清理 xAI session cookies (ops={cleared}, sso_left={left})")
+        except Exception:
+            pass
+    return cleared
+
+
 def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     deadline = time.time() + timeout
     last_seen_names = set()
@@ -6371,6 +6750,31 @@ def wait_for_sso_cookie(timeout=120, log_callback=None, cancel_callback=None):
     final_no_submit_state = ""
     final_no_submit_since = None
     final_no_submit_timeout = 25
+    # 18r44a/c: ignore SSO cookies already present + already-claimed session_ids
+    baseline_sso = set()
+    baseline_sids = set()
+    try:
+        baseline_sso = set(_collect_sso_cookie_values(_get_page()))
+        for _bv in list(baseline_sso):
+            _bs = _extract_sso_session_id(_bv)
+            if _bs:
+                baseline_sids.add(_bs)
+    except Exception:
+        baseline_sso = set()
+        baseline_sids = set()
+    try:
+        with _SSO_SESSION_CLAIM_LOCK:
+            baseline_sids |= set(_SSO_SESSION_CLAIMS.keys())
+    except Exception:
+        pass
+    if (baseline_sso or baseline_sids) and log_callback:
+        try:
+            log_callback(
+                f"[*] wait_for_sso: ignore baseline sso cookies n={len(baseline_sso)} "
+                f"sids={len(baseline_sids)} (prevent same-worker account collision)"
+            )
+        except Exception:
+            pass
 
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -6494,8 +6898,30 @@ return String(cfInput.value || '').trim().length;
                     last_seen_names.add(name)
 
                 if name == "sso" and value:
+                    norm = value
+                    try:
+                        norm = _normalize_sso_token(value) or value
+                    except Exception:
+                        norm = value
+                    if value in baseline_sso or norm in baseline_sso or (_extract_sso_session_id(value) in baseline_sids if baseline_sids else False):
+                        # stale cookie from previous account on this browser
+                        continue
                     if log_callback:
-                        log_callback("[*] 已获取到 sso cookie")
+                        try:
+                            sid = ""
+                            try:
+                                import base64 as _b64
+                                import json as _json
+                                pl = (norm or value).split(".")[1]
+                                pad = "=" * ((4 - len(pl) % 4) % 4)
+                                sid = str(
+                                    _json.loads(_b64.urlsafe_b64decode(pl + pad)).get("session_id") or ""
+                                )[:13]
+                            except Exception:
+                                sid = ""
+                            log_callback(f"[*] 已获取到 sso cookie (new session sid={sid}...)")
+                        except Exception:
+                            log_callback("[*] 已获取到 sso cookie")
                     return value
 
             # 18r26: SSO nudge only after pure signing-in; never leave active signup form
@@ -7163,6 +7589,29 @@ class GrokRegisterGUI:
                                 self.log(f"[!] pending_sso save fail email={email}: {pend_exc}")
                             raise Exception(f"pending_sso:browser_sso_timeout email={email} {msg}")
                         raise
+                    ok_claim, sid, owner = claim_sso_session_or_reject(
+                        sso, email=email, log_callback=self.log
+                    )
+                    if not ok_claim:
+                        try:
+                            from hybrid_register import burn_mailbox_to_pending
+                            burn_mailbox_to_pending(
+                                email,
+                                str(profile.get("password") or ""),
+                                reason="sso_session_collision",
+                                log=self.log,
+                            )
+                        except Exception as pend_exc:
+                            self.log(f"[!] collision pending save fail: {pend_exc}")
+                        try:
+                            _clear_xai_session_cookies(log_callback=self.log)
+                            restart_browser(log_callback=self.log)
+                        except Exception:
+                            pass
+                        raise Exception(
+                            f"pending_sso:sso_session_collision email={email} "
+                            f"sid={(sid or '')[:13]} owner={owner}"
+                        )
                     self.results.append({"email": email, "sso": sso, "profile": profile})
                     try:
                         line = f"{email}----{profile.get('password','')}----{sso}\n"
@@ -7253,7 +7702,7 @@ class GrokRegisterGUI:
             self.log(f"[!] 任务异常: {exc}")
         finally:
             # 等后台 g2a/CPA/NSFW 尽量跑完再关浏览器进程环境
-            wait_post_success_queue(timeout=90, log_callback=self.log)
+            wait_post_success_queue(timeout=None, log_callback=self.log)
             stop_browser()
             self._set_running_ui(False)
             self.log("[*] 任务结束")
@@ -7584,7 +8033,7 @@ def run_registration_job(count, log_callback=None, controller=None, workers=None
         log(f"[!] 任务异常: {exc}")
     finally:
         # 浏览器关掉前先尽量完成后台入池/CPA/NSFW（不依赖 page）
-        wait_post_success_queue(timeout=90, log_callback=log)
+        wait_post_success_queue(timeout=None, log_callback=log)
         try:
             if controller.should_stop():
                 force_stop_registration(log_callback=log, reason="browser_job_stopped")
@@ -7653,7 +8102,7 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
         f"accounts_{now_beijing('%Y%m%d_%H%M%S')}.txt",
     )
     log(f"[*] 成功账号将实时保存到: {accounts_output_file}")
-    coord = JobCoordinator(int(count), log=log, max_switch_mailbox=max(8, int(count) * 3))
+    coord = JobCoordinator(int(count), log=log, max_switch_mailbox=max(8, int(count) * 3), claim_mode="attempt")
     # Serialize full-browser single-account body via a lock only around rare global writes if any;
     # browser state is TLS so no lock needed for Chromium.
 
@@ -7666,6 +8115,13 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
         max_mail_retry = 3
         for mail_try in range(1, max_mail_retry + 1):
             wlog(f"[*] 1. 打开注册页 (尝试 {mail_try}/{max_mail_retry})")
+            try:
+                _clear_xai_session_cookies(log_callback=wlog)
+            except Exception as _clr_exc:
+                try:
+                    wlog(f"[Debug] pre-signup cookie clear: {_clr_exc}")
+                except Exception:
+                    pass
             open_signup_page(log_callback=wlog, cancel_callback=controller.should_stop)
             wlog("[*] 2. 创建邮箱并提交")
             try:
@@ -7875,6 +8331,34 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
                     f"pending_sso:browser_sso_timeout email={email} {msg}"
                 )
             raise
+        # 18r44c: hard reject reused session_id before disk/import
+        ok_claim, sid, owner = claim_sso_session_or_reject(
+            sso, email=email, log_callback=wlog
+        )
+        if not ok_claim:
+            try:
+                from hybrid_register import burn_mailbox_to_pending
+                burn_mailbox_to_pending(
+                    email,
+                    str(profile.get("password") or ""),
+                    reason="sso_session_collision",
+                    log=wlog,
+                    mail_token="",
+                )
+            except Exception as pend_exc:
+                wlog(f"[!] collision pending save fail: {pend_exc}")
+            try:
+                _clear_xai_session_cookies(log_callback=wlog)
+            except Exception:
+                pass
+            try:
+                restart_browser(log_callback=wlog)
+            except Exception as rb_exc:
+                wlog(f"[!] collision restart_browser: {rb_exc}")
+            raise Exception(
+                f"pending_sso:sso_session_collision email={email} "
+                f"sid={(sid or '')[:13]} owner={owner}"
+            )
         try:
             line = f"{email}----{profile.get('password','')}----{sso}\n"
             with open(accounts_output_file, "a", encoding="utf-8") as f:
@@ -7929,6 +8413,16 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
                     _register_one_browser(wlog)
                     coord.record_success()
                     wlog("[+] 注册成功")
+                    # 18r44c: hard isolate next account in same worker
+                    try:
+                        _clear_xai_session_cookies(log_callback=wlog)
+                    except Exception:
+                        pass
+                    try:
+                        restart_browser(log_callback=wlog)
+                        wlog("[*] post-success browser restart for SSO isolation")
+                    except Exception as rb_exc:
+                        wlog(f"[!] post-success restart_browser: {rb_exc}")
                 except RegistrationCancelled:
                     wlog("[!] 注册被停止")
                     break
@@ -7993,7 +8487,7 @@ def run_registration_job_multithread(count, log_callback=None, controller=None, 
 
     snap = coord.snapshot()
     try:
-        wait_post_success_queue(timeout=90, log_callback=log)
+        wait_post_success_queue(timeout=None, log_callback=log)
     except Exception:
         pass
     try:

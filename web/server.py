@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """FastAPI control plane for grok-regkit.
 
-18r43: /api/status exposes awaiting_pool (awaiting pool) from post-success queue; live top metric.
+18r44: reload cpa_xai/* + cpa_export + sso_to_auth_json each job (CPA SOCKS rotate/direct).
+18r43c: register job also reloads browser.token_harvester; 18r43: /api/status exposes awaiting_pool (awaiting pool) from post-success queue; live top metric.
+18r43d: job start seeds post_success_workers=6 + early ensure_post_success_worker.
 18r42d: export importable session SSO only; pending download labeled mail_token-not-SSO; reject mail_token import.
+18r43n: /api/stop non-blocking thread cleanup; dual quota; keep web alive
 18r40: /api/stop sets stop Event + double force_stop/browser kill; 18r35g clear running; StartBody.job_kind routes pending_sso_recovery to correct path (no accidental register); stop does NOT kill G2A/Sub2/CPA gateways.
 
 2026-07-18e: job metrics add pending_sso/skipped; progress regex parses extended
@@ -346,18 +349,54 @@ def _proxy_list_raw_text(cfg: Optional[Dict[str, Any]] = None) -> str:
     return ""
 
 
-def _sync_proxy_list_file(text: str, cfg: Optional[Dict[str, Any]] = None) -> str:
-    """Write proxy pool text to list file and keep config.proxy_list in sync."""
+def _sync_proxy_list_file(
+    text: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    allow_clear: bool = False,
+) -> str:
+    """Write proxy pool text to list file and keep config.proxy_list in sync.
+
+    Empty text never wipes an existing non-empty pool unless allow_clear=True.
+    Prevents put_config / mode-only updates from deleting socks5_proxies.txt.
+    """
     c = cfg if isinstance(cfg, dict) else engine.config
     cleaned_lines = []
     for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         s = line.strip()
-        if not s:
+        if not s or s.startswith("#"):
             continue
         cleaned_lines.append(s)
     body = ("\n".join(cleaned_lines) + "\n") if cleaned_lines else ""
     name = str(c.get("proxy_list_file") or "socks5_proxies.txt").strip() or "socks5_proxies.txt"
     path = Path(name) if os.path.isabs(name) else (ROOT / name)
+    if not cleaned_lines and not allow_clear:
+        existing = ""
+        try:
+            if path.is_file():
+                existing = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            existing = ""
+        exist_lines = [
+            ln.strip()
+            for ln in existing.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        if exist_lines:
+            _append_log(
+                f"[!] 拒绝用空 proxy_list 覆盖代理池文件（保留 {len(exist_lines)} 条）: {path.name}"
+            )
+            c["proxy_list"] = "\n".join(exist_lines)
+            if not os.path.isabs(name):
+                c["proxy_list_file"] = name
+            try:
+                if hasattr(engine, "_PROXY_POOL_CACHE"):
+                    engine._PROXY_POOL_CACHE = {"mtime": None, "path": None, "items": []}
+                if hasattr(engine, "load_proxy_list"):
+                    engine.load_proxy_list(c, force_reload=True)
+            except Exception:
+                pass
+            return c["proxy_list"] + ("\n" if c["proxy_list"] else "")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
@@ -645,12 +684,18 @@ def _run_job(count: int, job_kind: str = "register", workers: int = 1) -> None:
                 "aol_mail",
                 "outlook_mail",
                 "worker_coord",
+                "cpa_xai.proxyutil",
+                "cpa_xai.oauth_device",
+                "cpa_xai.protocol_mint",
+                "cpa_xai.browser_confirm",
+                "cpa_xai.mint",
+                "sso_to_auth_json",
+                "cpa_export",
                 "grok_register_ttk",
                 "browser.token_harvester",
                 "hybrid_register",
                 "pending_sso_recovery",
                 "sub2api_client",
-                "cpa_export",
             ):
                 try:
                     if _mod_name in _sys.modules:
@@ -674,6 +719,14 @@ def _run_job(count: int, job_kind: str = "register", workers: int = 1) -> None:
                     "aol_mail",
                     "sub2api_client",
                     "worker_coord",
+                    "cpa_xai.proxyutil",
+                    "cpa_xai.oauth_device",
+                    "cpa_xai.protocol_mint",
+                    "cpa_xai.browser_confirm",
+                    "cpa_xai.mint",
+                    "sso_to_auth_json",
+                    "cpa_export",
+                    "browser.token_harvester",
                     "grok_register_ttk",
                     "hybrid_register",
                 ):
@@ -688,8 +741,22 @@ def _run_job(count: int, job_kind: str = "register", workers: int = 1) -> None:
             try:
                 engine.config["workers"] = int(workers or 1)
                 engine.config["thread_count"] = int(workers or 1)
+                # 18r43d: seed multi post-success workers before first success enqueues
+                try:
+                    psw = int(engine.config.get("post_success_workers") or 0)
+                except Exception:
+                    psw = 0
+                if psw <= 0:
+                    psw = 6 if int(workers or 1) >= 10 else (3 if int(workers or 1) >= 4 else 1)
+                engine.config["post_success_workers"] = int(psw)
+                engine.config["post_success_async"] = True
             except Exception:
                 pass
+            try:
+                # start drain pool early so awaiting_pool does not lag under workers=20
+                engine.ensure_post_success_worker(log_callback=log_cb, workers=int(engine.config.get("post_success_workers") or 6))
+            except Exception as _ps_exc:
+                _append_log(f"[!] ensure_post_success_worker early fail: {_ps_exc}")
             result = engine.run_registration_job(
                 count, log_callback=log_cb, controller=controller, workers=workers
             )
@@ -1008,15 +1075,35 @@ async def api_get_config(x_access_key: Optional[str] = Header(None)):
 @app.put("/api/config")
 async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(None)):
     _require_auth(x_access_key)
-    engine.load_config()
-    updates = body.model_dump(exclude_unset=True)
-    # 18r33c: while job running, ignore critical keys so UI/other tools cannot thrash matrix cell
+    # 18r43k: while job running, snapshot locked cell keys BEFORE load_config so a dirty
+    # config.json (UI/other tools writing duckmail/airport/etc) cannot thrash the active matrix cell.
     JOB_LOCKED_CONFIG_KEYS = (
         "register_mode", "proxy_mode", "email_provider", "workers", "thread_count",
         "register_count", "proxy", "proxy_list",
     )
     with _job_lock:
         job_running = bool(_job_state.get("running"))
+    locked_snapshot = {}
+    if job_running:
+        for k in JOB_LOCKED_CONFIG_KEYS:
+            try:
+                if k in engine.config:
+                    locked_snapshot[k] = engine.config.get(k)
+            except Exception:
+                pass
+    engine.load_config()
+    if job_running and locked_snapshot:
+        restored = []
+        for k, v in locked_snapshot.items():
+            if engine.config.get(k) != v:
+                engine.config[k] = v
+                restored.append(k)
+        if restored:
+            _append_log(
+                f"[!] put_config restored locked keys after load_config while job running: {','.join(restored)}"
+            )
+    updates = body.model_dump(exclude_unset=True)
+    # 18r33c: while job running, ignore critical keys so UI/other tools cannot thrash matrix cell
     if job_running:
         blocked = [k for k in list(updates.keys()) if k in JOB_LOCKED_CONFIG_KEYS]
         for k in blocked:
@@ -1049,15 +1136,23 @@ async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(
         engine.config["proxy_reject_datacenter_org"] = True
         # Do not force entry hard-reject — white API entry is shared DC by design.
         engine.config["proxy_entry_hard_reject"] = False
-    # Web panel SOCKS5 pool: save textarea -> config + socks5_proxies.txt
-    if "proxy_list" in updates or str(engine.config.get("proxy_mode") or "").strip().lower() in (
-        "socks5_list",
-        "socks5_pool",
-        "proxy_list",
-        "list",
-        "socks5",
-    ):
-        _sync_proxy_list_file(str(engine.config.get("proxy_list") or ""), engine.config)
+    # Web panel SOCKS5 pool: only rewrite file when proxy_list is in the payload.
+    # Setting proxy_mode alone must not wipe socks5_proxies.txt with an empty list.
+    _proxy_mode = str(engine.config.get("proxy_mode") or "").strip().lower()
+    if "proxy_list" in updates:
+        raw_pl = str(engine.config.get("proxy_list") or "")
+        allow_clear = (not raw_pl.strip()) and bool(updates.get("_clear_proxy_list"))
+        _sync_proxy_list_file(raw_pl, engine.config, allow_clear=allow_clear)
+    elif _proxy_mode in ("socks5_list", "socks5_pool", "proxy_list", "list", "socks5"):
+        if not str(engine.config.get("proxy_list") or "").strip():
+            try:
+                hydrated = _proxy_list_raw_text(engine.config)
+                n = len([x for x in hydrated.splitlines() if x.strip()])
+                if n:
+                    engine.config["proxy_list"] = hydrated.rstrip("\n")
+                    _append_log(f"[+] proxy_list 已从文件回填 {n} 条")
+            except Exception as exc:
+                _append_log(f"[!] proxy_list 文件回填失败: {exc}")
     # Outlook account pool: keep textarea + outlook_accounts.txt in sync
     if "outlook_accounts" in updates:
         raw = str(engine.config.get("outlook_accounts") or "")
@@ -1101,6 +1196,16 @@ async def api_status(x_access_key: Optional[str] = Header(None)):
     _require_auth(x_access_key)
     with _job_lock:
         state = dict(_job_state)
+    # 18r43l: while backlog exists, re-ensure post-success workers (scale-up + replace dead)
+    # so awaiting_pool keeps draining even when register successes stall on waiting_code.
+    try:
+        psw = int(engine.config.get("post_success_workers") or 6)
+    except Exception:
+        psw = 6
+    try:
+        engine.ensure_post_success_worker(log_callback=None, workers=max(1, min(16, psw)))
+    except Exception:
+        pass
     # awaiting_pool: success accounts still in post-success queue (G2A/Sub2/CPA)
     try:
         awaiting = int(engine.get_awaiting_pool_count())
@@ -1112,6 +1217,12 @@ async def api_status(x_access_key: Optional[str] = Header(None)):
             awaiting = int(state.get("awaiting_pool") or 0)
     state["awaiting_pool"] = awaiting
     state["pending_pool"] = awaiting  # alias
+    try:
+        pending, unfinished = engine.get_post_success_queue_depth()
+        state["post_success_pending"] = int(pending or 0)
+        state["post_success_unfinished"] = int(unfinished or 0)
+    except Exception:
+        pass
     return {"ok": True, **state}
 
 
@@ -1215,10 +1326,11 @@ async def api_start(body: StartBody, x_access_key: Optional[str] = Header(None))
 
 @app.post("/api/stop")
 async def api_stop(x_access_key: Optional[str] = Header(None)):
-    """Stop ONLY registration/pending jobs + browsers.
+    """Stop ONLY registration/pending jobs + script browsers.
 
-    18r40: set stop Event first, force_stop twice (browsers/preflight/workers),
-    clear running immediately so UI/status clears. Never touch G2A/Sub2/CPA.
+    18r43n: clear running immediately; signal stop; heavy browser kill runs in a
+    background thread so /api/status stays reachable. Never kill web server /
+    G2A / Sub2API / CPA / user Edge.
     """
     global _controller
     _require_auth(x_access_key)
@@ -1226,68 +1338,77 @@ async def api_stop(x_access_key: Optional[str] = Header(None)):
         ctrl = _controller
         running = bool(_job_state.get("running"))
         job_kind = str(_job_state.get("job_kind") or "")
-        # Clear running flag immediately so /api/status and new starts work.
         if running:
             _job_state["running"] = False
             _job_state["phase"] = "stopping"
             _job_state["finished_at"] = time.time()
             _job_state["updated_at"] = time.time()
-            _job_state["last_event"] = "[!] stop requested — clearing running flag (18r40)"
-    _append_log("[!] stop requested from web (18r40 stop_event + double force_stop)")
-    try:
-        # 1) signal workers ASAP
-        if ctrl is not None:
+            _job_state["last_event"] = "[!] stop requested - clearing running flag (18r43n)"
+        # detach controller so new starts are not blocked
+        if _controller is ctrl:
+            _controller = None
+    _append_log("[!] stop requested from web (18r43n non-blocking cleanup)")
+
+    def _cleanup_stop(ctrl_obj) -> None:
+        try:
+            if ctrl_obj is not None:
+                try:
+                    if hasattr(ctrl_obj, "stop_requested"):
+                        ctrl_obj.stop_requested = True
+                except Exception:
+                    pass
+                try:
+                    ctrl_obj.stop(force_cleanup=True)
+                except TypeError:
+                    try:
+                        ctrl_obj.stop()
+                    except Exception:
+                        pass
+                except Exception as _se:
+                    _append_log(f"[!] controller.stop error: {_se}")
             try:
-                # set flag without waiting cleanup first
-                if hasattr(ctrl, "stop_requested"):
-                    ctrl.stop_requested = True
+                engine.force_stop_registration(
+                    log_callback=_append_log, reason="web_stop_18r43n_pass1"
+                )
+            except Exception as _e1:
+                _append_log(f"[!] stop pass1 error: {_e1}")
+            try:
+                time.sleep(0.5)
             except Exception:
                 pass
             try:
-                ctrl.stop(force_cleanup=True)
-            except TypeError:
-                try:
-                    ctrl.stop()
-                except Exception:
-                    pass
-            except Exception as _se:
-                _append_log(f"[!] controller.stop error: {_se}")
-        # 2) hard-kill browsers/preflight
-        engine.force_stop_registration(
-            log_callback=_append_log, reason="web_stop_18r40_pass1"
+                engine.force_stop_registration(
+                    log_callback=_append_log, reason="web_stop_18r43n_pass2"
+                )
+            except Exception as _e2:
+                _append_log(f"[!] stop pass2 error: {_e2}")
+            try:
+                if hasattr(engine, "force_kill_registration_browsers"):
+                    engine.force_kill_registration_browsers(log_callback=_append_log)
+            except Exception:
+                pass
+        except Exception as exc:
+            _append_log(f"[!] stop cleanup error: {exc}")
+        finally:
+            with _job_lock:
+                if _job_state.get("phase") == "stopping":
+                    _job_state["phase"] = "idle"
+                    _job_state["running"] = False
+                    _job_state["updated_at"] = time.time()
+                    _job_state["last_event"] = "[!] stop complete - job idle (gateways/web untouched) 18r43n"
+
+    try:
+        th = threading.Thread(
+            target=_cleanup_stop,
+            args=(ctrl,),
+            name="web-stop-cleanup-18r43n",
+            daemon=True,
         )
-        # 3) brief wait then second kill for late-spawned chromium
-        try:
-            time.sleep(0.8)
-        except Exception:
-            pass
-        try:
-            engine.force_stop_registration(
-                log_callback=_append_log, reason="web_stop_18r40_pass2"
-            )
-        except Exception as _e2:
-            _append_log(f"[!] stop pass2 error: {_e2}")
-        try:
-            if hasattr(engine, "force_kill_registration_browsers"):
-                engine.force_kill_registration_browsers(log_callback=_append_log)
-        except Exception:
-            pass
+        th.start()
     except Exception as exc:
-        _append_log(f"[!] stop cleanup error: {exc}")
-        try:
-            engine.force_stop_registration(
-                log_callback=_append_log, reason="web_stop_exception"
-            )
-        except Exception:
-            pass
-    with _job_lock:
-        # If job thread already finished, keep its totals; only fix stuck state.
-        if _controller is ctrl:
-            _controller = None
-        if _job_state.get("phase") == "stopping":
-            _job_state["phase"] = "idle"
-            _job_state["updated_at"] = time.time()
-            _job_state["last_event"] = "[!] stop complete — job idle (gateways untouched) 18r40"
+        _append_log(f"[!] stop thread spawn fail, sync fallback: {exc}")
+        _cleanup_stop(ctrl)
+
     return {
         "ok": True,
         "stopped": True,
@@ -1296,9 +1417,9 @@ async def api_stop(x_access_key: Optional[str] = Header(None)):
         "job_kind": job_kind,
         "running_now": False,
         "detail": (
-            "stopped: running cleared + double browser cleanup; gateways kept alive"
+            "stopped: running cleared; browser cleanup async; gateways/web kept alive"
             if running or ctrl is not None
-            else "no running job (browser cleanup attempted; gateways untouched)"
+            else "no running job (browser cleanup async; gateways/web untouched)"
         ),
     }
 

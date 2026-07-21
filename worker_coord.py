@@ -1,3 +1,7 @@
+# 18r43n: dual halt success>=target OR slots>=target; success never overshoots
+# 18r43m: claim_mode=attempt hard-cap slots_started<=target
+# 18r43i: log success-based claim_mode on JobCoordinator init
+# 18r43g: claim_slot targets success count (pending/fail do not end job early)
 # -*- coding: utf-8 -*-
 """Multi-worker coordination for grok-regkit (18r30 multithread, 18r41 exclusivity).
 
@@ -29,6 +33,7 @@ class JobCoordinator:
         *,
         log: Optional[LogFn] = None,
         max_switch_mailbox: int = 0,
+        claim_mode: str = "attempt",
     ):
         self.target = max(0, int(target or 0))
         self.log = log or (lambda _m: None)
@@ -43,6 +48,14 @@ class JobCoordinator:
         self.switch_mailbox_tries = 0
         self.active_workers = 0
         self._stop_extra = False
+        mode = str(claim_mode or "attempt").strip().lower()
+        self.claim_mode = "success" if mode in ("success", "success_based", "ok") else "attempt"
+        try:
+            self.log(
+                f"[coord] attempt_target={self.target} claim_mode={getattr(self, "claim_mode", "attempt")} hard_cap={self.target} (18r43m)"
+            )
+        except Exception:
+            pass
 
     def worker_enter(self) -> None:
         with self._lock:
@@ -53,12 +66,29 @@ class JobCoordinator:
             self.active_workers = max(0, self.active_workers - 1)
 
     def claim_slot(self) -> Optional[int]:
-        """Return 1-based slot number, or None if target reached / pool empty / stop_extra."""
+        """Return 1-based attempt number, or None if quota reached / pool empty / stop_extra.
+
+        18r43n dual (default/attempt):
+          - hard stop when slots_started >= target (never run 1600 for count=1000)
+          - also stop when success >= target (注册数量=注册成功数量 ceiling)
+        Legacy claim_mode=success: keep going until success>=target with soft max_attempts=target*8.
+        """
         with self._lock:
             if self._stop_extra or self.pool_empty:
                 return None
-            if self._slots_started >= self.target:
+            if int(self.success or 0) >= self.target > 0:
+                self._stop_extra = True
                 return None
+            mode = str(getattr(self, "claim_mode", "attempt") or "attempt").strip().lower()
+            if mode in ("success", "success_based", "ok"):
+                max_attempts = max(self.target * 8, self.target + 50)
+                if self._slots_started >= max_attempts:
+                    self._stop_extra = True
+                    return None
+            else:
+                # attempt / dual: register_count is both attempt budget and success ceiling
+                if self._slots_started >= self.target:
+                    return None
             self._slots_started += 1
             return self._slots_started
 
@@ -76,7 +106,13 @@ class JobCoordinator:
 
     def record_success(self) -> None:
         with self._lock:
+            # 18r43n: never overshoot success past register_count
+            if self.target > 0 and int(self.success or 0) >= self.target:
+                self._stop_extra = True
+                return
             self.success += 1
+            if self.target > 0 and int(self.success or 0) >= self.target:
+                self._stop_extra = True
 
     def record_fail(self) -> None:
         with self._lock:
@@ -98,7 +134,15 @@ class JobCoordinator:
 
     def should_halt(self) -> bool:
         with self._lock:
-            return bool(self._stop_extra or self.pool_empty)
+            if self._stop_extra or self.pool_empty:
+                return True
+            if self.target > 0 and int(self.success or 0) >= self.target:
+                return True
+            mode = str(getattr(self, "claim_mode", "attempt") or "attempt").strip().lower()
+            if mode in ("success", "success_based", "ok"):
+                max_attempts = max(self.target * 8, self.target + 50)
+                return self._slots_started >= max_attempts
+            return self._slots_started >= self.target
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:

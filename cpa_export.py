@@ -19,6 +19,7 @@ Changelog:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import time
@@ -91,6 +92,76 @@ def _cpa_export_enabled(cfg: dict) -> bool:
         return True
     # default on when neither key set to False
     return bool(cfg.get("cpa_export_enabled", True))
+
+
+
+def _resolve_cpa_proxy_candidates(cfg: dict, primary: str = "") -> list[str]:
+    """Build SOCKS/proxy candidate list for CPA mint (primary first, max 8)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(v: str) -> None:
+        p = (v or "").strip()
+        if not p or p.lower() in {"direct", "none", "off", "false", "0"}:
+            return
+        # host:port:user:pass -> socks5h://user:pass@host:port
+        try:
+            from cpa_xai.proxyutil import canonicalize_proxy_url
+            p2 = canonicalize_proxy_url(p)
+            if p2:
+                p = p2
+        except Exception:
+            try:
+                from grok_register_ttk import parse_proxy_endpoint_line
+                p2 = parse_proxy_endpoint_line(p)
+                if p2:
+                    p = p2
+            except Exception:
+                pass
+        if p in seen:
+            return
+        seen.add(p)
+        out.append(p)
+
+    _add(primary)
+    raw = cfg.get("cpa_proxy_candidates") or cfg.get("proxy_candidates") or []
+    if isinstance(raw, str):
+        for part in re.split(r"[\r\n;,]+", raw):
+            _add(part)
+    elif isinstance(raw, (list, tuple)):
+        for part in raw:
+            _add(str(part))
+    # optional file: socks5_proxies.txt / proxy_list_file under project
+    for key in ("cpa_proxy_list_file", "proxy_list_file", "socks5_proxy_file"):
+        fp = str(cfg.get(key) or "").strip()
+        if not fp:
+            continue
+        path = Path(fp).expanduser()
+        if not path.is_absolute():
+            path = (_REG_DIR / path).resolve()
+        if path.is_file():
+            try:
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    _add(line)
+            except Exception:
+                pass
+    # default project socks5_proxies.txt
+    default_socks = _REG_DIR / "socks5_proxies.txt"
+    if default_socks.is_file() and len(out) < 8:
+        try:
+            for line in default_socks.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                _add(line)
+                if len(out) >= 8:
+                    break
+        except Exception:
+            pass
+    return out[:8]
 
 
 def _jwt_payload(token: str) -> dict:
@@ -227,6 +298,7 @@ def _mint_via_authcode(
     out_dir: Path,
     proxy: str,
     log: Callable[[str], None],
+    proxy_candidates: list[str] | None = None,
 ) -> dict:
     """Authorization Code + PKCE mint (referrer=grok-build). Upstream fusion."""
     try:
@@ -242,7 +314,13 @@ def _mint_via_authcode(
         # upstream uses emoji; keep prefix consistent
         log(msg if msg.startswith("[cpa]") or msg.startswith("  ") else f"  {msg}")
 
-    token = sso_to_token(sso, proxy=proxy or "", log=_ulog)
+    token = sso_to_token(
+        sso,
+        proxy=proxy or "",
+        proxy_candidates=proxy_candidates,
+        log=_ulog,
+        allow_direct_fallback=True,
+    )
     if not token or not token.get("access_token"):
         return {"ok": False, "error": "authcode mint returned no token"}
     ref = access_token_referrer(str(token.get("access_token") or ""))
@@ -306,6 +384,11 @@ def export_cpa_xai_for_account(
             or os.environ.get("http_proxy")
             or ""
         ).strip()
+    candidates = _resolve_cpa_proxy_candidates(cfg, proxy)
+    if candidates and not proxy:
+        proxy = candidates[0]
+    if candidates:
+        log(f"[cpa] proxy candidates={len(candidates)} primary={proxy or '(none)'}")
     # Default headed: headless is frequently Cloudflare-blocked on accounts.x.ai
     headless = bool(cfg.get("cpa_headless", False))
     probe = bool(cfg.get("cpa_probe_after_write", True))
@@ -377,6 +460,7 @@ def export_cpa_xai_for_account(
             out_dir=out_dir,
             proxy=proxy or "",
             log=log,
+            proxy_candidates=candidates,
         )
         if ac.get("ok") and ac.get("path"):
             result = ac

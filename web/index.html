@@ -106,6 +106,29 @@
     .page-sub { font-size: 13px; color: var(--muted); margin-top: 5px; }
     .page-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
+    /* Always-visible service entry bar (independent 8092; not only embed parent nav) */
+    .services-nav {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      margin: 0 0 14px; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: var(--radius);
+      background: #fff; box-shadow: var(--shadow);
+    }
+    .services-nav .nav-label {
+      font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--muted); margin-right: 4px;
+    }
+    .services-nav a.nav-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 28px; padding: 0 11px; border-radius: 999px;
+      border: 1px solid var(--border-soft); background: var(--soft);
+      font-size: 12px; font-weight: 600; text-decoration: none; color: var(--text);
+    }
+    .services-nav a.nav-link:hover { background: #efe9dc; border-color: #ddd4c2; }
+    .services-nav a.nav-link .port { color: var(--muted); font-weight: 500; font-size: 11px; }
+    .services-nav a.nav-link.current { background: #111; border-color: #111; color: #fff; }
+    .services-nav a.nav-link.current .port { color: #cfcfcf; }
+    body.embed-mode .services-nav { margin-bottom: 10px; padding: 8px 10px; }
+
     .status-chip {
       display: inline-flex; align-items: center; gap: 8px;
       height: 32px; padding: 0 12px; border-radius: 999px;
@@ -312,10 +335,19 @@
   </div>
 
   <div class="page">
+    <nav class="services-nav" aria-label="本机关联服务入口">
+      <span class="nav-label">入口</span>
+      <a class="nav-link current" href="http://127.0.0.1:8092/" title="注册控制台"><span>注册机</span><span class="port">:8092</span></a>
+      <a class="nav-link" href="http://127.0.0.1:8010/admin/account" target="_blank" rel="noopener" title="Python G2A 生产号池"><span>G2A 生产</span><span class="port">:8010</span></a>
+      <a class="nav-link" href="http://127.0.0.1:8020/login" target="_blank" rel="noopener" title="Go G2A v3 旁路"><span>G2A Go</span><span class="port">:8020</span></a>
+      <a class="nav-link" href="http://127.0.0.1:8011/" target="_blank" rel="noopener" title="regkit → G2A v3 bridge"><span>Bridge</span><span class="port">:8011</span></a>
+      <a class="nav-link" href="http://127.0.0.1:8080/" target="_blank" rel="noopener" title="Sub2API 号池"><span>Sub2API</span><span class="port">:8080</span></a>
+      <a class="nav-link" href="#section-pool" title="本页 SSO/Sub2 联动区"><span>本页号池</span></a>
+    </nav>
     <div class="page-hd">
       <div>
         <div class="page-title">注册账号</div>
-        <div class="page-sub">启动前会自动保存配置 · 成功后可写入 SSO 号池</div>
+        <div class="page-sub">启动前会自动保存配置 · 成功后可写入 G2A/Sub2 号池 · 顶部可打开全部关联入口</div>
       </div>
       <div class="page-actions">
         <span class="status-chip">
@@ -751,7 +783,7 @@
         </div>
 
         <!-- SSO 号池入池 -->
-        <div class="section">
+        <div class="section" id="section-pool">
           <div class="section-head">
             <div>
               <div class="section-title">SSO 号池</div>
@@ -799,6 +831,8 @@
             <button id="unlinkG2aBtn" class="btn" type="button">关闭自动入池</button>
             <button id="refreshG2aBtn" class="btn btn-ghost" type="button">刷新状态</button>
             <a id="openG2aBtn" class="btn" href="http://127.0.0.1:8010/admin/account" target="_blank" rel="noopener">打开账号池</a>
+              <a id="openG2aGoBtn" class="btn" href="http://127.0.0.1:8020/login" target="_blank" rel="noopener">打开 G2A Go :8020</a>
+              <a id="openBridgeBtn" class="btn" href="http://127.0.0.1:8011/" target="_blank" rel="noopener">打开 Bridge :8011</a>
           </div>
           <div class="soft-box" style="margin-top:14px">
             <div class="section-head" style="margin-bottom:10px;padding:0">

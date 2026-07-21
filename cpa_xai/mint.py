@@ -9,7 +9,7 @@ from typing import Any, Callable
 from .browser_confirm import mint_with_browser
 from .probe import probe_mini_response, probe_models
 from .protocol_mint import ProtocolMintError, extract_sso_from_cookies, mint_with_sso_protocol
-from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
+from .proxyutil import is_proxy_transport_error, normalize_proxy_candidates, proxy_log_label, resolve_proxy, set_runtime_proxy
 from .schema import DEFAULT_BASE_URL, build_cpa_xai_auth
 from .writer import write_cpa_xai_auth
 
@@ -42,6 +42,7 @@ def mint_and_export(
     protocol_poll_timeout_sec: float = 90.0,
     log: LogFn | None = None,
     cancel: Callable[[], bool] | None = None,
+    proxy_candidates: list[str] | None = None,
 ) -> dict[str, Any]:
     """Full pipeline: (protocol SSO device-flow |) browser device-auth → write CPA → probe.
 
@@ -65,6 +66,7 @@ def mint_and_export(
     resolved = resolve_proxy(proxy)
     set_runtime_proxy(resolved or None)
     log(f"mint start: {email} proxy={proxy_log_label(resolved) or '(none)'}")
+    candidates = normalize_proxy_candidates(resolved or proxy, proxy_candidates, max_n=8)
 
     sso_val = (sso or "").strip() or extract_sso_from_cookies(cookies)
     tokens: dict[str, Any] | None = None
@@ -80,10 +82,12 @@ def mint_and_export(
                     sso_cookie=sso_val,
                     email=email,
                     proxy=resolved or None,
+                    proxy_candidates=candidates,
                     cookies=cookies,
                     poll_timeout_sec=protocol_poll_timeout_sec,
                     log=log,
                     cancel=cancel,
+                    allow_direct_fallback=True,
                 )
                 log("mint protocol SUCCESS")
                 protocol_err = None
@@ -97,6 +101,9 @@ def mint_and_export(
                     log(f"mint protocol rate-limited, sleep {wait}s before retry")
                     time.sleep(wait)
                     continue
+                if is_proxy_transport_error(e) or "socks" in el or "curl: (97)" in el:
+                    log("mint protocol proxy transport fail — will fall back browser with candidates")
+                    break
                 break
             except Exception as e:  # noqa: BLE001
                 protocol_err = str(e)
@@ -137,6 +144,7 @@ def mint_and_export(
                 password=password,
                 page=None if force_standalone else page,
                 proxy=resolved or None,
+                proxy_candidates=candidates,
                 headless=headless,
                 browser_timeout_sec=browser_timeout_sec,
                 force_standalone=force_standalone,

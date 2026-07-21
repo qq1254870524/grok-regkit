@@ -1194,6 +1194,7 @@ def mint_with_browser(
     password: str,
     page: Any | None = None,
     proxy: str | None = None,
+    proxy_candidates: list[str] | None = None,
     headless: bool = False,
     browser_timeout_sec: float = 240.0,
     poll_log: LogFn | None = None,
@@ -1210,7 +1211,7 @@ def mint_with_browser(
     cookies: optional register-browser cookie list to skip re-login.
     """
     from .oauth_device import OAuthDeviceError, poll_device_token, request_device_code
-    from .proxyutil import proxy_log_label, resolve_proxy, set_runtime_proxy
+    from .proxyutil import normalize_proxy_candidates, proxy_log_label, resolve_proxy, set_runtime_proxy
 
     log = poll_log or _noop_log
     own_browser = None
@@ -1218,11 +1219,12 @@ def mint_with_browser(
     work_page = None if force_standalone else page
     resolved = resolve_proxy(proxy)
     set_runtime_proxy(resolved or None)
+    candidates = normalize_proxy_candidates(resolved or proxy, proxy_candidates, max_n=8)
     success = False
     try:
         # request_device_code owns classified retries; do not multiply them here.
         try:
-            sess = request_device_code(proxy=resolved or None, log=log, allow_direct_fallback=True, network_attempts=2)
+            sess = request_device_code(proxy=resolved or None, proxy_candidates=candidates, log=log, allow_direct_fallback=True, prefer_direct_first=True, network_attempts=1)
         except BaseException as e:  # noqa: BLE001
             log(f"request_device_code failed after internal retries: {type(e).__name__}: {e}")
             raise
@@ -1270,6 +1272,8 @@ def mint_with_browser(
                     expires_in=min(sess.expires_in, int(browser_timeout_sec) + 60),
                     log=log,
                     cancel=cancel,
+                    proxy_candidates=candidates,
+                    allow_direct_fallback=True,
                     proxy=resolved or None,
                 )
                 token_box["token"] = tr

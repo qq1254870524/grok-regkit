@@ -1,3 +1,5 @@
+# 18r43n: _resolve_runtime_config auto-load admin creds when config empty
+# 18r43f: Sub2API verify fail-fast on permanent permission-denied (drain awaiting_pool)
 # 18r42d: reject mail_token/wrapper as SSO; collect only session SSO from account files
 # 18r35f: treat Sub2API 'SSO already exists; not overwritten' as idempotent success
 #!/usr/bin/env python3
@@ -562,6 +564,29 @@ class Sub2APIClient:
                 f"[!] Sub2API 可用性验证未通过 account_id={account_id_text} "
                 f"attempt={attempt}/{max_attempts} detail={last_error}{hint}",
             )
+            # 18r43f: permanent Grok chat/permission denials never become ok by retry;
+            # fail-fast so multi post-success workers are not blocked 105s*N each.
+            _err_l = str(last_error or "").lower()
+            if any(
+                x in _err_l
+                for x in (
+                    "permission-denied",
+                    "access to the chat endpoint is denied",
+                    "chat endpoint is denied",
+                    "not allowed to use",
+                    "account disabled",
+                    "account suspended",
+                    "invalid_sso",
+                    "sso invalid",
+                )
+            ):
+                return {
+                    "ok": False,
+                    "account_id": account_id,
+                    "attempts": attempt,
+                    "error": last_error,
+                    "permanent": True,
+                }
             if attempt < max_attempts and retry_delay > 0:
                 time.sleep(retry_delay)
 
@@ -1234,6 +1259,39 @@ class Sub2APIClient:
         raise RuntimeError(f"Sub2API 入池重试耗尽 last_error={last_error[:300]}")
 
 
+def _resolve_runtime_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """18r43n: never run Sub2 import with empty config (admin email missing)."""
+    cfg: Dict[str, Any] = dict(config or {})
+    if str(cfg.get("sub2api_admin_email") or "").strip() and str(cfg.get("sub2api_admin_password") or ""):
+        return cfg
+    try:
+        import grok_register_ttk as _engine
+        try:
+            _engine.load_config()
+        except Exception:
+            pass
+        eng = getattr(_engine, "config", None)
+        if isinstance(eng, dict):
+            merged = {**eng, **{k: v for k, v in cfg.items() if v not in (None, "")}}
+            if str(merged.get("sub2api_admin_email") or "").strip():
+                return merged
+            cfg = merged
+    except Exception:
+        pass
+    for path in (Path(__file__).resolve().parent / "config.json", _project_root() / "config.json"):
+        try:
+            if path.is_file():
+                disk = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(disk, dict):
+                    merged = {**disk, **{k: v for k, v in cfg.items() if v not in (None, "")}}
+                    if str(merged.get("sub2api_admin_email") or "").strip():
+                        return merged
+                    cfg = merged
+        except Exception:
+            continue
+    return cfg
+
+
 def _client_cache_key(config: Dict[str, Any]) -> str:
     raw = "\0".join(
         [
@@ -1251,6 +1309,7 @@ def get_client(
     *,
     force_new: bool = False,
 ) -> Sub2APIClient:
+    config = _resolve_runtime_config(config)
     key = _client_cache_key(config)
     with _CLIENTS_LOCK:
         client = None if force_new else _CLIENTS.get(key)
@@ -1767,7 +1826,7 @@ def process_sub2api_pending_file(
     limit: int = 0,
 ) -> Dict[str, Any]:
     """Retry failed Sub2 imports recorded in sub2api_import_pending.jsonl."""
-    cfg = config or {}
+    cfg = _resolve_runtime_config(config)
     path = _pending_path(cfg)
     summary: Dict[str, Any] = {"path": str(path), "ok": 0, "fail": 0, "skipped": 0, "remaining": 0}
     if not path.is_file():
@@ -1970,16 +2029,16 @@ def backfill_missing_sub2api_from_cpa_and_sso(
     prefer_cpa: bool = True,
 ) -> Dict[str, Any]:
     """Import G2A emails missing from Sub2API using CPA files first, else SSO token."""
-    cfg = config or {}
+    cfg = _resolve_runtime_config(config)
     log = log_callback
     tok_path = _project_root() / "token.json"
-    raw = json.loads(tok_path.read_text(encoding="utf-8"))
+    raw = json.loads(tok_path.read_text(encoding="utf-8")) if tok_path.is_file() else {}
     pool = str(cfg.get("grok2api_pool_name") or "ssoBasic")
     entries = raw.get(pool) if isinstance(raw, dict) else []
     if not isinstance(entries, list):
-        raise RuntimeError("token.json pool missing")
+        entries = []
 
-    # map email -> sso
+    # map email -> sso (token.json + accounts*.txt session SSO) 18r43n
     email_sso: Dict[str, str] = {}
     for ent in entries:
         if not isinstance(ent, dict):
@@ -2005,6 +2064,44 @@ def backfill_missing_sub2api_from_cpa_and_sso(
                     break
         if em and "@" in em and sso:
             email_sso[em] = sso
+
+    # 18r43n: harvest session SSO from accounts*.txt (not only token.json)
+    try:
+        from grok_register_ttk import _is_importable_session_sso as _is_sess
+    except Exception:
+        _is_sess = None  # type: ignore
+    for apath in sorted(_project_root().glob("accounts*.txt"), key=lambda p: p.stat().st_mtime):
+        try:
+            for ln in apath.read_text(encoding="utf-8", errors="ignore").splitlines():
+                s = (ln or "").strip()
+                if not s or s.startswith("#"):
+                    continue
+                parts = s.split("----")
+                if len(parts) < 2:
+                    continue
+                em = parts[0].strip().lower()
+                if "@" not in em:
+                    continue
+                tok = ""
+                for part in reversed(parts):
+                    cand = part.strip()
+                    if not cand:
+                        continue
+                    ok = False
+                    if _is_sess is not None:
+                        try:
+                            ok = bool(_is_sess(cand))
+                        except Exception:
+                            ok = False
+                    else:
+                        ok = cand.count(".") == 2 and 40 <= len(cand) <= 800
+                    if ok:
+                        tok = cand
+                        break
+                if tok:
+                    email_sso[em] = tok
+        except Exception:
+            continue
 
     client = get_client(cfg, log_callback=log)
     token = client.login(force=True)
